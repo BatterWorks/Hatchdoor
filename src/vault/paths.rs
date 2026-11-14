@@ -21,12 +21,66 @@ pub fn unique_slug(base: &str, by_slug: &HashMap<String, NoteEntry>) -> String {
     }
 }
 
+/// The key a title or path is compared under when case does not count.
+///
+/// NFC first, so a name a Mac stored decomposed (Hangul jamo, kana with a
+/// separate voicing mark) meets the composed spelling a keyboard types (#626).
 pub fn normalize_title(input: &str) -> String {
-    input.trim().to_lowercase()
+    nfc_title(input).to_lowercase()
 }
 
+/// A title or path as it is compared when case counts: trimmed and
+/// NFC-normalised, and nothing else (#626).
+pub fn nfc_title(input: &str) -> String {
+    input.trim().nfc().collect()
+}
+
+/// The slug a note named `stem` claims before any collision suffix: its
+/// NFC-normalised name folded by [`slugify`], or `untitled` when nothing
+/// survives the fold. The indexer and the write layer both derive a note's
+/// slug from this, so they cannot disagree about a decomposed filename.
+pub fn note_slug_base(stem: &str) -> String {
+    let slug = slugify(&nfc_title(stem));
+    if slug.is_empty() {
+        "untitled".to_string()
+    } else {
+        slug
+    }
+}
+
+/// Whether a path names a note: its extension is `md` in any case. The one
+/// answer to "is this a note?" for the index and the write layer alike (#247,
+/// #637), so a `Report.MD` the index lists is a note the write tools accept.
+pub fn is_note_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("md"))
+}
+
+/// Whether a walk may skip the entry `error` names and carry on: a folder or
+/// file this process may not open, or one deleted while the walk was on its
+/// way (#637). Any other error, such as a share's I/O error, fails the walk
+/// as before, so a passing fault is retried rather than read as notes
+/// disappearing. An unreadable Vault root is never skipped.
+pub(crate) fn walk_error_costs_only_itself(error: &walkdir::Error) -> bool {
+    error.depth() > 0
+        && error.io_error().is_some_and(|error| {
+            matches!(
+                error.kind(),
+                std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::NotFound
+            )
+        })
+}
+
+/// `input` without a trailing `.md`, matched in any case like
+/// [`is_note_path`], so `Report.MD` and `Report.md` both become `Report`.
 pub fn strip_md_extension(input: &str) -> &str {
-    input.strip_suffix(".md").unwrap_or(input)
+    match input.len().checked_sub(3) {
+        Some(stem) if input.is_char_boundary(stem) && input[stem..].eq_ignore_ascii_case(".md") => {
+            &input[..stem]
+        }
+        _ => input,
+    }
 }
 
 pub fn normalize_link_target(input: &str) -> String {
@@ -283,9 +337,13 @@ pub fn folder_distance(note_dir: &str, candidate: &str) -> usize {
 /// path the route would then refuse: a resolved embed that 404s is worse than
 /// an unresolved one, because it looks like a broken file rather than a
 /// broken link.
+///
+/// `canvas` is Obsidian's whiteboard file. It is served as a download and
+/// never drawn, and the catalogue is how a rename finds the canvases to
+/// repair (ADR-53).
 pub fn servable_asset_extensions() -> &'static [&'static str] {
     &[
-        "png", "jpg", "jpeg", "gif", "webp", "svg", "avif", "bmp", "pdf",
+        "png", "jpg", "jpeg", "gif", "webp", "svg", "avif", "bmp", "pdf", "canvas",
     ]
 }
 

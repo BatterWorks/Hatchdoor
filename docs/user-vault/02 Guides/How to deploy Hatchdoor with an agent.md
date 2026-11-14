@@ -194,6 +194,8 @@ On Linux with an existing notes folder, also let user `65532` read and write it,
 sudo setfacl -R -m u:65532:rwX -m d:u:65532:rwX "$NOTES"
 ```
 
+A note Hatchdoor edits then belongs to user `65532`, because only root may hand a file to another user. Its former owner keeps the access they had through an entry Hatchdoor adds to the note's access list, so they can still open and save it.
+
 Many Linux systems do not have `setfacl` installed. If it is missing, leave the folder's permissions alone; do not install it or change the folder's owner. Hatchdoor can usually still read the notes, so search works, but neither the browser nor an agent can change them. Step 5 shows whether that happened, and step 7 says how to tell the user. macOS and Windows need neither command; Docker Desktop handles access.
 
 Start Hatchdoor:
@@ -313,7 +315,7 @@ curl -sf -X POST "$HD/api/v1/vaults" \
 until curl -sf "$HD/ready" >/dev/null; do sleep 5; done
 ```
 
-On Windows, expect the long end of that. After the model's download has finished, loading it took about 17 minutes on a slow test computer. All that time `/ready` answers `503` and the Vault shows `"search": "unavailable"`. `docker logs hatchdoor` says `Search model is still loading` every 30 seconds, with the time it has taken so far. That is slow, not stuck. Keep waiting: if your tool ends a command that runs too long, run the same wait again. Do not restart the container, because that starts the loading over. Stop waiting only when the Vault list, read with the next command, shows an error, or the log has a line that starts `Model download/load failed`. That line means the download broke and Hatchdoor has given up on it. Start it again without restarting the container, then go back to waiting:
+On Windows, expect the long end of that. After the model's download has finished, loading it took about 17 minutes on a slow test computer. All that time `/ready` answers `503` and the Vault shows `"search": "unavailable"`. `docker logs hatchdoor` says `Search model is still loading` every 30 seconds, with the time it has taken so far. That is slow, not stuck. Keep waiting: if your tool ends a command that runs too long, run the same wait again. Do not restart the container, because that starts the loading over. While the model downloads, the log says `Search model is still downloading` every 30 seconds instead, and `GET $HD/api/startup-status` shows `"step": "download"` with the bytes so far; once it is loading, `"step": "load"`. A download that receives no data for 60 seconds is stopped. Stop waiting only when the Vault list, read with the next command, shows an error, or the log has a line that starts `Model download/load failed`. That line means the download broke or stalled and Hatchdoor has given up on it. Start it again without restarting the container; it continues from the files already fetched. Then go back to waiting:
 
 ```bash
 curl -sf -X POST "$HD/api/model/retry" -H "Authorization: Bearer $WEB_TOKEN"

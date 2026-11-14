@@ -436,6 +436,15 @@ impl VaultWorkCoordinator {
             .any(|(queued, lane)| *lane == Lane::Index && *queued != vault_id)
     }
 
+    /// Whether `vault_id`'s running turn should stop at its next safe point:
+    /// the Vault is drained, or the coordinator is shutting down. A long Index
+    /// turn asks this before each chunk (#640), so Pause, a settings edit,
+    /// disconnect and SIGTERM wait for one chunk rather than the whole pass.
+    pub fn vault_is_stopping(&self, vault_id: VaultId) -> bool {
+        let state = self.shared.state.lock().expect("Vault work queue poisoned");
+        !state.accepting_work || state.drained_vaults.contains(&vault_id)
+    }
+
     /// Where `vault_id`'s indexing stands: running, waiting for its turn, or
     /// `None` when it has no Index or Repair work at all.
     pub fn index_lane_state(&self, vault_id: VaultId) -> Option<IndexLaneState> {
@@ -522,23 +531,27 @@ impl VaultWorkCoordinator {
     /// Reopen a Vault after runtime activation or restart reconstruction.
     pub fn activate_vault(&self, vault_id: VaultId) {
         let mut state = self.shared.state.lock().expect("Vault work queue poisoned");
-        if state.accepting_work {
-            state.drained_vaults.remove(&vault_id);
+        if state.accepting_work && state.drained_vaults.remove(&vault_id) {
+            drop(state);
+            self.shared.ready.notify_waiters();
         }
     }
 
     /// Stop accepting work for one Vault and discard its queued turns in
-    /// both lanes.
+    /// both lanes, returning the kinds it discarded, in request order per
+    /// lane. A Vault that stays enabled across an edit re-requests them once
+    /// its replacement is active (#640); a disabled or removed one drops them.
     ///
     /// An active turn is never force-cancelled. It keeps its slot until it
     /// returns at its own safe operation boundary.
-    pub fn drain_vault(&self, vault_id: VaultId) {
+    pub fn drain_vault(&self, vault_id: VaultId) -> Vec<VaultWorkKind> {
         let mut state = self.shared.state.lock().expect("Vault work queue poisoned");
         state.drained_vaults.insert(vault_id);
-        state.discard_pending(vault_id);
+        let discarded = state.discard_pending(vault_id);
         drop(state);
         self.shared.ready.notify_waiters();
         self.shared.index_lane_changed([vault_id]);
+        discarded
     }
 
     /// Stop scheduling globally and discard all queued turns.
@@ -557,17 +570,19 @@ impl VaultWorkCoordinator {
 
     /// Wait only for the already-active turns, in either lane, of one
     /// drained Vault.
+    ///
+    /// Also returns once a newer lifecycle has reopened the Vault: a Resume
+    /// that superseded this Pause. The work queued from then on belongs to
+    /// the resumed Vault, and the superseded lifecycle has nothing left to
+    /// retire, so it must not wait for that work too (#640).
     pub async fn wait_for_vault_safe_boundary(&self, vault_id: VaultId) {
         loop {
             let notified = self.shared.ready.notified();
-            if self
-                .shared
-                .state
-                .lock()
-                .expect("Vault work queue poisoned")
-                .vault_is_idle(vault_id)
             {
-                return;
+                let state = self.shared.state.lock().expect("Vault work queue poisoned");
+                if state.vault_is_idle(vault_id) || !state.drained_vaults.contains(&vault_id) {
+                    return;
+                }
             }
             notified.await;
         }
@@ -794,19 +809,25 @@ impl QueueState {
         }
     }
 
-    fn discard_pending(&mut self, vault_id: VaultId) {
+    fn discard_pending(&mut self, vault_id: VaultId) -> Vec<VaultWorkKind> {
         self.fifo
             .retain(|(queued_vault, _)| *queued_vault != vault_id);
-        let remove = match self.vaults.get_mut(&vault_id) {
+        let (discarded, remove) = match self.vaults.get_mut(&vault_id) {
             Some(vault) => {
+                let discarded = vault
+                    .lanes
+                    .iter()
+                    .flat_map(|lane| lane.pending.iter().copied())
+                    .collect();
                 vault.discard_pending();
-                !vault.has_active()
+                (discarded, !vault.has_active())
             }
-            None => false,
+            None => (Vec::new(), false),
         };
         if remove {
             self.vaults.remove(&vault_id);
         }
+        discarded
     }
 
     fn discard_all_pending(&mut self) {
@@ -1073,7 +1094,12 @@ mod tests {
         );
 
         let other = vault_id("00000000-0000-4000-8000-000000000002");
+        assert!(!coordinator.vault_is_stopping(other));
         coordinator.shutdown();
+        assert!(
+            coordinator.vault_is_stopping(other),
+            "shutdown stops every Vault's running Index turn at its next chunk (#640)"
+        );
         assert_eq!(
             coordinator.request_if_idle(other, VaultWorkKind::Git),
             ScheduleResult::Rejected
@@ -1264,7 +1290,20 @@ mod tests {
 
         started.notified().await;
         coordinator.request(draining, VaultWorkKind::Git);
-        coordinator.drain_vault(draining);
+        coordinator.request(draining, VaultWorkKind::Recovery);
+        coordinator.request(draining, VaultWorkKind::Index);
+        assert!(!coordinator.vault_is_stopping(draining));
+        assert_eq!(
+            coordinator.drain_vault(draining),
+            vec![
+                VaultWorkKind::Index,
+                VaultWorkKind::Git,
+                VaultWorkKind::Recovery
+            ],
+            "drain hands back what it discarded, so an edit can re-request it (#640)"
+        );
+        assert!(coordinator.vault_is_stopping(draining));
+        assert!(!coordinator.vault_is_stopping(healthy));
         assert_eq!(
             coordinator.request(draining, VaultWorkKind::Repair),
             ScheduleResult::Rejected

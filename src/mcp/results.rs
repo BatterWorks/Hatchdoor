@@ -75,6 +75,7 @@ pub type GetGraphResult = VaultReadProjection<Vec<VaultGraph>>;
 pub type RecentlyModifiedResult = VaultReadProjection<Vec<VaultRecentNote>>;
 pub type QueryNotesResult = VaultReadProjection<NoteQueryResponse>;
 pub type FindTextResult = VaultReadProjection<TextMatchResponse>;
+pub type FindLinkProblemsResult = VaultReadProjection<crate::vault_read::LinkFindingsResponse>;
 pub type EvaluateSavedQueryResult = VaultReadProjection<SavedQueryEvaluation>;
 pub type CreateVaultResult = VaultMutationResponse;
 pub type EditVaultResult = VaultMutationResponse;
@@ -485,6 +486,7 @@ output_schemas! {
     "recently_modified" => RecentlyModifiedResult,
     "query_notes" => QueryNotesResult,
     "find_text" => FindTextResult,
+    "find_link_problems" => FindLinkProblemsResult,
     "evaluate_saved_query" => EvaluateSavedQueryResult,
     "get_attachment_import_config" => AttachmentImportConfigResult,
     "list_note_attachments" => NoteAttachmentsResult,
@@ -574,12 +576,12 @@ mod schema_tests {
             .collect();
         let total = names.len();
         assert_eq!(
-            total, 51,
-            "3 setup + 18 read + 2 manual + 1 batch + 9 management + 18 write tools"
+            total, 52,
+            "3 setup + 19 read + 2 manual + 1 batch + 9 management + 18 write tools"
         );
         names.sort();
         names.dedup();
-        assert_eq!(names.len(), 51, "tool names are unique across catalogues");
+        assert_eq!(names.len(), 52, "tool names are unique across catalogues");
 
         for name in &names {
             assert!(

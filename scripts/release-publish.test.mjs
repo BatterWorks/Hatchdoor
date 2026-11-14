@@ -182,7 +182,12 @@ async function fixture({ reviewFix = false } = {}) {
     "CHANGELOG.md",
     CHANGELOG.replace(`## v${VERSION}`, "## Unreleased"),
   );
-  for (const script of ["release-publish.mjs", "release-common.mjs"]) {
+  for (const script of [
+    "release-publish.mjs",
+    "release-common.mjs",
+    "dev-common.mjs",
+    "proto-common.mjs",
+  ]) {
     await mkdir(path.join(root, "scripts"), { recursive: true });
     await copyFile(
       path.join(scriptsDirectory, script),
@@ -482,6 +487,31 @@ test("refuses without an executable release hook, on every run", async () => {
   assertRefused(
     publish(context, [VERSION], { HATCHDOOR_RELEASE_HOOK: "" }),
     "release hook",
+  );
+});
+
+test("finds the hook in .release.env when the variable is unset, and the variable wins over it", async () => {
+  const context = await fixture();
+  const missing = path.join(context.root, "no-such-hook");
+  await writeFile(
+    path.join(context.root, ".release.env"),
+    `# local release settings\nHATCHDOOR_RELEASE_HOOK="${context.hook}"\n`,
+  );
+
+  // The hook check runs before anything else, so a refusal names the path
+  // that was read.
+  const overridden = publish(context, [VERSION], {
+    HATCHDOOR_RELEASE_HOOK: missing,
+  });
+  assertRefused(overridden, "release hook");
+  assert.match(overridden.stderr, /no-such-hook, which is not an executable file/);
+  await assertNothingDone(context);
+
+  const fromFile = publish(context, [VERSION], { HATCHDOOR_RELEASE_HOOK: "" });
+  assert.equal(fromFile.status, 0, fromFile.stderr);
+  assert.ok(
+    (await stubState(context)).calls.some((call) => call[0] === "hook"),
+    "the hook named in .release.env was called",
   );
 });
 

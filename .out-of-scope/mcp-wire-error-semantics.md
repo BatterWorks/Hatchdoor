@@ -28,10 +28,10 @@ A well-behaved client pays nothing. It sends the full header and `_meta` contrac
 
 The known rough edges, recorded so nobody has to re-derive them:
 
-- A session-less POST is answered with `422 Unexpected message, expect initialize request`, which describes what the server expected to receive rather than what the caller should do. Re-initializing is the remedy.
+- Resolved upstream: a session-less POST was answered with `422 Unexpected message, expect initialize request`, which describes what the server expected to receive rather than what the caller should do. rmcp 3.6.0 answers it with `400 Bad Request: Session ID is required`, the specification's guidance, and Hatchdoor took that with the move to 3.8.0 (#621).
 - The `2026-07-28` request requirements are reported one at a time, and `params._meta` is checked before the headers, so a request missing everything needs three failed round trips (the `_meta` pair together, then `Mcp-Method`, then `Mcp-Name`) before it succeeds. The `_meta` check names both of its own missing fields at once; the header checks return on the first failure.
 
-Both are reproducible against the `/mcp` router as it stands. The strings come from rmcp 3.1.4: `unexpected_message_response` in `transport/common/server_side_http.rs`, the session lookup in `transport/streamable_http_server/tower.rs`, `validate_request_protocol_version_meta` in the same file, and `validate_request_headers` in `transport/common/mcp_headers.rs`.
+The second is reproducible against the `/mcp` router as it stands. The strings come from rmcp 3.8.0: `session_id_required_response` in `transport/common/server_side_http.rs`, the session lookup in `transport/streamable_http_server/tower.rs`, `validate_request_protocol_version_meta` in the same file, and `validate_request_headers` in `transport/common/mcp_headers.rs`.
 
 ## Reconsidering this
 

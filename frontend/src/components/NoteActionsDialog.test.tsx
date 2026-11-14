@@ -5,6 +5,7 @@ import {
   screen,
   within,
 } from "@testing-library/react";
+import { useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { NoteActionsDialog } from "./NoteActionsDialog";
@@ -171,5 +172,74 @@ describe("NoteActionsDialog create draft persistence", () => {
     expect(persisted).not.toBeNull();
     expect(persisted).toContain("Half typed");
     expect(persisted).toContain("personal");
+  });
+});
+
+describe("NoteActionsDialog focus (#648)", () => {
+  /** An opener button and the dialog it opens, as the shell wires them: the
+   * dialog mounts on click and unmounts on close. A fresh `onClose` closure
+   * every render, as a parent re-render hands it. */
+  function Host({
+    kind,
+  }: {
+    kind: Parameters<typeof NoteActionsDialog>[0]["kind"];
+  }) {
+    const [open, setOpen] = useState(false);
+    const [, setTick] = useState(0);
+    return (
+      <>
+        <button type="button" onClick={() => setOpen(true)}>
+          Opener
+        </button>
+        <button type="button" onClick={() => setTick((n) => n + 1)}>
+          Rerender
+        </button>
+        {open ? (
+          <NoteActionsDialog
+            kind={kind}
+            error={null}
+            vaults={VAULTS}
+            folderPathsByVault={FOLDERS_BY_VAULT}
+            initialVaultId="work"
+            onClose={() => setOpen(false)}
+            onCreate={() => {}}
+            onRename={() => {}}
+            onMove={() => {}}
+            onArchive={() => {}}
+            onDelete={() => {}}
+          />
+        ) : null}
+      </>
+    );
+  }
+
+  it.each(["create", "rename", "move", "archive", "delete"] as const)(
+    "returns focus to the control that opened %s when Escape closes it",
+    (kind) => {
+      render(<Host kind={kind} />);
+      const opener = screen.getByRole("button", { name: "Opener" });
+      opener.focus();
+      fireEvent.click(opener);
+      const dialog = screen.getByRole("dialog");
+      expect(dialog).toContainElement(document.activeElement as HTMLElement);
+
+      fireEvent.keyDown(document.activeElement!, { key: "Escape" });
+
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+      expect(opener).toHaveFocus();
+    },
+  );
+
+  it("still returns focus to the opener after the parent re-renders", () => {
+    render(<Host kind="rename" />);
+    const opener = screen.getByRole("button", { name: "Opener" });
+    opener.focus();
+    fireEvent.click(opener);
+    // A parent re-render while the dialog is open hands it a new onClose.
+    fireEvent.click(screen.getByRole("button", { name: "Rerender" }));
+
+    fireEvent.keyDown(document.activeElement!, { key: "Escape" });
+
+    expect(opener).toHaveFocus();
   });
 });

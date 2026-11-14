@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use crate::vault::NoteSections;
 use crate::vault_registry::VaultId;
 
-use super::text_match::body_start;
+use crate::vault::body_start;
 
 /// The most headings one section read may ask for.
 pub const MAX_SECTION_HEADINGS: usize = 10;
@@ -434,6 +434,22 @@ mod tests {
                 missed(&entries[0]).code,
                 NoteSectionErrorCode::HeadingNotFound
             );
+        }
+    }
+
+    #[test]
+    fn indented_code_stays_in_its_section_and_does_not_open_or_close_fences() {
+        let content = "# Setup\n\nRun this:\n\n    # install the deps\n\t# tabbed code\n    ```sh\n    echo done\n\n   ## Details\ntext\n```md\n    ```\n# still fenced\n```\n# Usage\nend\n";
+        let outline = note_outline(vault_id(), &entry(), content);
+        let headings: Vec<&str> = outline.headings.iter().map(|h| h.text.as_str()).collect();
+        assert_eq!(headings, vec!["Setup", "Details", "Usage"]);
+        let entries = read(content, &["Setup", "install the deps", "tabbed code"]);
+        assert_eq!(
+            found(&entries[0]).section,
+            "# Setup\n\nRun this:\n\n    # install the deps\n\t# tabbed code\n    ```sh\n    echo done\n\n   ## Details\ntext\n```md\n    ```\n# still fenced\n```\n"
+        );
+        for entry in &entries[1..] {
+            assert_eq!(missed(entry).code, NoteSectionErrorCode::HeadingNotFound);
         }
     }
 

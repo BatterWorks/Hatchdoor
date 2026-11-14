@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::api_types::ErrorResponse;
 use crate::app_state::{AppState, request_collection_reindex};
-use crate::runtime_config::{ConfigSnapshot, SettingSource};
+use crate::runtime_config::{ConfigSnapshot, RETIRED_SETTINGS, SettingSource};
 
 /// A deliberately generous ceiling: multipart files are buffered while they
 /// are written, so accepting arbitrarily large limits would let one upload
@@ -143,10 +143,38 @@ struct PatchPlan {
     mcp_write_toggled: bool,
 }
 
+/// The values a `choice`-kind setting takes, the first being its default.
+/// `HATCHDOOR_NOTE_WIDTH` (#698) caps a note's text in the Reading view and
+/// the editor: `default` is the reading measure, `wide` a longer line, `full`
+/// no cap.
+const CHOICES: &[(&str, &[&str])] = &[("HATCHDOOR_NOTE_WIDTH", &["default", "wide", "full"])];
+
+fn choices_of(key: &str) -> &'static [&'static str] {
+    CHOICES
+        .iter()
+        .find(|(known, _)| *known == key)
+        .map_or(&[], |(_, values)| values)
+}
+
+/// A choice as the server acts on it: `Wide` pinned by `.env` reads as `wide`,
+/// and a value that is none of the choices reads as the first, the default.
+fn resolved_choice(key: &str, value: &str) -> String {
+    let choices = choices_of(key);
+    let value = value.trim().to_ascii_lowercase();
+    if choices.contains(&value.as_str()) {
+        value
+    } else {
+        choices.first().copied().unwrap_or_default().to_string()
+    }
+}
+
 const SETTINGS: &[(&str, &str, &str)] = &[
     ("HATCHDOOR_ARCHIVE_PREFIX", "instant", "text"),
     ("HATCHDOOR_EXCLUDE", "reindex", "text"),
     ("HATCHDOOR_EMBED_LAYERS", "reindex", "switch"),
+    ("HATCHDOOR_SIDEBAR_CHANGED_ON_DISK", "instant", "switch"),
+    ("HATCHDOOR_SIDEBAR_RECENTLY_VIEWED", "instant", "switch"),
+    ("HATCHDOOR_NOTE_WIDTH", "instant", "choice"),
     ("HATCHDOOR_MCP_ENABLED", "instant", "switch"),
     ("HATCHDOOR_MCP_WRITE_ENABLED", "instant", "switch"),
     ("HATCHDOOR_MCP_RATE_LIMITS_ENABLED", "instant", "switch"),
@@ -157,16 +185,15 @@ const SETTINGS: &[(&str, &str, &str)] = &[
     ("HATCHDOOR_MCP_MAX_BASE64_BYTES", "instant", "number"),
     ("HATCHDOOR_UPDATE_CHECK_ENABLED", "instant", "switch"),
     ("HATCHDOOR_USAGE_REPORT_ENABLED", "instant", "switch"),
-    // The `HATCHDOOR_GIT_*` keys below, and `HATCHDOOR_EXCLUDE` above, stay in
-    // the schema although #185 deleted the instance-wide lane whose behaviour
-    // they drove and #427 removed the import that consumed them; startup
-    // still purges the retired Git-lane keys from stored settings and refuses
-    // an install that stores any of them without a registry
-    // (`vault_migration.rs`). Two startup checks still parse them — the demo-mode
-    // posture refusal and `HATCHDOOR_EXCLUDE`'s pattern validation, both in
-    // `server.rs` — but nothing reads them per operation. The two author keys
-    // are the exception: the collection lane's Git turns read them per turn as
-    // the commit-identity fallback for a Vault without its own (#181).
+    // `HATCHDOOR_EXCLUDE` above and the `HATCHDOOR_GIT_*` keys below stay in
+    // the document although nothing reads them: #185 deleted the
+    // instance-wide lane they drove, #427 the import that consumed them, and
+    // each Vault keeps its own exclusions. They are listed so the response
+    // shape does not change, but a save refuses them and every start purges
+    // them from stored settings (`runtime_config::RETIRED_SETTINGS`, #644).
+    // The two author keys are the exception: the collection lane's Git turns
+    // read them per turn as the commit-identity fallback for a Vault without
+    // its own (#181).
     ("HATCHDOOR_GIT_SYNC_ENABLED", "instant", "mode"),
     ("HATCHDOOR_GIT_HTTPS_USERNAME", "instant", "text"),
     ("HATCHDOOR_GIT_HTTPS_TOKEN", "instant", "secret"),
@@ -434,6 +461,8 @@ fn settings_response(
             // `1`, `yes` or `on` pinned by `.env` reads as On (#581).
             let value = if kind == "switch" {
                 crate::runtime_config::is_truthy(&setting.value).to_string()
+            } else if kind == "choice" {
+                resolved_choice(key, &setting.value)
             } else {
                 setting.value.clone()
             };
@@ -477,23 +506,31 @@ fn settings_response(
     }
 }
 
+/// Why a save of a retired key is refused, naming it as retired.
+fn retired_setting_message(key: &str) -> &'static str {
+    if key == "HATCHDOOR_EXCLUDE" {
+        "This setting is retired and has no effect: each Vault keeps its own exclusion patterns."
+    } else {
+        "This setting is retired and has no effect: each Vault keeps its own Git settings."
+    }
+}
+
 fn validate_updates(
     snapshot: &ConfigSnapshot,
     updates: &BTreeMap<String, String>,
 ) -> Vec<FieldError> {
     let mut errors = Vec::new();
     for (key, value) in updates {
+        // Refused before any other check, so no value of a retired key is
+        // ever stored or queues a reindex (#644).
+        if RETIRED_SETTINGS.contains(&key.as_str()) {
+            errors.push(FieldError::on(key, retired_setting_message(key)));
+            continue;
+        }
         let Some((_, _, kind)) = SETTINGS.iter().find(|(known, ..)| known == key) else {
             errors.push(FieldError::on(key, "This setting is not available."));
             continue;
         };
-        if key == "HATCHDOOR_GIT_BRANCH" {
-            errors.push(FieldError::on(
-                key,
-                "This value is managed by the vault's checked-out branch.",
-            ));
-            continue;
-        }
         if snapshot.setting(key).is_some_and(|setting| setting.pinned) {
             errors.push(FieldError::on(
                 key,
@@ -527,13 +564,11 @@ fn validate_updates(
         if *kind == "switch" && !matches!(value.trim(), "true" | "false") {
             errors.push(FieldError::on(key, "Choose on or off."));
         }
-        if key == "HATCHDOOR_GIT_SYNC_ENABLED"
-            && !matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "off" | "local" | "remote" | "false" | "true" | "0" | "1" | "no" | "yes" | "on"
-            )
-        {
-            errors.push(FieldError::on(key, "Choose off, local, or remote."));
+        if *kind == "choice" && !choices_of(key).contains(&value.trim()) {
+            errors.push(FieldError::on(
+                key,
+                format!("Choose one of: {}.", choices_of(key).join(", ")),
+            ));
         }
     }
     if updates.keys().any(|key| {
@@ -880,6 +915,9 @@ mod tests {
             .map(|(key, _, _)| *key)
             .collect();
         assert!(switches.contains(&"HATCHDOOR_USAGE_REPORT_ENABLED"));
+        // #684: the sidebar's two lists are pinned from `.env` like any switch.
+        assert!(switches.contains(&"HATCHDOOR_SIDEBAR_CHANGED_ON_DISK"));
+        assert!(switches.contains(&"HATCHDOOR_SIDEBAR_RECENTLY_VIEWED"));
         let cases = [
             ("1", "true"),
             ("yes", "true"),
@@ -1054,6 +1092,143 @@ mod tests {
         let on = read(state).await;
         assert_eq!(on["update_check"]["enabled"], true);
         assert_eq!(on["update_check"]["update_available"]["version"], "99.0.0");
+    }
+
+    /// #698: the note width is a choice of three, Default unless changed. A
+    /// save of any of the three applies without a restart, anything else is
+    /// refused, and a value pinned from `.env` reads as the choice it names.
+    #[tokio::test]
+    async fn the_note_width_is_a_choice_of_three_that_defaults_to_default() {
+        let (state, _worker, _directory) = test_state();
+        let key = "HATCHDOOR_NOTE_WIDTH";
+        let read = |state: AppState| async move {
+            let response = get_settings_handler(State(state)).await.into_response();
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let body = serde_json::from_slice::<serde_json::Value>(&body).unwrap();
+            let setting = body["settings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|setting| setting["key"] == "HATCHDOOR_NOTE_WIDTH")
+                .cloned()
+                .expect("the note width is editable from Settings");
+            assert_eq!(setting["kind"], "choice");
+            assert_eq!(setting["class"], "instant");
+            setting["value"].as_str().unwrap().to_string()
+        };
+
+        assert_eq!(read(state.clone()).await, "default");
+        for value in ["default", "wide", "full"] {
+            assert!(
+                validate_updates(
+                    &state.runtime_snapshot(),
+                    &BTreeMap::from([(key.to_string(), value.to_string())]),
+                )
+                .is_empty(),
+                "{value} is a choice"
+            );
+        }
+        for value in ["", "narrow", "1200px"] {
+            let errors = validate_updates(
+                &state.runtime_snapshot(),
+                &BTreeMap::from([(key.to_string(), value.to_string())]),
+            );
+            assert_eq!(errors.len(), 1, "{value:?} is refused");
+        }
+        state
+            .runtime_config
+            .save([(key.to_string(), "wide".to_string())])
+            .unwrap();
+        assert_eq!(read(state).await, "wide");
+    }
+
+    /// #698: a width pinned from `.env` is locked on the page and read the
+    /// way the server acts on it: case and spaces do not matter, and a value
+    /// that is none of the three reads as the default.
+    #[test]
+    fn a_note_width_pinned_from_env_reads_as_the_choice_it_names() {
+        for (raw, expected) in [
+            ("wide", "wide"),
+            (" Wide ", "wide"),
+            ("FULL", "full"),
+            ("default", "default"),
+            ("huge", "default"),
+        ] {
+            let directory = tempdir().expect("test settings directory");
+            let snapshot = RuntimeConfig::load(
+                directory.path().join("settings.json"),
+                Environment::from_values([("HATCHDOOR_NOTE_WIDTH".to_string(), raw.to_string())]),
+                live_settings_defaults(),
+            )
+            .expect("runtime config")
+            .snapshot();
+            let response = settings_response(
+                &snapshot,
+                false,
+                None,
+                Default::default(),
+                Default::default(),
+            );
+            let setting = response
+                .settings
+                .iter()
+                .find(|setting| setting.key == "HATCHDOOR_NOTE_WIDTH")
+                .expect("the note width is listed");
+            assert_eq!(setting.value.as_deref(), Some(expected), "{raw:?}");
+            assert_eq!(setting.locked, Some("environment"), "{raw:?}");
+        }
+    }
+
+    /// #684: the sidebar's two lists are switches, on unless turned off, and
+    /// a save turns one off without a restart.
+    #[tokio::test]
+    async fn the_sidebar_lists_are_switches_that_default_to_on() {
+        let (state, _worker, _directory) = test_state();
+        let read = |state: AppState| async move {
+            let response = get_settings_handler(State(state)).await.into_response();
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            serde_json::from_slice::<serde_json::Value>(&body).unwrap()
+        };
+        let value_of = |body: &serde_json::Value, key: &str| {
+            let setting = body["settings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|setting| setting["key"] == key)
+                .cloned()
+                .unwrap_or_else(|| panic!("{key} is editable from Settings"));
+            assert_eq!(setting["kind"], "switch", "{key}");
+            assert_eq!(setting["class"], "instant", "{key}");
+            setting["value"].clone()
+        };
+        let keys = [
+            "HATCHDOOR_SIDEBAR_CHANGED_ON_DISK",
+            "HATCHDOOR_SIDEBAR_RECENTLY_VIEWED",
+        ];
+
+        let before = read(state.clone()).await;
+        for key in keys {
+            assert_eq!(value_of(&before, key), "true", "{key} defaults to on");
+            assert!(
+                validate_updates(
+                    &state.runtime_snapshot(),
+                    &BTreeMap::from([(key.to_string(), "false".to_string())]),
+                )
+                .is_empty()
+            );
+        }
+        state
+            .runtime_config
+            .save(keys.map(|key| (key.to_string(), "false".to_string())))
+            .unwrap();
+        let after = read(state).await;
+        for key in keys {
+            assert_eq!(value_of(&after, key), "false", "{key} saved off");
+        }
     }
 
     #[tokio::test]
@@ -1245,6 +1420,32 @@ mod tests {
             .len(),
             1,
             "a pinned setting cannot be saved over"
+        );
+    }
+
+    /// #644: a value nothing reads must never be stored, so every retired
+    /// key is refused whatever its value, naming the key as retired.
+    #[test]
+    fn every_retired_setting_is_refused_whatever_its_value() {
+        let config = RuntimeConfig::for_tests();
+        for key in RETIRED_SETTINGS {
+            for value in ["", "off", "local", "remote", "true", "drafts/, notes/[z-a]"] {
+                let errors = validate_updates(
+                    &config.snapshot(),
+                    &BTreeMap::from([(key.to_string(), value.to_string())]),
+                );
+                assert_eq!(errors.len(), 1, "{key}={value}");
+                assert_eq!(errors[0].key.as_deref(), Some(key));
+                assert!(errors[0].message.contains("retired"), "{key}");
+            }
+        }
+        assert!(
+            validate_updates(
+                &config.snapshot(),
+                &BTreeMap::from([("HATCHDOOR_GIT_AUTHOR_NAME".into(), "Me".into())]),
+            )
+            .is_empty(),
+            "the commit-identity fallback is still a live setting"
         );
     }
 

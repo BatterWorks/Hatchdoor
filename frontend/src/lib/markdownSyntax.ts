@@ -3,7 +3,14 @@
 // copies of this list, and a syntax the editor's buttons write went missing
 // from all three unnoticed.
 
-import type { Nodes } from "mdast";
+import type {
+  Highlight,
+  Nodes,
+  Paragraph,
+  Parents,
+  Root,
+  RootContent,
+} from "mdast";
 import {
   fromMarkdown,
   type Extension as FromMarkdownExtension,
@@ -22,12 +29,20 @@ import type {
 } from "micromark-util-types";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
-import type { Processor } from "unified";
+import { type Processor, unified } from "unified";
+
+import { blockAnchorId } from "./noteHeadings";
 
 declare module "mdast" {
   interface Highlight extends Parent {
     type: "highlight";
     children: PhrasingContent[];
+    data?: HighlightData;
+  }
+  interface HighlightData extends Data {
+    /** Length of the colour emoji the text opened with, now taken out of
+     * the first child; absent for a plain highlight. */
+    colourMarkerLength?: number;
   }
   interface PhrasingContentMap {
     highlight: Highlight;
@@ -198,10 +213,60 @@ const highlightFromMarkdown: FromMarkdownExtension = {
   },
   exit: {
     highlight(token) {
+      const node = this.stack.at(-1) as Highlight;
+      // The source, not the text node, so an emoji spelled as a character
+      // reference is text, as it is in the editor.
+      const marker = highlightColourMarker(this.sliceSerialize(token).slice(2));
+      const first = node.children[0];
+      if (
+        marker &&
+        first?.type === "text" &&
+        first.value.startsWith(marker.emoji)
+      ) {
+        first.value = first.value.slice(marker.emoji.length);
+        node.data = {
+          ...node.data,
+          colourMarkerLength: marker.emoji.length,
+          hProperties: {
+            className: ["note-highlight", `note-highlight-${marker.colour}`],
+          },
+        };
+      }
       this.exit(token);
     },
   },
 };
+
+/**
+ * Obsidian's highlight colours (Obsidian 1.14, help page "Basic formatting
+ * syntax", "Highlight colors"): one of these six emoji straight after the
+ * opening `==` colours the highlight and is not drawn. Any other character
+ * there, another coloured circle included, is text. The file keeps the emoji.
+ */
+export const HIGHLIGHT_COLOURS = {
+  "🔴": "red",
+  "🟠": "orange",
+  "🟡": "yellow",
+  "🟢": "green",
+  "🔵": "blue",
+  "🟣": "purple",
+} as const;
+
+export type HighlightColour =
+  (typeof HIGHLIGHT_COLOURS)[keyof typeof HIGHLIGHT_COLOURS];
+
+/** The colour marker `text` opens with, the text just inside a highlight's
+ * opening signs, or null when it opens with anything else. */
+export function highlightColourMarker(
+  text: string,
+): { emoji: string; colour: HighlightColour } | null {
+  for (const [emoji, colour] of Object.entries(HIGHLIGHT_COLOURS)) {
+    if (text.startsWith(emoji)) {
+      return { emoji, colour };
+    }
+  }
+  return null;
+}
 
 export function remarkHighlight(this: Processor) {
   // remark-parse reads these two lists; its types declaring them are not ours.
@@ -213,30 +278,181 @@ export function remarkHighlight(this: Processor) {
   (data.fromMarkdownExtensions ??= []).push(highlightFromMarkdown);
 }
 
-/** The syntax plugins shared by every view that renders note Markdown. */
-export const NOTE_SYNTAX_PLUGINS = [remarkGfm, remarkMath, remarkHighlight];
+/** A block id closing a block: ` ^id` after its text, or `^id` alone. */
+const BLOCK_ID_AT_END = /(^|[ \t\n])\^([a-zA-Z0-9-]+)[ \t]*$/;
+/** A block id closing a line that is not the block's last. */
+const BLOCK_ID_AT_LINE_END = / \^[a-zA-Z0-9-]+(?=\n)/g;
 
-/** Plain text with each `==highlight==`'s signs dropped, for a search
- * snippet, which shows the words and draws no highlight. It parses the text
- * with the same construct the page renders with, so code, escapes and stray
- * signs keep theirs exactly where the page keeps them. */
+type BlockIdCarrier = Extract<RootContent, { type: "paragraph" | "heading" }>;
+
+/**
+ * Obsidian's block ids (#578): a `^id` closing a paragraph, a list item or a
+ * quote, or standing on a line of its own under a quote or a table. The text
+ * is taken out of the tree and the block is given the anchor `^id`
+ * (`blockAnchorId`), which is where a link to `[[Note#^id]]` lands. Working on
+ * the parsed tree leaves a `^id` in code or math alone and changes no line of
+ * the text, so a rendered block still maps to its lines in the file.
+ *
+ * The anchor goes on the list item when the id closes the item's own line and
+ * on the quote when it closes the quote, since a callout rebuilds its
+ * paragraphs. A heading has an anchor already and only loses the text.
+ */
+export function remarkBlockIds() {
+  return (tree: Root) => {
+    anchorBlockIds(tree);
+  };
+}
+
+function anchorBlockIds(parent: Parents): void {
+  const siblings = parent.children as RootContent[];
+  for (let index = 0; index < siblings.length; index += 1) {
+    const node = siblings[index];
+    if (node.type !== "paragraph" && node.type !== "heading") {
+      if ("children" in node) {
+        anchorBlockIds(node);
+      }
+      continue;
+    }
+
+    hideLineEndBlockIds(node);
+    const found = closingBlockId(node);
+    if (!found) {
+      continue;
+    }
+    if (node.type === "heading") {
+      // A heading that is nothing but `^word` is a heading, not an id.
+      if (!found.alone) {
+        found.strip();
+      }
+      continue;
+    }
+    if (!found.alone) {
+      found.strip();
+      setBlockAnchor(blockIdTarget(parent, node), found.id);
+      continue;
+    }
+    // An id on a line of its own names the block above it. With no such block
+    // it stays as written, the way a stray `^word` always has.
+    const above = siblings[index - 1];
+    if (
+      above &&
+      (above.type === "paragraph" ||
+        above.type === "blockquote" ||
+        above.type === "table")
+    ) {
+      setBlockAnchor(above, found.id);
+      siblings.splice(index, 1);
+      index -= 1;
+    }
+  }
+}
+
+function hideLineEndBlockIds(node: BlockIdCarrier): void {
+  for (const child of node.children) {
+    if (child.type === "text") {
+      child.value = child.value.replace(BLOCK_ID_AT_LINE_END, "");
+    }
+  }
+}
+
+function closingBlockId(
+  node: BlockIdCarrier,
+): { id: string; alone: boolean; strip: () => void } | null {
+  const last = node.children.at(-1);
+  if (!last || last.type !== "text") {
+    return null;
+  }
+  const match = BLOCK_ID_AT_END.exec(last.value);
+  if (!match) {
+    return null;
+  }
+  const alone = node.children.length === 1 && match.index === 0 && !match[1];
+  // With no space before it the caret belongs to the word it touches.
+  if (!match[1] && !alone) {
+    return null;
+  }
+  return {
+    id: match[2],
+    alone,
+    strip: () => {
+      last.value = last.value.slice(0, match.index);
+    },
+  };
+}
+
+function blockIdTarget(parent: Parents, paragraph: Paragraph): RootContent {
+  if (parent.type === "listItem" && parent.children[0] === paragraph) {
+    return parent;
+  }
+  if (parent.type === "blockquote" && parent.children.at(-1) === paragraph) {
+    return parent;
+  }
+  return paragraph;
+}
+
+function setBlockAnchor(node: RootContent, id: string): void {
+  const data = (node.data ??= {}) as {
+    hProperties?: Record<string, unknown>;
+  };
+  const properties = (data.hProperties ??= {});
+  // A block names one place: the first id written on it.
+  properties.id ??= blockAnchorId(id);
+}
+
+/** The syntax plugins shared by every view that renders note Markdown. */
+export const NOTE_SYNTAX_PLUGINS = [
+  remarkGfm,
+  remarkMath,
+  remarkHighlight,
+  remarkBlockIds,
+];
+
+/** The parser extensions `NOTE_SYNTAX_PLUGINS` register, read once from a
+ * processor that never runs, so a plain-text read parses as the page does. */
+let noteParseExtensions:
+  | { extensions: Extension[]; mdastExtensions: FromMarkdownExtension[] }
+  | undefined;
+
+function noteSyntaxParseExtensions() {
+  if (!noteParseExtensions) {
+    const data = unified().use(NOTE_SYNTAX_PLUGINS).freeze().data() as {
+      micromarkExtensions?: Extension[];
+      fromMarkdownExtensions?: FromMarkdownExtension[];
+    };
+    noteParseExtensions = {
+      extensions: data.micromarkExtensions ?? [],
+      mdastExtensions: data.fromMarkdownExtensions ?? [],
+    };
+  }
+  return noteParseExtensions;
+}
+
+/** Plain text with each `==highlight==`'s signs dropped, for text that shows
+ * the words and draws no highlight: a search snippet, a Help excerpt and a
+ * heading in the note outline (#782). A colour emoji opening a highlight goes
+ * with the signs (#577). It parses the text with the note syntax the page
+ * renders with, so code, math, bare URLs, escapes and stray signs keep theirs
+ * exactly where the page keeps them. */
 export function stripHighlights(text: string): string {
   if (!text.includes("==")) return text;
-  const tree = fromMarkdown(text, {
-    extensions: [highlightSyntax],
-    mdastExtensions: [highlightFromMarkdown],
-  });
-  const signs: number[] = [];
+  const tree = fromMarkdown(text, noteSyntaxParseExtensions());
+  const cuts: Array<{ at: number; length: number }> = [];
   const collect = (node: Nodes) => {
     if (node.type === "highlight" && node.position) {
-      signs.push(node.position.start.offset!, node.position.end.offset! - 2);
+      cuts.push(
+        {
+          at: node.position.start.offset!,
+          length: 2 + (node.data?.colourMarkerLength ?? 0),
+        },
+        { at: node.position.end.offset! - 2, length: 2 },
+      );
     }
     if ("children" in node) node.children.forEach(collect);
   };
   collect(tree);
   let out = text;
-  for (const at of signs.sort((a, b) => b - a)) {
-    out = out.slice(0, at) + out.slice(at + 2);
+  for (const { at, length } of cuts.sort((a, b) => b.at - a.at)) {
+    out = out.slice(0, at) + out.slice(at + length);
   }
   return out;
 }

@@ -9,8 +9,9 @@ use schemars::JsonSchema;
 use serde::Serialize;
 use unicode_normalization::{UnicodeNormalization, char::is_combining_mark};
 
+use crate::cache::keyword::{is_bigram_char, is_trailing_jamo, run_tokens};
 use crate::cache::parse::fts_query_terms;
-use crate::chunk::is_fence_marker;
+use crate::chunk::{closes_fence, fence_marker};
 use crate::vault_registry::VaultId;
 
 use super::SearchResponseMode;
@@ -66,7 +67,7 @@ impl CompactSearchResponse {
     }
 }
 
-fn compact_result(result: VaultSearchResult, phrases: &[Vec<String>]) -> CompactSearchResult {
+fn compact_result(result: VaultSearchResult, phrases: &[Phrase]) -> CompactSearchResult {
     CompactSearchResult {
         snippet: snippet(&result.content, phrases),
         vault_id: result.vault_id,
@@ -79,20 +80,41 @@ fn compact_result(result: VaultSearchResult, phrases: &[Vec<String>]) -> Compact
     }
 }
 
-/// The keyword query as the index sees it: one phrase per query word, each a
-/// run of folded tokens. The keyword path quotes every word, so `well-known`
-/// matches only where `well` is followed by `known`.
-fn query_phrases(query: &str) -> Vec<Vec<String>> {
+/// One query word as the keyword index matches it: a run of folded tokens,
+/// the last of them a prefix when the word ends in a lone CJK, kana, Hangul
+/// or Thai character (`keyword::keyword_query_phrase`).
+struct Phrase {
+    words: Vec<String>,
+    prefix: bool,
+}
+
+/// The keyword query as the index sees it: one phrase per query word. The
+/// keyword path quotes every word, so `well-known` matches only where `well`
+/// is followed by `known`, and `日本語` only where `日本` is followed by
+/// `本語`.
+fn query_phrases(query: &str) -> Vec<Phrase> {
     fts_query_terms(query)
         .iter()
-        .map(|term| {
+        .filter_map(|term| {
             let chars = term.char_indices().collect::<Vec<_>>();
-            tokens(&chars)
+            let mut tokens = tokens(&chars);
+            // A term ending in a run of these scripts may go on in the text,
+            // so its lone last character is left out, or is a prefix when it
+            // is the whole run.
+            let prefix = match tokens.last().and_then(|token| token.run_len) {
+                Some(1) => true,
+                Some(_) => {
+                    tokens.pop();
+                    false
+                }
+                None => false,
+            };
+            let words = tokens
                 .into_iter()
                 .map(|token| token.folded)
-                .collect::<Vec<_>>()
+                .collect::<Vec<_>>();
+            (!words.is_empty()).then_some(Phrase { words, prefix })
         })
-        .filter(|phrase| !phrase.is_empty())
         .collect()
 }
 
@@ -101,25 +123,53 @@ struct Token {
     start: usize,
     end: usize,
     folded: String,
+    /// For the lone last character of a CJK, kana, Hangul or Thai run, the
+    /// run's length in characters.
+    run_len: Option<usize>,
 }
 
-/// Splits text the way the keyword index's tokenizer does (`unicode61
-/// remove_diacritics 2`): a token is a run of letters and digits, compared
-/// without case or accents. Only a Latin-style accent continues a token.
-/// Every other mark ends one, a Devanagari or Thai vowel sign included, so
-/// a word in those scripts is several tokens here as it is in the index.
+/// Splits text the way the keyword index's tokenizer sees it (`unicode61
+/// remove_diacritics 2` over `keyword::keyword_index_text`): a token is a
+/// run of letters and digits, compared without case or accents. Only a
+/// Latin-style accent continues a token. Every other mark ends one, a
+/// Devanagari vowel sign included, so a word in that script is several
+/// tokens here as it is in the index. A run of CJK, kana, Hangul or Thai is
+/// instead every overlapping pair of its characters, then its last character
+/// alone, each compared in NFC (#634).
 fn tokens(chars: &[(usize, char)]) -> Vec<Token> {
     let is_letter_or_digit = |ch: char| ch.is_alphanumeric() && !is_combining_mark(ch);
     let is_accent = |ch: char| ('\u{300}'..='\u{36F}').contains(&ch);
+    let plain = chars.iter().map(|&(_, ch)| ch).collect::<Vec<_>>();
+    let fold_run = |start: usize, end: usize| {
+        plain[start..end]
+            .iter()
+            .collect::<String>()
+            .nfc()
+            .flat_map(char::to_lowercase)
+            .collect::<String>()
+    };
     let mut tokens = Vec::new();
     let mut index = 0;
     while index < chars.len() {
+        if is_bigram_char(chars[index].1) {
+            for token in run_tokens(&plain, index) {
+                index = token.end;
+                tokens.push(Token {
+                    start: token.start,
+                    end: token.end,
+                    folded: fold_run(token.start, token.end),
+                    run_len: token.run_len,
+                });
+            }
+            continue;
+        }
         if !is_letter_or_digit(chars[index].1) {
             index += 1;
             continue;
         }
         let start = index;
         while index < chars.len()
+            && !is_bigram_char(chars[index].1)
             && (is_letter_or_digit(chars[index].1) || is_accent(chars[index].1))
         {
             index += 1;
@@ -134,6 +184,7 @@ fn tokens(chars: &[(usize, char)]) -> Vec<Token> {
             start,
             end: index,
             folded,
+            run_len: None,
         });
     }
     tokens
@@ -142,37 +193,55 @@ fn tokens(chars: &[(usize, char)]) -> Vec<Token> {
 /// Character offsets of the earliest place any phrase occurs in a form a
 /// snippet can hold: an occurrence too long for the window with an ellipsis
 /// on each side is passed over.
-fn first_match(chars: &[(usize, char)], phrases: &[Vec<String>]) -> Option<(usize, usize)> {
+fn first_match(chars: &[(usize, char)], phrases: &[Phrase]) -> Option<(usize, usize)> {
     if phrases.is_empty() {
         return None;
     }
     let tokens = tokens(chars);
     (0..tokens.len()).find_map(|at| {
         phrases.iter().find_map(|phrase| {
-            let run = tokens.get(at..at + phrase.len())?;
+            let run = tokens.get(at..at + phrase.words.len())?;
             let (start, end) = (run[0].start, run[run.len() - 1].end);
+            let last = run.len() - 1;
             (end - start <= SNIPPET_CHARS - 2
                 && run
                     .iter()
-                    .zip(phrase)
-                    .all(|(token, word)| token.folded == *word))
+                    .zip(&phrase.words)
+                    .enumerate()
+                    .all(|(n, (token, word))| {
+                        if phrase.prefix && n == last {
+                            token.folded.starts_with(word.as_str())
+                        } else {
+                            token.folded == *word
+                        }
+                    }))
             .then_some((start, end))
         })
     })
 }
 
 /// `content` without its fenced blocks, marker lines included, so a chunk
-/// that is nothing but code leaves nothing. An opening marker with no closing
-/// one fences the rest of the chunk. The blank lines a dropped block leaves
-/// behind are closed up to one.
+/// that is nothing but code leaves nothing. A block ends only at a run of its
+/// opening character at least as long, so a block showing a shorter fence
+/// stays whole. An opening marker with no closing one fences the rest of the
+/// chunk. The blank lines a dropped block leaves behind are closed up to one.
 fn without_fenced_blocks(content: &str) -> String {
     let mut prose = String::with_capacity(content.len());
-    let mut fenced = false;
+    let mut open = None;
     for line in content.split_inclusive('\n') {
-        if is_fence_marker(line) {
-            fenced = !fenced;
-        } else if !fenced && !(line.trim().is_empty() && prose.ends_with("\n\n")) {
-            prose.push_str(line);
+        match open {
+            Some(opener) => {
+                if closes_fence(opener, line) {
+                    open = None;
+                }
+            }
+            None => {
+                if let Some(opener) = fence_marker(line) {
+                    open = Some(opener);
+                } else if !(line.trim().is_empty() && prose.ends_with("\n\n")) {
+                    prose.push_str(line);
+                }
+            }
         }
     }
     prose
@@ -187,7 +256,7 @@ fn without_fenced_blocks(content: &str) -> String {
 /// kept on that side, so a word survives whole. Text with none there (a script written
 /// without spaces, a very long URL) is cut between characters instead, never
 /// inside a character or between an emoji and its joiners.
-fn snippet(content: &str, phrases: &[Vec<String>]) -> String {
+fn snippet(content: &str, phrases: &[Phrase]) -> String {
     let prose = without_fenced_blocks(content);
     let text = prose.trim();
     let chars = text.char_indices().collect::<Vec<_>>();
@@ -298,7 +367,7 @@ fn joined(chars: &[(usize, char)], at: usize) -> bool {
         // The tag characters that spell a subdivision flag.
         || ('\u{E0020}'..='\u{E007F}').contains(&current)
         // The vowel and final of a Hangul syllable stored decomposed.
-        || ('\u{1160}'..='\u{11FF}').contains(&current)
+        || is_trailing_jamo(current)
         || splits_a_flag
 }
 
@@ -339,6 +408,12 @@ mod tests {
     #[test]
     fn an_unclosed_fence_hides_the_rest_of_the_chunk() {
         assert_eq!(snippet("Intro.\n```sh\nls -la\n", &[]), "Intro.");
+    }
+
+    #[test]
+    fn a_block_showing_a_shorter_fence_or_using_tildes_stays_out_whole() {
+        let chunk = "Before.\n````markdown\n```js\n# not a heading either\nconsole.log(1)\n```\n````\n\nBetween.\n~~~bash\n# install the deps\n~~~\n\nAfter.";
+        assert_eq!(snippet(chunk, &[]), "Before.\n\nBetween.\n\nAfter.");
     }
 
     #[test]
@@ -501,6 +576,36 @@ mod tests {
             snippet(&text, &query_phrases("needle")),
             format!("{}…", words("word", 40))
         );
+    }
+
+    /// The keyword index finds a CJK word inside a clause (#634), so the
+    /// snippet centres on that word, not on the start of the chunk.
+    #[test]
+    fn a_cjk_word_inside_a_sentence_is_found_as_the_index_finds_it() {
+        let text = format!(
+            "{}ひらがな、漢字が混ざった本文です。{}",
+            "前".repeat(250),
+            "後".repeat(150)
+        );
+        for query in ["本文", "混ざった本文", "本"] {
+            let snippet = snippet(&text, &query_phrases(query));
+            assert!(
+                snippet.starts_with('…') && snippet.contains("本文です"),
+                "{query}: {snippet}"
+            );
+        }
+        assert!(snippet(&text, &query_phrases("文本")).starts_with("前前"));
+    }
+
+    #[test]
+    fn decomposed_hangul_in_the_chunk_matches_a_composed_query() {
+        let decomposed = "한국어".nfd().collect::<String>();
+        let text = format!(
+            "{} {decomposed} 노트 {}",
+            words("alpha", 100),
+            words("omega", 100)
+        );
+        assert!(snippet(&text, &query_phrases("한국어")).contains(&decomposed));
     }
 
     #[test]

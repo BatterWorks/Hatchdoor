@@ -24,7 +24,8 @@ use crate::vault_work::{
 
 use super::managed_checkout::{
     ManagedCheckoutError, ManagedCheckoutLease, ManagedCheckoutRequest, ManagedHttpsCredentials,
-    acquire_or_reuse, reuse_existing_checkout,
+    acquire_or_reuse, restore_set_aside_checkout, reuse_existing_checkout, reuse_recorded_checkout,
+    set_aside_checkout,
 };
 use super::managed_sync::{
     ManagedSyncConfig, ManagedSyncError, ManagedSyncMode, ManagedSyncOutcome, RecoveryPublication,
@@ -218,6 +219,130 @@ pub fn run_managed_git_turn(
     let outcome =
         synchronize_managed_checkout(&sync_config, ledger).map_err(classify_sync_error)?;
     Ok(outcome.into())
+}
+
+/// What setting a managed checkout aside before an identity change kept
+/// (#639). Reported to the caller of the edit, so the work the old checkout
+/// held is never silently left behind.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RetiredCheckout {
+    /// Where the old checkout now lives, relative to the instance state
+    /// directory, such as `vaults/<id>/retired-checkouts/20261106T120000Z`.
+    pub archive: PathBuf,
+    /// Whether notes not yet committed were committed in the old checkout
+    /// before it moved.
+    pub committed: bool,
+    /// Commits in the old checkout its remote branch does not have, the one
+    /// just made included. They exist only in the archive.
+    pub unpushed_commits: usize,
+}
+
+/// Set a managed Vault's checkout aside before its source identity changes
+/// (#639): commit the Vault's pending notes in it (Two-way only, the one mode
+/// that commits), count what its remote lacks, and move it into the Vault's
+/// `retired-checkouts/` folder, so the next Git turn clones the new remote,
+/// branch and folder afresh. `Ok(None)` when the Vault had no checkout yet.
+///
+/// A failure to commit refuses: the checkout stays where it is and the
+/// caller must not save the change. A checkout that no longer validates
+/// against its receipt cannot be committed in, and is moved as it is, which
+/// loses nothing: every file goes with it.
+///
+/// The Vault must be disabled, so no turn or write is using the checkout;
+/// the lease taken here refuses with `managed_git_checkout_busy` otherwise.
+/// Blocking: Git and filesystem work.
+pub fn retire_managed_checkout(
+    state_directory: &Path,
+    vault_id: VaultId,
+    mode: VaultGitMode,
+    author_name: &str,
+    author_email: &str,
+) -> Result<Option<RetiredCheckout>, VaultWorkError> {
+    let lease = ManagedCheckoutLease::acquire(state_directory.to_path_buf(), vault_id)
+        .map_err(classify_checkout_error)?;
+    let recorded = match reuse_recorded_checkout(&lease, state_directory, vault_id) {
+        Ok(recorded) => recorded,
+        Err(ManagedCheckoutError::ValidationFailed) => {
+            warn!(%vault_id, "setting aside a managed checkout that does not validate, without committing in it");
+            None
+        }
+        Err(error) => return Err(classify_checkout_error(error)),
+    };
+    let mut committed = false;
+    let mut unpushed_commits = 0;
+    if let Some((checkout, repository_url)) = recorded {
+        if mode == VaultGitMode::TwoWay {
+            let sync_config = ManagedSyncConfig {
+                repository_path: checkout.repository_path.clone(),
+                vault_path: checkout.vault_path,
+                repository_url,
+                branch: checkout.resolved_branch.clone(),
+                mode: ManagedSyncMode::TwoWay,
+                credentials: None,
+                author_name: author_name.to_string(),
+                author_email: author_email.to_string(),
+            };
+            committed = matches!(
+                commit_managed_checkout(&sync_config, &WriteLedger::default())
+                    .map_err(classify_sync_error)?,
+                ManagedSyncOutcome::TwoWaySynchronized {
+                    committed: true,
+                    ..
+                }
+            );
+        }
+        unpushed_commits =
+            count_unpushed_commits(&checkout.repository_path, &checkout.resolved_branch);
+    }
+    let Some(archive) = set_aside_checkout(&lease).map_err(classify_checkout_error)? else {
+        return Ok(None);
+    };
+    let archive = archive
+        .strip_prefix(state_directory.canonicalize().unwrap_or_default())
+        .map(Path::to_path_buf)
+        .unwrap_or(archive);
+    Ok(Some(RetiredCheckout {
+        archive,
+        committed,
+        unpushed_commits,
+    }))
+}
+
+/// Undo [`retire_managed_checkout`] for an identity change that was then not
+/// saved (#639): move the checkout back from `archive` (relative to the state
+/// directory, as reported), so the Vault keeps syncing its old remote with
+/// every commit it had. The commit made while setting it aside stays; it is
+/// the Vault's own work, and the next sync pushes it.
+pub fn restore_retired_checkout(
+    state_directory: &Path,
+    vault_id: VaultId,
+    archive: &Path,
+) -> Result<(), VaultWorkError> {
+    let lease = ManagedCheckoutLease::acquire(state_directory.to_path_buf(), vault_id)
+        .map_err(classify_checkout_error)?;
+    let state = state_directory
+        .canonicalize()
+        .map_err(|_| classify_checkout_error(ManagedCheckoutError::StateDirectoryUnavailable))?;
+    restore_set_aside_checkout(&lease, &state.join(archive)).map_err(classify_checkout_error)
+}
+
+/// Commits on `branch` that its remote-tracking branch does not have, all of
+/// them when the checkout never fetched it. Zero when Git cannot say, since
+/// this only informs a report.
+fn count_unpushed_commits(repository_path: &Path, branch: &str) -> usize {
+    let count = || -> Result<usize, git2::Error> {
+        let repository = git2::Repository::open(repository_path)?;
+        let Some(head) = repository.head()?.target() else {
+            return Ok(0);
+        };
+        let mut walk = repository.revwalk()?;
+        walk.push(head)?;
+        if let Ok(upstream) = repository.refname_to_id(&format!("refs/remotes/origin/{branch}")) {
+            walk.hide(upstream)?;
+        }
+        Ok(walk.count())
+    };
+    count().unwrap_or(0)
 }
 
 /// Run one commit-only turn for a managed-Git Vault: commit whatever changed
@@ -602,8 +727,12 @@ pub(crate) fn classify_checkout_error(error: ManagedCheckoutError) -> VaultWorkE
         DestinationInvalid => ("managed_git_destination_invalid", false),
         CloneFailed => ("managed_git_remote_unreachable", true),
         AuthenticationFailed => ("managed_git_authentication_failed", false),
+        // Only the remote or the Vault's settings can fix it, so retrying on
+        // backoff would download the whole repository again each time (#638).
+        BranchNotFound => ("managed_git_branch_not_found", false),
         ValidationFailed => ("managed_git_validation_failed", false),
         AtomicInstallFailed(_) => ("managed_git_install_failed", false),
+        SetAsideFailed(_) => ("managed_git_set_aside_failed", false),
     };
     VaultWorkError::new(code, error.to_string(), retryable)
 }
@@ -660,6 +789,13 @@ fn classify_sync_error(error: ManagedSyncError) -> VaultWorkError {
         RecoveryRejected { .. } => ("managed_git_recovery_push_rejected", false, None),
         Authentication => ("managed_git_authentication_failed", false, None),
         Remote => ("managed_git_remote_unreachable", true, None),
+        // Everything else committed and synchronized; these files wait for
+        // someone to rename them, which no retry can do (#638).
+        UnsupportedFileNames { files } => (
+            "managed_git_unsupported_file_names",
+            false,
+            Some(VaultWorkErrorDetail::AffectedPaths(files)),
+        ),
     };
     let work_error = VaultWorkError::new(code, message, retryable);
     match detail {
@@ -683,6 +819,7 @@ pub(crate) fn is_remote_only_failure(code: &str) -> bool {
             | "managed_git_push_race_exhausted"
             | "managed_git_remote_unreachable"
             | "managed_git_authentication_failed"
+            | "managed_git_branch_not_found"
             | "managed_git_pull_only_local_commits"
     )
 }
@@ -1483,6 +1620,209 @@ mod tests {
         );
     }
 
+    /// An identity change sets the old checkout aside (#639): the note not yet
+    /// committed is committed in it, the commit the remote lacks is counted,
+    /// and the whole checkout moves under `retired-checkouts/`, so a turn
+    /// for the new remote clones it afresh instead of failing validation.
+    #[test]
+    fn retiring_a_checkout_commits_its_notes_moves_it_aside_and_lets_a_new_remote_clone() {
+        let (root, config) = fixture(VaultGitMode::TwoWay);
+        let vault_directory = config
+            .state_directory
+            .join("vaults")
+            .join(config.vault_id.to_string());
+        {
+            let lease =
+                ManagedCheckoutLease::acquire(config.state_directory.clone(), config.vault_id)
+                    .expect("lease");
+            run_managed_git_turn(&config, &lease, &WriteLedger::new()).expect("first clone");
+        }
+        std::fs::write(vault_directory.join("repository/vault/After.md"), "after\n")
+            .expect("note not yet committed");
+
+        let retired = retire_managed_checkout(
+            &config.state_directory,
+            config.vault_id,
+            VaultGitMode::TwoWay,
+            "Hatchdoor",
+            "hatchdoor@example.test",
+        )
+        .expect("set aside")
+        .expect("there was a checkout");
+
+        assert!(retired.committed);
+        assert_eq!(retired.unpushed_commits, 1);
+        assert!(
+            retired.archive.starts_with(
+                Path::new("vaults")
+                    .join(config.vault_id.to_string())
+                    .join("retired-checkouts")
+            )
+        );
+        let state = config.state_directory.canonicalize().expect("state");
+        let archived = Repository::open(state.join(&retired.archive).join("repository"))
+            .expect("the archived checkout is a repository");
+        let head = archived
+            .head()
+            .expect("HEAD")
+            .peel_to_commit()
+            .expect("commit");
+        assert!(
+            head.tree()
+                .expect("tree")
+                .get_path(Path::new("vault/After.md"))
+                .is_ok(),
+            "the note is committed in the archived checkout"
+        );
+        assert!(!vault_directory.join("repository").exists());
+        assert!(
+            !vault_directory
+                .join(".hatchdoor-managed-checkout.json")
+                .exists()
+        );
+
+        // The new identity: another remote holding the same history.
+        let other_remote = root.path().join("other.git");
+        git2::build::RepoBuilder::new()
+            .bare(true)
+            .clone(&config.repository_url, &other_remote)
+            .expect("second remote");
+        let next = ManagedGitTurnConfig {
+            repository_url: other_remote.to_string_lossy().into_owned(),
+            ..config.clone()
+        };
+        let lease = ManagedCheckoutLease::acquire(next.state_directory.clone(), next.vault_id)
+            .expect("lease");
+        run_managed_git_turn(&next, &lease, &WriteLedger::new())
+            .expect("the new identity clones and syncs");
+        std::fs::write(vault_directory.join("repository/vault/Next.md"), "next\n")
+            .expect("next edit");
+        assert_eq!(
+            run_managed_git_turn(&next, &lease, &WriteLedger::new()).expect("next edit syncs"),
+            ManagedGitOutcome::Synchronized
+        );
+    }
+
+    /// An identity change whose save fails puts the set-aside checkout back,
+    /// so the Vault keeps syncing the remote its definition still names.
+    #[test]
+    fn a_restored_checkout_is_back_in_place_and_still_syncs() {
+        let (_root, config) = fixture(VaultGitMode::TwoWay);
+        let checkout = config
+            .state_directory
+            .join("vaults")
+            .join(config.vault_id.to_string())
+            .join("repository");
+        {
+            let lease =
+                ManagedCheckoutLease::acquire(config.state_directory.clone(), config.vault_id)
+                    .expect("lease");
+            run_managed_git_turn(&config, &lease, &WriteLedger::new()).expect("first clone");
+        }
+        std::fs::write(checkout.join("vault/After.md"), "after\n").expect("note");
+        let retired = retire_managed_checkout(
+            &config.state_directory,
+            config.vault_id,
+            VaultGitMode::TwoWay,
+            "Hatchdoor",
+            "hatchdoor@example.test",
+        )
+        .expect("set aside")
+        .expect("there was a checkout");
+
+        restore_retired_checkout(&config.state_directory, config.vault_id, &retired.archive)
+            .expect("put back");
+
+        assert!(checkout.join("vault/After.md").is_file());
+        let lease = ManagedCheckoutLease::acquire(config.state_directory.clone(), config.vault_id)
+            .expect("lease");
+        assert_eq!(
+            run_managed_git_turn(&config, &lease, &WriteLedger::new())
+                .expect("the old identity still validates"),
+            ManagedGitOutcome::Synchronized,
+            "the commit made while setting it aside is pushed"
+        );
+    }
+
+    /// A Vault whose first clone never landed has nothing to set aside.
+    #[test]
+    fn retiring_a_vault_without_a_checkout_does_nothing() {
+        let (_root, config) = fixture(VaultGitMode::TwoWay);
+        assert_eq!(
+            retire_managed_checkout(
+                &config.state_directory,
+                config.vault_id,
+                VaultGitMode::TwoWay,
+                "Hatchdoor",
+                "hatchdoor@example.test",
+            )
+            .expect("nothing to do"),
+            None
+        );
+    }
+
+    /// While a turn holds the Vault's lease, the checkout is in use, and
+    /// setting it aside refuses with a retryable error, moving nothing.
+    #[test]
+    fn retiring_a_checkout_in_use_refuses_and_moves_nothing() {
+        let (_root, config) = fixture(VaultGitMode::TwoWay);
+        let lease = ManagedCheckoutLease::acquire(config.state_directory.clone(), config.vault_id)
+            .expect("lease");
+        run_managed_git_turn(&config, &lease, &WriteLedger::new()).expect("first clone");
+
+        let refused = retire_managed_checkout(
+            &config.state_directory,
+            config.vault_id,
+            VaultGitMode::TwoWay,
+            "Hatchdoor",
+            "hatchdoor@example.test",
+        )
+        .expect_err("the lease is held");
+
+        assert_eq!(refused.code(), "managed_git_checkout_busy");
+        assert!(refused.retryable());
+        assert!(
+            config
+                .state_directory
+                .join("vaults")
+                .join(config.vault_id.to_string())
+                .join("repository")
+                .is_dir()
+        );
+    }
+
+    /// When the old checkout's notes cannot be committed, nothing moves: the
+    /// edit that asked for this must then be refused (#639).
+    #[test]
+    fn retiring_a_checkout_whose_notes_cannot_be_committed_moves_nothing() {
+        let (_root, config) = fixture(VaultGitMode::TwoWay);
+        let repository = config
+            .state_directory
+            .join("vaults")
+            .join(config.vault_id.to_string())
+            .join("repository");
+        {
+            let lease =
+                ManagedCheckoutLease::acquire(config.state_directory.clone(), config.vault_id)
+                    .expect("lease");
+            run_managed_git_turn(&config, &lease, &WriteLedger::new()).expect("first clone");
+        }
+        // A change outside the Vault folder is one a Vault commit refuses.
+        std::fs::write(repository.join("Outside.md"), "outside\n").expect("outside change");
+
+        let refused = retire_managed_checkout(
+            &config.state_directory,
+            config.vault_id,
+            VaultGitMode::TwoWay,
+            "Hatchdoor",
+            "hatchdoor@example.test",
+        )
+        .expect_err("the commit is refused");
+
+        assert_eq!(refused.code(), "managed_git_dirty_working_copy");
+        assert!(repository.join("Outside.md").is_file(), "nothing moved");
+    }
+
     /// A managed Vault whose first clone has not landed has no Vault subtree
     /// to have changed, so its commit turn reports `UpToDate` rather than
     /// cloning one. Cloning is exactly the network call a commit turn must
@@ -1750,6 +2090,7 @@ mod tests {
             "managed_git_dirty_working_copy",
             "managed_git_validation_failed",
             "existing_git_local_history_validation_failed",
+            "existing_git_local_history_repository_missing",
             "vault_commit_mode_does_not_commit",
         ] {
             assert!(!is_remote_only_failure(commit_code), "{commit_code}");

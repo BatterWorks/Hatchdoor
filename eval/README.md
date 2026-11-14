@@ -1,9 +1,9 @@
 # Hatchdoor eval
 
 Developer harness for comparing embedding models against a labelled query set.
-The checked-in `queries.jsonl` file is a tiny sample that targets the placeholder
-vault in this repository. For real measurements, create your own private query
-set against your own vault.
+The checked-in `queries.jsonl` file is a tiny sample. A checkout supplies no
+Vault and creates no notes. For real measurements, create a private query set
+against your own disposable evaluation Vault.
 
 ## The `eval` feature
 
@@ -21,7 +21,7 @@ add `--features eval` to every `cargo build` and `cargo run` line in them.
 ## Vault path
 
 The eval binary indexes the vault at `VAULT_PATH`, falling back to `./vault`
-(the 2-note placeholder in the repo). It loads `.env` from the repo root on
+(a directory you must supply yourself). It loads `.env` from the repo root on
 startup, so if your `.env` sets `VAULT_PATH=/path/to/notes` you're done. To
 override for a single run, prefix the command:
 
@@ -29,8 +29,8 @@ override for a single run, prefix the command:
 VAULT_PATH=/path/to/notes cargo run --release --features eval --bin eval -- build ...
 ```
 
-Sanity-check the indexing log: `notes=2` means it's still pointing at the
-placeholder vault.
+Sanity-check the indexing log: its note count should match the evaluation
+Vault you supplied.
 
 ## Build the three caches (one-time, ~2 h total)
 

@@ -15,9 +15,9 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use unicode_normalization::UnicodeNormalization;
 
-use crate::cache::parse::frontmatter_span;
 use crate::cache::vault_snapshots::{VaultSnapshotNote, VaultSnapshotRead};
 use crate::search::LayerSelection;
+use crate::vault::{BoundedReadError, MAX_NOTE_BYTES, body_start, note_file_name, read_bounded};
 use crate::vault_registry::VaultId;
 
 use super::VaultReadError;
@@ -123,7 +123,8 @@ pub struct TextMatchNote {
 pub enum TextMatchUnreadReason {
     /// The published Note list names a file that is no longer there.
     Missing,
-    /// The file is there and could not be read.
+    /// The file is there and could not be read: a read failed, it is no
+    /// longer a regular file, or it is over `MAX_NOTE_BYTES` (#636).
     Unreadable,
 }
 
@@ -257,7 +258,10 @@ impl CompiledTextMatch {
         // it. A root that cannot be resolved leaves every Note unread.
         let root = std::fs::canonicalize(root).ok();
         for note in selected {
-            let file_path = format!("{}.md", note.relative_path);
+            let file_path = match root.as_deref() {
+                Some(root) => note_file_name(root, &note.relative_path),
+                None => format!("{}.md", note.relative_path),
+            };
             let shown = found.notes.len() < self.limit;
             let snippets_wanted = if shown { self.snippets_per_note } else { 0 };
             let mut places = TextMatchPlaces::default();
@@ -451,21 +455,6 @@ fn fold(text: &str, case_sensitive: bool) -> String {
     }
 }
 
-/// Where the body begins: just past the line closing a leading frontmatter
-/// block, or `0` when the Note has none. The same block the canonical parser
-/// and the write layer recognise.
-pub(super) fn body_start(content: &str) -> usize {
-    let Some((_, inner_end)) = frontmatter_span(content) else {
-        return 0;
-    };
-    // `inner_end` sits on the `\n` before the closing `---`.
-    let closing = inner_end + 1;
-    match content[closing..].find('\n') {
-        Some(newline) => closing + newline + 1,
-        None => content.len(),
-    }
-}
-
 /// One Note's file as text, read from under the Vault's resolved `root`.
 /// Bytes that are not UTF-8 read as the replacement character rather than
 /// failing the Note.
@@ -484,7 +473,16 @@ fn read_note_file(root: Option<&Path>, file_path: &str) -> Result<String, TextMa
     if std::fs::canonicalize(&path).map_err(reason)? != path {
         return Err(TextMatchUnreadReason::Unreadable);
     }
-    let bytes = std::fs::read(&path).map_err(reason)?;
+    // Bounded and non-blocking: the list is the published one, so the file
+    // may have become a FIFO or grown since the index saw it (#636).
+    // No reason of its own for an oversized note: a client keeps the
+    // `outputSchema` it connected with and would refuse a new value.
+    let bytes = read_bounded(&path, MAX_NOTE_BYTES).map_err(|error| match error {
+        BoundedReadError::Io(error) => reason(error),
+        BoundedReadError::TooLarge { .. }
+        | BoundedReadError::NotRegular
+        | BoundedReadError::NotUtf8 => TextMatchUnreadReason::Unreadable,
+    })?;
     Ok(match String::from_utf8(bytes) {
         Ok(content) => content,
         Err(error) => String::from_utf8_lossy(error.as_bytes()).into_owned(),

@@ -92,7 +92,9 @@ async fn dispatch_tools_call(
     // had accepted months earlier (#191). Scanning and indexing fall through
     // to the Vault-scoped cores, which report a rebuilding Vault themselves
     // and accurately.
-    if state.startup.model_setup_pending() && !is_collection_management_tool(name) {
+    if let Some(hold) = state.startup.model_setup_hold()
+        && !is_collection_management_tool(name)
+    {
         return match name {
             "accept_gemma_terms" => select_model_tool(
                 state,
@@ -110,6 +112,12 @@ async fn dispatch_tools_call(
                     model: crate::model_setup::NOMIC_MODEL_ID,
                 },
             ),
+            // A name that is no tool of Hatchdoor's, in either write posture,
+            // is the same protocol error it is after setup. Setup is pending
+            // for a few seconds after every restart while the model loads,
+            // so the notice would otherwise send an agent that misspelt a
+            // tool to accept terms it may have accepted long ago (#733).
+            other if !is_hatchdoor_tool(other) => Err(unknown_tool(other)),
             // Logged because the client is the only party that used to learn
             // of this rejection: it produced no server-side record at all, so
             // a session full of them was invisible in the logs (#191).
@@ -119,9 +127,24 @@ async fn dispatch_tools_call(
                     setup_state = state.startup.status().state,
                     "MCP tool call rejected: first-run model setup is not complete"
                 );
-                Ok(tool_error(
-                    "Hatchdoor is still being set up. Use get_model_setup_status, accept_gemma_terms, or decline_gemma_terms first.".to_string(),
-                ))
+                // A model already chosen is downloading or, after every
+                // restart, being checked and loaded: the caller only has to
+                // wait. Naming the terms tools there sent an agent to
+                // accept terms accepted long ago (#762). A setup that failed
+                // after a model was chosen is retried from the web app, which
+                // keeps that model; a terms tool would switch it (#775).
+                let notice = match hold {
+                    crate::startup::ModelSetupHold::Preparing => MODEL_PREPARING_NOTICE,
+                    crate::startup::ModelSetupHold::Failed
+                        if state.model_setup.selected()
+                            != crate::model_setup::SelectedModel::TermsRequired =>
+                    {
+                        MODEL_SETUP_FAILED_NOTICE
+                    }
+                    crate::startup::ModelSetupHold::Choice
+                    | crate::startup::ModelSetupHold::Failed => MODEL_CHOICE_NOTICE,
+                };
+                Ok(tool_error(notice.to_string()))
             }
         };
     }
@@ -159,12 +182,19 @@ async fn dispatch_tools_call(
         }
         "refresh_vault" if config.write_enabled => read::refresh_vault_tool(state, arguments).await,
         write_op if write::WRITE_OPS.contains(&write_op) && config.write_enabled => {
-            let vault = write::scoped_vault(&state, &arguments, config)?;
-            // This is the same per-Vault mutation lock used by the V1 HTTP
-            // adapter.  The legacy instance-wide AppState lock deliberately
-            // does not participate in this scoped path.
-            let _guard = write::acquire_mutation(&vault).await?;
-            write::dispatch_write_tool(state, &vault, name, arguments, config).await
+            // One block, so a refusal from resolving or locking the Vault (an
+            // unknown, disabled or read-only Vault) reaches the tool-level
+            // rendering below like the tool's own failures do, as a
+            // structured tool error rather than a JSON-RPC error (#632).
+            async {
+                let vault = write::scoped_vault(&state, &arguments, config)?;
+                // This is the same per-Vault mutation lock used by the V1 HTTP
+                // adapter.  The legacy instance-wide AppState lock deliberately
+                // does not participate in this scoped path.
+                let _guard = write::acquire_mutation(&vault).await?;
+                write::dispatch_write_tool(state, &vault, name, arguments, config).await
+            }
+            .await
         }
         write_op if write::WRITE_OPS.contains(&write_op) => {
             Err(JsonRpcFailure::invalid_params(WRITE_DISABLED_MESSAGE))
@@ -178,9 +208,7 @@ async fn dispatch_tools_call(
         | "retry_vault"
         | "publish_recovery_branch"
         | "refresh_vault" => Err(JsonRpcFailure::invalid_params(WRITE_DISABLED_MESSAGE)),
-        other => Err(JsonRpcFailure::invalid_params(format!(
-            "Unknown MCP tool: {other}"
-        ))),
+        other => Err(unknown_tool(other)),
     };
 
     // Tool-level failures (e.g. "note not found") are rendered as an isError
@@ -195,6 +223,19 @@ async fn dispatch_tools_call(
         other => other,
     }
 }
+
+/// A tool's answer while no search model is chosen, a failed setup included.
+const MODEL_CHOICE_NOTICE: &str = "Hatchdoor is still being set up. Use get_model_setup_status, accept_gemma_terms, or decline_gemma_terms first.";
+
+/// A tool's answer while the chosen model downloads, or is checked and
+/// loaded after a restart. It names no terms tool: there is nothing to
+/// choose, only to wait for (#762).
+const MODEL_PREPARING_NOTICE: &str = "Hatchdoor's search model is downloading or loading. Retry this call in a moment: after a restart this takes a few seconds, a first download a few minutes. get_model_setup_status shows the progress.";
+
+/// A tool's answer after setup failed on an instance whose model is
+/// already chosen. It names no terms tool: accepting or declining the terms
+/// again would replace the saved choice and switch models (#775).
+const MODEL_SETUP_FAILED_NOTICE: &str = "Hatchdoor's search model setup failed. get_model_setup_status gives the reason. Ask the operator to fix it and press Retry setup in the Hatchdoor web app's search, which keeps the chosen model.";
 
 fn select_model_tool(
     state: AppState,
@@ -234,6 +275,7 @@ pub(super) const READ_OPS: &[&str] = &[
     "recently_modified",
     "query_notes",
     "find_text",
+    "find_link_problems",
     "evaluate_saved_query",
     "get_attachment_import_config",
     "list_note_attachments",
@@ -263,6 +305,7 @@ pub(super) async fn dispatch_read_tool(
         "recently_modified" => read::recently_modified_tool(state, arguments).await,
         "query_notes" => read::query_notes_tool(state, arguments).await,
         "find_text" => read::find_text_tool(state, arguments).await,
+        "find_link_problems" => read::find_link_problems_tool(state, arguments).await,
         "evaluate_saved_query" => read::evaluate_saved_query_tool(state, arguments).await,
         // Not gated on `write_enabled`: the tool reports the write posture
         // rather than exercising it, and an agent that cannot upload still
@@ -277,7 +320,9 @@ pub(super) async fn dispatch_read_tool(
         "list_note_attachments" => read::list_note_attachments_tool(state, arguments).await,
         // Fetching an attachment's bytes is a read, like list_note_attachments;
         // it needs `config` for the base64 encoding's size cap.
-        "get_attachment" => read::get_attachment_tool(state, arguments, config).await,
+        "get_attachment" => {
+            read::get_attachment_tool(state, arguments, config, config.base64_limit()).await
+        }
         // Reading a Note's frontmatter projection is a read, like reading the
         // Note itself.
         "get_frontmatter" => read::get_frontmatter_tool(state, arguments).await,
@@ -363,6 +408,23 @@ pub fn setup_tools_list() -> Vec<Value> {
     ])
 }
 
+/// Whether `name` is a tool Hatchdoor has in either write posture: every
+/// list the catalogue is built from, so a tool added there is known here.
+fn is_hatchdoor_tool(name: &str) -> bool {
+    let named = |tool: &Value| tool["name"] == name;
+    read::read_tools_list().iter().any(named)
+        || read::management_tools_list().iter().any(named)
+        || write::write_tools_list().iter().any(named)
+        || setup_tools_list().iter().any(named)
+        || named(&batch::batch_tool_schema())
+}
+
+/// The protocol error for a name Hatchdoor has no tool for, the same during
+/// model setup as after it (#733).
+fn unknown_tool(name: &str) -> JsonRpcFailure {
+    JsonRpcFailure::invalid_params(format!("Unknown MCP tool: {name}"))
+}
+
 /// Vault collection discovery/management tools mirror `handlers/vaults.rs`'s
 /// `/api/v1/vaults` surface, which stays reachable at zero enabled Vaults or a
 /// registry needing recovery. `config.write_enabled` still gates the
@@ -409,6 +471,18 @@ pub(super) fn transfer_link_signer<'a>(
         )
     })?;
     Ok((state.transfer_links.key(&state.runtime_config, token), base))
+}
+
+/// `batch`, with `before_item` called with each item's index just before the
+/// item runs, so a test can change a file between two items of one call.
+#[cfg(test)]
+pub(super) async fn batch_with_item_hook(
+    state: AppState,
+    arguments: Value,
+    config: &McpConfig,
+    before_item: &mut (dyn FnMut(usize) + Send),
+) -> Result<Value, JsonRpcFailure> {
+    batch::run_batch(state, arguments, config, before_item).await
 }
 
 pub(super) fn non_empty_argument(name: &str, value: String) -> Result<String, JsonRpcFailure> {
@@ -505,10 +579,7 @@ mod tests {
 
         assert_eq!(outcome["isError"], true);
         assert_eq!(
-            state
-                .model_setup
-                .selected()
-                .expect("selection after refusal"),
+            state.model_setup.selected(),
             crate::model_setup::SelectedModel::TermsRequired,
             "a lost MCP lifecycle claim must not persist a choice the runtime did not adopt"
         );

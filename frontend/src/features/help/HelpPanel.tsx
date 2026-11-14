@@ -40,7 +40,7 @@ const SEARCH_DELAY_MS = 200;
 
 /** Heading ids inside Help carry this prefix, so they never collide with the
  * ids of the note open underneath. */
-const HEADING_ID_PREFIX = "help-";
+const ANCHOR_ID_PREFIX = "help-";
 
 type PageState = { page: string } & (HelpPageResult | { kind: "loading" });
 
@@ -142,7 +142,7 @@ export function HelpPanel({
       return;
     }
     const body = bodyRef.current;
-    const id = location.heading ? HEADING_ID_PREFIX + location.heading : null;
+    const id = location.heading ? ANCHOR_ID_PREFIX + location.heading : null;
     const heading = id
       ? Array.from(body?.querySelectorAll<HTMLElement>("[id]") ?? []).find(
           (element) => element.id === id,
@@ -187,7 +187,7 @@ export function HelpPanel({
   const components = useMemo(() => {
     const headingIds = new Map(
       extractMarkdownHeadings(hideComments(markdown)).map(
-        ({ sourceLine, id }) => [sourceLine, HEADING_ID_PREFIX + id],
+        ({ sourceLine, id }) => [sourceLine, ANCHOR_ID_PREFIX + id],
       ),
     );
     const renderLink = (href: string | undefined, children: ReactNode) => {
@@ -221,7 +221,9 @@ export function HelpPanel({
         </a>
       );
     };
-    return createManualMarkdownComponents(headingIds, renderLink);
+    return createManualMarkdownComponents(headingIds, renderLink, (id) =>
+      id ? ANCHOR_ID_PREFIX + id : undefined,
+    );
   }, [markdown, location.page, onNavigate]);
 
   const className = [

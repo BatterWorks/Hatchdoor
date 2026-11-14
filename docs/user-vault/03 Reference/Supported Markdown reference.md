@@ -10,7 +10,20 @@ The Markdown features Hatchdoor renders. Every note in a Vault is a plain `.md` 
 
 Plain text can include **bold**, *italic*, ***bold italic***, ~~strikethrough~~, ==highlighted text==, `inline code`, and links such as <https://example.com>.
 
-A highlight is Obsidian's syntax: two equals signs on each side, `==like this==`, which is also what the editor's **Highlight** button writes. Both pairs must sit in the same paragraph, with no space just inside them, so a comparison such as `total == 0` in a sentence stays as written. Inside code and math the signs are always shown as written. Hatchdoor draws every highlight in one colour; Obsidian's coloured highlights, picked with an emoji after the opening signs, show as an ordinary highlight with the emoji in it.
+A highlight is Obsidian's syntax: two equals signs on each side, `==like this==`, which is also what the editor's **Highlight** button writes. Both pairs must sit in the same paragraph, with no space just inside them, so a comparison such as `total == 0` in a sentence stays as written. Inside code and math the signs are always shown as written.
+
+Obsidian's six highlight colours work too. Put one of these emoji straight after the opening signs:
+
+| Colour | Example |
+| ------ | ------- |
+| Red | `==🔴Important==` |
+| Orange | `==🟠Follow up==` |
+| Yellow | `==🟡Remember this==` |
+| Green | `==🟢Completed==` |
+| Blue | `==🔵Reference==` |
+| Purple | `==🟣Idea==` |
+
+The page, the editor's preview, Help and the editor draw the highlight in that colour and hide the emoji; the editor shows it again while the cursor is on that line, so you can change it. The emoji stays in the file, so Obsidian shows the same colour. Any other character after the signs, another coloured circle such as 🟤 included, is ordinary text in an ordinary highlight. A highlight without an emoji keeps its usual colour. Search result snippets leave out the emoji along with the signs. The **Highlight** button writes a plain highlight; to colour one, type the emoji after the opening signs.
 
 Raw HTML is not supported, apart from comments. Use Markdown syntax so a note reads the same in other apps.
 
@@ -145,35 +158,60 @@ Store an image near the note that references it, and give it a safe filename: lo
 
 ## Wikilinks
 
-Hatchdoor resolves `[[Note Title]]` to another note in the same Vault, and refreshes those links whenever Markdown changes. Five forms:
+Hatchdoor resolves `[[Note Title]]` to another note in the same Vault, and refreshes those links whenever Markdown changes. Seven forms:
 
 - Plain: `[[Connect your agent]]` → [[Connect your agent]]
 - Aliased: `[[Connect your agent|connect an agent]]` shows the text after the `|`.
 - Aliased inside a table cell: `[[Connect your agent\|connect an agent]]`. A bare `|` would end the cell, so the alias pipe is written escaped. Hatchdoor reads that backslash as syntax rather than as part of the note's name, so the link resolves, shows up in backlinks, and is rewritten by a rename like any other.
 - Heading-scoped: `[[Connect your agent#Configure your MCP client]]` opens the note at that heading.
+- Block-scoped: `[[Connect your agent#^a1b2c3]]` opens the note at the paragraph, list item or quote that ends in the block id `^a1b2c3`, the form Obsidian writes when you link to a block. A quote or a table can also carry its id on a line of its own right under it, after a blank line. The Reading view hides the `^a1b2c3` text itself. A block id that no longer exists opens the note at the top, and in the editor a block link opens the note at the top too.
+- Within the same note: `[[#Images and PDFs]]` or `[[#^a1b2c3]]`, with no note name, jumps to that heading or block in the note it is written in, the form Obsidian writes for a link inside one note. It shows the heading's name, or its alias. A heading or block that no longer exists leaves you where you are.
 - To a note that does not exist yet: `[[This Note Does Not Exist Yet]]` still renders, and leads nowhere until that note is created.
+
+When two notes share a name, add part of the folder path to pick one: with `projects/a/Plan` and `projects/b/Plan`, `[[b/Plan]]` opens the second, and a leading `/` counts from the Vault root, so `[[/Plan]]` opens a `Plan` at the top level. Without a folder, a link whose capitals match a note's name exactly wins over one that matches with case ignored, and after that the note nearest the linking note wins. A link that still fits both equally goes to the first in path order, and a rename or delete of either note leaves it alone. When a rename or move would hand a link to a different same-named note, Hatchdoor writes that link's folder path in, so it keeps opening the note it opened before. A link can also name a note by its address, such as `[[connect-your-agent]]`, but never by the numbered address a second same-named note gets: `[[Plan 2]]` stays a link to a note that does not exist yet even when a second `Plan` has the address `plan-2`. Names are compared the same way however the file system stored their accents and syllables, so a Korean or Japanese note synced from a Mac is reached by a link typed on any keyboard.
+
+A note's address comes from its file name, not its folder. When two names give the same address, such as two notes named `Plan` in different folders, or `Plan` and `Plan?`, the first in path order gets `plan` and the other `plan-2`, and a note on a layer comes after one that is not. Which note holds which address can change when a note with that name is added, moved, renamed or deleted, so a browser bookmark or a link sent outside Hatchdoor can end up opening the other note. Keep file names unique when an address must stay put. A `[[Plan]]` link inside the Vault is not affected: it goes by the rules above, not by the address.
+
+## Embedded notes
+
+Put `!` in front of a wikilink to a note and the Reading view shows that note's content where the link sits, in a frame that names the note and links to it. Three forms:
+
+- The whole note: `![[Other note]]` shows its text, without its properties.
+- One section: `![[Other note#Heading]]` shows that heading and everything under it, down to the next heading of the same or a higher level.
+- One block: `![[Other note#^a1b2c3]]` shows the paragraph, list item, quote or table that carries the block id `^a1b2c3`.
+
+The embedded text looks the way it does in its own note: callouts, tables, saved queries, diagrams, math and images included. An embed can sit inside a callout or a list. Embeds inside an embedded note are shown too, up to three levels deep.
+
+Some embeds show as a plain link to the note instead of its content:
+
+- the note, the heading or the block does not exist, or the note cannot be read;
+- the note embeds itself, directly or through a chain of notes, such as A embedding B and B embedding A;
+- the embed is a fourth level down.
+
+An embed only reaches notes in the same Vault, the way every note link does. The source-mode preview shows embeds the same way. The live editor shows the `![[...]]` text as written, and an agent reading a note gets the file as written, with no embedded content. Embeds already count as links in backlinks and the graph. To edit embedded text, open its note from the frame's link. Embedded images and PDFs work as described under [[#Images and PDFs]].
 
 ## Markdown links to notes
 
-A plain Markdown link whose target is a `.md` file is a note link too, the form Obsidian writes when its **Use `[[Wikilinks]]`** setting is off and most other Markdown tools write by default. It opens the note inside Hatchdoor and counts toward backlinks, the **Links** section under the note, the graph and statistics as a wikilink does. A wikilink and a Markdown link from one note to the same note count as one link.
+A plain Markdown link whose target is a `.md` file, in any case, is a note link too, the form Obsidian writes when its **Use `[[Wikilinks]]`** setting is off and most other Markdown tools write by default. It opens the note inside Hatchdoor and counts toward backlinks, the **Links** section under the note, the graph and statistics as a wikilink does. A wikilink and a Markdown link from one note to the same note count as one link.
 
 - Relative to the note: `[the launch plan](../20-projects/Beacon%20Launch.md)`
 - From the Vault root: `[the launch plan](/20-projects/Beacon%20Launch.md)`
 - With the path in angle brackets, so spaces need no escaping: `[the launch plan](<../20-projects/Beacon Launch.md>)`
 - Reference style: `[the launch plan][launch]`, with `[launch]: ../20-projects/Beacon%20Launch.md` on a line of its own
 - Straight to a heading: `[first run](Install.md#First%20Run)` or `[first run](Install.md#first-run)`. Both reach the same heading, and a heading that no longer exists opens the note at the top.
+- Straight to a block: `[that step](Install.md#^a1b2c3)`, which lands on the paragraph ending in `^a1b2c3` as the wikilink form does.
 
 The target is a path, not a title. Hatchdoor reads it the way it reads an attachment path: a leading `/` starts at the Vault root, otherwise it is tried from the linking note's own folder and then from the Vault root, and a bare filename such as `Beacon%20Launch.md` is found anywhere in the Vault, the nearest note of that name winning. A path that names a folder never falls back to a note of the same name elsewhere, so with two notes called `Plan`, `../a/Plan.md` always reaches `a/Plan`. Write a space as `%20`; a `%` that is not followed by two hex digits is read as a literal percent sign, so `Save%2020%%20now.md` still reaches `Save 20% now.md`. A target that names no note renders as a missing link rather than a link to nowhere.
 
-Only a target ending in `.md` counts. A link written without the extension, a link to any other file or to a web address, and image syntax pointing at a `.md` file, `![x](Note.md)`, are left as they always were. Links inside code are not links.
+Only a target ending in `.md` counts, in any case, so `[x](Report.MD)` is a note link like `[x](Report.md)`. A link written without the extension, a link to any other file or to a web address, and image syntax pointing at a `.md` file, `![x](Note.md)`, are left as they always were. Links inside code are not links.
 
-When a note is renamed or moved, Hatchdoor rewrites the Markdown links that point at it and keeps the form you wrote: a relative path is worked out again from the linking note, a path starting with `/` keeps its `/`, and a bare filename stays bare while that name still reaches the note. The link text is never changed. A reference-style link changes on its definition line only. Moving the note that holds the links rewrites them from its new folder so they still reach the same notes. Deleting a note removes each Markdown link to it and keeps the link text as plain words, so `see [the plan](Plan.md) today` becomes `see the plan today`. When Hatchdoor writes a path it escapes only spaces, `%`, `#`, square brackets and parentheses; accented and non-Latin letters stay readable.
+When a note is renamed or moved, Hatchdoor rewrites the Markdown links that point at it and keeps the form you wrote: a relative path is worked out again from the linking note, a path starting with `/` keeps its `/`, and a bare filename stays bare while that name still reaches the note. The link text is never changed. A reference-style link changes on its definition line only. Moving the note that holds the links rewrites them from its new folder so they still reach the same notes. A rewritten path ends in the extension the linked file has, so a link to `Report.MD` keeps `.MD`. Deleting a note removes each Markdown link to it and keeps the link text as plain words, so `see [the plan](Plan.md) today` becomes `see the plan today`. When Hatchdoor writes a path it escapes only spaces, `%`, `#`, square brackets and parentheses; accented and non-Latin letters stay readable.
 
 ## Which link style Hatchdoor writes
 
 A Vault has one link style, wikilinks or Markdown links, and every link Hatchdoor inserts follows it: a note picked from the editor's `[[` suggestions, and an attachment pasted, uploaded or dropped into a note. You don't set it in Hatchdoor. It is read from the Vault each time:
 
-- If the Vault has Obsidian's settings file, `.obsidian/app.json`, its **Use `[[Wikilinks]]`** switch decides. Obsidian stores the switch turned off as `"useMarkdownLinks": true`. With the switch on, the key missing, or a file Hatchdoor cannot read, the Vault uses wikilinks, as Obsidian does.
+- If the Vault has Obsidian's settings file, `.obsidian/app.json`, its **Use `[[Wikilinks]]`** switch decides. Obsidian stores the switch turned off as `"useMarkdownLinks": true`. With the switch on, the key missing, or a file Hatchdoor cannot read, the Vault uses wikilinks, as Obsidian does. Hatchdoor reads the file only when it is an ordinary file of at most 64 KB, so a settings file that is a symlink, such as one shared between Vaults, also means wikilinks.
 - Otherwise Hatchdoor counts the note links and attachment embeds already in the Vault, and the form most of them use wins. No links at all, or an exact tie, means wikilinks.
 
 In a wikilink Vault, Hatchdoor inserts `[[Note Title]]` and `![[path/to/file.png]]`. In a Markdown-link Vault it inserts `[Note Title](path/to/Note%20Title.md)` and `![](path/to/file.png)`. The link text is the note's title, with any `[`, `]`, `` ` `` or `\` escaped.
@@ -205,6 +243,8 @@ status: current
 
 Hatchdoor reads the block and shows its properties, such as tags, aliases and any other key with its value, above the note body and apart from its text.
 
+The block's inner text may be at most 16,384 bytes. A larger block, or one with no closing delimiter, is invalid frontmatter: the note still reads as text, but `get_frontmatter` refuses it with `invalid_frontmatter`. Shorten or repair the block in the note itself. A leading UTF-8 byte order mark, an invisible marker some editors add before `---`, is accepted and kept when properties are edited.
+
 ## Tags
 
 A note's tags come from two places. Anything listed under `tags:` in frontmatter counts, in whatever shape you write it, including plain words and numbers.
@@ -227,10 +267,9 @@ An agent renaming a tag across the Vault with `rename_tag` goes by these same ru
 
 Obsidian reads a few things Hatchdoor does not draw yet. Here is what you see instead:
 
-- **An embedded note**, `![[Other note]]` or `![[Other note#Heading]]`, shows as a link to that note, or to that heading, rather than the note's content. An embedded block, `![[Other note#^id]]`, links to the note. A note that does not exist shows as a missing link. Embedded images and PDFs work as described under [[#Images and PDFs]].
-- **A link to a block**, `[[Other note#^id]]`, opens the note at the top rather than at that paragraph.
 - **An inline footnote**, `text^[a note]`, shows as written. Use a standard footnote, `text[^1]` with `[^1]: a note` on a line of its own, which works.
-- **A canvas file** (`.canvas`) and **a standalone Bases file** (`.base`) are not listed in the explorer and do not open. A saved query written as a `base` block inside a note works, as described under [[#Saved queries]].
+- **A canvas file** (`.canvas`), Obsidian's whiteboard, is not drawn. The explorer lists it in its folder, after the notes, and selecting it downloads the file. A link or an embed of one in a note, `[[Plan.canvas]]` or `![[Plan.canvas]]`, shows in the Reading view as a link that downloads it too. Hatchdoor keeps a canvas pointing at the right files: renaming, moving or archiving a note or an attachment, in the Web UI or through an agent, changes the path on every card that shows that file and nothing else in the canvas. Deleting a note or an attachment leaves its cards as they are, so Obsidian shows them as missing, as it does after a delete in Obsidian. A canvas that is not valid JSON, or is larger than 8 MB, is left untouched, and the result of the rename or move names it. A change made outside Hatchdoor is not followed. Canvases are not searched, and a card does not count as a link in backlinks or the graph.
+- **A standalone Bases file** (`.base`) is not listed in the explorer and does not open. A saved query written as a `base` block inside a note works, as described under [[#Saved queries]].
 
 ---
 

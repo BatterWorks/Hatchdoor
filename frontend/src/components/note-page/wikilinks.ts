@@ -1,7 +1,11 @@
 import { useEffect, useState } from "react";
 
-import { escapeMarkdownLabel, parseWikilinkTarget } from "../../lib/markdown";
-import { slugifyHeading } from "../../lib/noteHeadings";
+import {
+  escapeMarkdownLabel,
+  ownNoteFragment,
+  parseWikilinkTarget,
+} from "../../lib/markdown";
+import { blockAnchorId, fragmentAnchor } from "../../lib/noteHeadings";
 import { apiFetch, withAccessToken } from "../../api/api";
 import type { VaultId, VaultResolveBatchResponse } from "../../types";
 import {
@@ -9,6 +13,7 @@ import {
   findMarkdownImages,
   findMarkdownNoteLinks,
 } from "./markdownLinks";
+import { noteEmbedHref } from "./noteEmbeds";
 
 export type ResolvedWikilink = { slug: string; archived: boolean };
 
@@ -23,9 +28,10 @@ const WIKILINK_PATTERN = /(!?)\[\[([^\]\r\n]+)\]\]/g;
 // Resolution results are stable for the life of the page, and every content
 // change re-runs this effect, so without a cache each keystroke-driven commit
 // re-POSTs every target in the note and widens the settling window. Keyed by
-// `vaultId:target` — wikilinks are always resolved within their own Vault
-// (cross-Vault resolution is ruled out by #62), and the same target string
-// can legitimately resolve differently in different Vaults.
+// Vault, linking note and target: wikilinks are always resolved within their
+// own Vault (cross-Vault resolution is ruled out by #62), and between two
+// namesakes the one nearest the linking note wins (#626), so the same target
+// can name different notes from different notes.
 const resolveCache = new Map<string, ResolvedWikilink | null>();
 
 // Assets resolve relative to the note that embeds them, so the same target in
@@ -37,12 +43,8 @@ const assetResolveCache = new Map<string, string | null>();
 // folder, so like assets they are keyed by the note's path as well.
 const noteLinkResolveCache = new Map<string, ResolvedWikilink | null>();
 
-function cacheKey(vaultId: VaultId, target: string): string {
-  return `${vaultId}:${target}`;
-}
-
-// For targets read relative to the note they are written in: assets and
-// Markdown note links.
+// Every target is read from the note it is written in: assets and Markdown
+// note links by path, wikilinks to break a tie between namesakes.
 function pathCacheKey(
   vaultId: VaultId,
   noteRelativePath: string,
@@ -83,6 +85,34 @@ function noteRouteHref(
   return `${prefix}${hit.slug}${anchor ? `#${anchor}` : ""}`;
 }
 
+/**
+ * The wikilink targets as the server is asked for them, and the way back from
+ * each answer to the targets as written. A link that names only a place in its
+ * own note, `[[#Heading]]` or `[[#^id]]`, has no note name to look up (#727):
+ * it is asked as that note's own path from the Vault root, which no other note
+ * answers to. A path holding `#`, `^` or `|` would be cut short there, so such
+ * a note's links go out as written and stay missing.
+ */
+function serverTargets(
+  targets: string[],
+  noteRelativePath: string,
+): { sent: string[]; writtenAs: (answered: string) => string[] } {
+  const written = new Map<string, string[]>();
+  for (const target of targets) {
+    const sent =
+      noteRelativePath &&
+      !/[#^|]/.test(noteRelativePath) &&
+      ownNoteFragment(target) !== null
+        ? `/${noteRelativePath.replace(/\\/g, "/")}${target}`
+        : target;
+    written.set(sent, [...(written.get(sent) ?? []), target]);
+  }
+  return {
+    sent: [...written.keys()],
+    writtenAs: (answered) => written.get(answered) ?? [answered],
+  };
+}
+
 function missingNoteHref(target: string): string {
   return `/__missing__/${encodeURIComponent(target)}`;
 }
@@ -112,22 +142,27 @@ export function rewriteWikilinks(
     const parsed = parseWikilinkTarget(body);
 
     if (bang === "!") {
-      // A note embed draws as a link to the note (#573). Showing the note's
-      // content inline is #578. A name that reads as a note is tried as one
-      // first; any other name only when no file answered to it, so
-      // `![[Release 2.8]]` still finds its note.
+      // A note embed draws the note's content (#699); the renderer gets it
+      // as an `/__embed__/` link and falls back to the note link (#573) when
+      // it cannot. A name that reads as a note is tried as one first; any
+      // other name only when no file answered to it, so `![[Release 2.8]]`
+      // still finds its note.
       const [pathPart] = splitPathSuffix(parsed.target);
       const noteName = isNoteEmbedTarget(pathPart);
       const filePath = resolvedAssets.get(pathPart);
       if (noteName || !filePath) {
-        const hit = resolved.get(parsed.target) ?? null;
+        // A note embedding a part of itself is left to #699's rules, which
+        // name no such form: it draws as it did before #727.
+        const hit =
+          ownNoteFragment(parsed.target) === null
+            ? (resolved.get(parsed.target) ?? null)
+            : null;
         if (hit) {
-          // A block id is not yet a place to land, so `#^id` opens the note
-          // at the top (#578).
-          const anchor = parsed.target.includes("#^")
-            ? ""
-            : extractAnchor(parsed.target);
-          const href = noteRouteHref(vaultId, hit, anchor);
+          const href = noteEmbedHref({
+            slug: hit.slug,
+            archived: hit.archived,
+            anchor: wikilinkAnchor(parsed.target),
+          });
           const label = wikilinkDisplayLabel(body, parsed.label, hit.archived);
           return `[${escapeMarkdownLabel(label)}](${href})`;
         }
@@ -141,10 +176,15 @@ export function rewriteWikilinks(
         noteRelativePath,
         resolvedAssets,
       );
+      if (isCanvasAssetTarget(parsed.target)) {
+        // Hatchdoor does not draw a canvas (ADR-53): its embed is a link
+        // that downloads the file, never an image that cannot load.
+        return `[${escapeMarkdownLabel(parsed.label)}](${source})`;
+      }
       return `![${escapeMarkdownLabel(parsed.label)}](${source})`;
     }
 
-    if (isPdfAssetTarget(parsed.target)) {
+    if (isPdfAssetTarget(parsed.target) || isCanvasAssetTarget(parsed.target)) {
       const source = assetHref(
         vaultId,
         parsed.target,
@@ -156,8 +196,11 @@ export function rewriteWikilinks(
 
     const hit = resolved.get(parsed.target) ?? null;
     if (hit) {
-      const href = noteRouteHref(vaultId, hit, extractAnchor(parsed.target));
-      const label = wikilinkDisplayLabel(body, parsed.label, hit.archived);
+      const href = noteRouteHref(vaultId, hit, wikilinkAnchor(parsed.target));
+      const label =
+        ownNoteFragment(parsed.target) === null
+          ? wikilinkDisplayLabel(body, parsed.label, hit.archived)
+          : parsed.label;
       return `[${escapeMarkdownLabel(label)}](${href})`;
     }
     return `[${escapeMarkdownLabel(parsed.label)}](${missingNoteHref(parsed.target)})`;
@@ -202,7 +245,7 @@ function rewriteMarkdownDestinations(
       ? noteRouteHref(
           vaultId,
           hit,
-          link.anchor ? slugifyHeading(decodePercent(link.anchor)) : "",
+          link.anchor ? fragmentAnchor(decodePercent(link.anchor)) : "",
         )
       : missingNoteHref(decodePercent(link.rawPath));
     edits.push({ ...link, href });
@@ -259,14 +302,17 @@ export function useResolvedWikilinks(
 
     void (async () => {
       const matches = [...markdown.matchAll(WIKILINK_PATTERN)];
-      const isPdf = (match: RegExpMatchArray) =>
-        isPdfAssetTarget(parseWikilinkTarget(match[2]).target);
+      // A PDF or a canvas is a file whether it is linked or embedded.
+      const isFileTarget = (match: RegExpMatchArray) => {
+        const target = parseWikilinkTarget(match[2]).target;
+        return isPdfAssetTarget(target) || isCanvasAssetTarget(target);
+      };
       const isAsset = (match: RegExpMatchArray) =>
-        match[1] === "!" || isPdf(match);
-      // Embeds go out as note targets too, PDFs aside: one that names no file
+        match[1] === "!" || isFileTarget(match);
+      // Embeds go out as note targets too, PDFs and canvases aside: one that names no file
       // may name a note, and is then drawn as a link to it (#573).
       const rawTargets = matches
-        .filter((m) => !isPdf(m))
+        .filter((m) => !isFileTarget(m))
         .map((m) => parseWikilinkTarget(m[2]).target)
         .filter((target) => target.length > 0);
       const uniqueTargets = [...new Set(rawTargets)];
@@ -297,7 +343,7 @@ export function useResolvedWikilinks(
       const { found: map, missing } = fromCache(
         resolveCache,
         uniqueTargets,
-        (target) => cacheKey(vaultId, target),
+        pathKey,
       );
       const { found: assetMap, missing: missingAssets } = fromCache(
         assetResolveCache,
@@ -310,6 +356,7 @@ export function useResolvedWikilinks(
         pathKey,
       );
 
+      const asked = serverTargets(missing, noteRelativePath);
       if (
         missing.length > 0 ||
         missingAssets.length > 0 ||
@@ -324,7 +371,7 @@ export function useResolvedWikilinks(
                 "Content-Type": "application/json",
               },
               body: JSON.stringify({
-                targets: missing,
+                targets: asked.sent,
                 asset_targets: missingAssets,
                 // Sent only when there are some, so a note without Markdown
                 // note links asks exactly what it asked before ADR-28.
@@ -342,8 +389,10 @@ export function useResolvedWikilinks(
               const resolved = result.slug
                 ? { slug: result.slug, archived: result.archived }
                 : null;
-              map.set(result.target, resolved);
-              resolveCache.set(cacheKey(vaultId, result.target), resolved);
+              for (const target of asked.writtenAs(result.target)) {
+                map.set(target, resolved);
+                resolveCache.set(pathKey(target), resolved);
+              }
             }
             for (const result of json.note_link_results ?? []) {
               const resolved = result.slug
@@ -399,11 +448,12 @@ export async function resolveNoteTargets(
 ): Promise<Map<string, ResolvedWikilink | null>> {
   const unique = [...new Set(targets.filter((target) => target.length > 0))];
   const { found, missing } = fromCache(resolveCache, unique, (target) =>
-    cacheKey(vaultId, target),
+    pathCacheKey(vaultId, noteRelativePath, target),
   );
   if (missing.length === 0) {
     return found;
   }
+  const asked = serverTargets(missing, noteRelativePath);
   try {
     const res = await apiFetch(
       `/api/v1/vaults/${encodeURIComponent(vaultId)}/resolve-batch`,
@@ -411,7 +461,7 @@ export async function resolveNoteTargets(
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          targets: missing,
+          targets: asked.sent,
           asset_targets: [],
           note_path: noteRelativePath,
         }),
@@ -423,8 +473,13 @@ export async function resolveNoteTargets(
         const resolved = result.slug
           ? { slug: result.slug, archived: result.archived }
           : null;
-        found.set(result.target, resolved);
-        resolveCache.set(cacheKey(vaultId, result.target), resolved);
+        for (const target of asked.writtenAs(result.target)) {
+          found.set(target, resolved);
+          resolveCache.set(
+            pathCacheKey(vaultId, noteRelativePath, target),
+            resolved,
+          );
+        }
       }
     }
   } catch {
@@ -459,6 +514,45 @@ export function cachedAssetHref(
     noteRelativePath,
     new Map([[pathPart, resolved]]),
   );
+}
+
+/**
+ * The slug of the note at exactly `relativePath` (as a note read spells it,
+ * without `.md`), `null` when no note is there, or `undefined` when the server
+ * could not be asked (#627). Asked as a root-anchored Markdown note link,
+ * which resolves by path alone, never by a same-named note's title. Uncached:
+ * it is asked right after a slug changed hands.
+ */
+export async function findNoteAtPath(
+  vaultId: VaultId,
+  relativePath: string,
+): Promise<string | null | undefined> {
+  const target = `/${relativePath.split("/").map(encodeURIComponent).join("/")}.md`;
+  try {
+    const res = await apiFetch(
+      `/api/v1/vaults/${encodeURIComponent(vaultId)}/resolve-batch`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          targets: [],
+          asset_targets: [],
+          note_link_targets: [target],
+          note_path: relativePath,
+        }),
+      },
+    );
+    if (!res.ok) {
+      return undefined;
+    }
+    const json = (await res.json()) as VaultResolveBatchResponse;
+    const hit = json.note_link_results?.find(
+      (result) => result.target === target,
+    );
+    return hit ? hit.slug : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /**
@@ -564,6 +658,11 @@ function isPdfAssetTarget(target: string): boolean {
   return splitPathSuffix(target)[0].toLowerCase().endsWith(".pdf");
 }
 
+/** Whether a target names an Obsidian canvas, which is served as a download. */
+function isCanvasAssetTarget(target: string): boolean {
+  return splitPathSuffix(target)[0].toLowerCase().endsWith(".canvas");
+}
+
 function splitPathSuffix(input: string): [string, string] {
   const markerIndex = input.search(/[?#]/);
   if (markerIndex < 0) {
@@ -578,14 +677,19 @@ function dirname(relativePath: string): string {
   return parts.join("/");
 }
 
-function extractAnchor(target: string): string {
+/**
+ * The anchor a wikilink target lands on, without its `#`: a heading's for
+ * `Note#Heading`, a block's for `Note#^id` or `Note^id` (#578), empty for the
+ * note itself.
+ */
+export function wikilinkAnchor(target: string): string {
   const hashIdx = target.indexOf("#");
   if (hashIdx >= 0) {
-    return slugifyHeading(target.slice(hashIdx + 1));
+    return fragmentAnchor(target.slice(hashIdx + 1));
   }
   const caretIdx = target.indexOf("^");
   if (caretIdx >= 0) {
-    return target.slice(caretIdx + 1);
+    return blockAnchorId(target.slice(caretIdx + 1).trim());
   }
   return "";
 }

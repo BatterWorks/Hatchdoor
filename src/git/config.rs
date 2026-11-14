@@ -1,8 +1,7 @@
-/// Versioning mode as the legacy `HATCHDOOR_GIT_SYNC_ENABLED` setting spells
-/// it. `off` is represented by the absence of a [`GitConfig`]. Since #185
-/// deleted the instance-wide lane, this drives no runtime behaviour: only the
-/// demo-mode startup posture check reads it, and a per-Vault Git turn selects its
-/// operation from `vault_registry::VaultGitMode` instead.
+/// Versioning mode of one Git operation. Since #185 deleted the instance-wide
+/// lane, a per-Vault Git turn selects its operation from
+/// `vault_registry::VaultGitMode`; nothing parses the retired
+/// `HATCHDOOR_GIT_SYNC_ENABLED` into this any more (#644).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GitMode {
     Local,
@@ -20,13 +19,18 @@ impl GitMode {
 
 /// Static configuration for one Git operation on one Vault directory.
 ///
-/// Every field except `vault_path`, `author_name`, and `author_email` is a
-/// remnant of the instance-wide lane #185 deleted: they are still parsed from
-/// the legacy settings by [`GitConfig::from_snapshot`] for the demo posture
-/// check, and `run_local_history_git_turn` fills them
-/// with placeholders its callees never read.
+/// Every field except `repository_path`, `vault_path`, `author_name`, and
+/// `author_email` is a remnant of the instance-wide lane #185 deleted:
+/// `run_local_history_git_turn` fills them with placeholders its callees
+/// never read.
 #[derive(Clone, PartialEq, Eq)]
 pub struct GitConfig {
+    /// The repository folder this Vault's history lives in: the Vault folder
+    /// itself, or the checkout the Vault is a subfolder of. Local history
+    /// opens exactly this repository and never searches upward from it, so
+    /// a Vault that lost its own `.git` cannot commit into an enclosing
+    /// repository instead (#678).
+    pub repository_path: std::path::PathBuf,
     /// Absolute path to the Vault. Remote mode requires it to be the Git
     /// repository root; Local history may use an existing enclosing checkout.
     pub vault_path: std::path::PathBuf,
@@ -54,6 +58,7 @@ pub struct GitConfig {
 impl std::fmt::Debug for GitConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("GitConfig")
+            .field("repository_path", &self.repository_path)
             .field("vault_path", &self.vault_path)
             .field("mode", &self.mode)
             .field("remote", &self.remote)
@@ -64,54 +69,6 @@ impl std::fmt::Debug for GitConfig {
             .field("author_name", &self.author_name)
             .field("author_email", &self.author_email)
             .finish()
-    }
-}
-
-impl GitConfig {
-    /// Returns `Ok(None)` when versioning is off, `Ok(Some(_))` when the selected
-    /// mode is fully configured, and `Err(_)` when a required value is missing.
-    pub fn from_snapshot(
-        vault_path: std::path::PathBuf,
-        snapshot: &crate::runtime_config::ConfigSnapshot,
-    ) -> Result<Option<Self>, String> {
-        let mode = parse_mode(snapshot.required("HATCHDOOR_GIT_SYNC_ENABLED")?)?;
-        let Some(mode) = mode else {
-            return Ok(None);
-        };
-
-        let token = if mode == GitMode::Remote {
-            non_empty_setting(snapshot, "HATCHDOOR_GIT_HTTPS_TOKEN")
-                .ok_or("Remote versioning needs HATCHDOOR_GIT_HTTPS_TOKEN before it can start")?
-        } else {
-            String::new()
-        };
-        let remote = non_empty_setting(snapshot, "HATCHDOOR_GIT_REMOTE")
-            .unwrap_or_else(|| "origin".to_string());
-        let branch = non_empty_setting(snapshot, "HATCHDOOR_GIT_BRANCH")
-            .unwrap_or_else(|| "main".to_string());
-        let username = non_empty_setting(snapshot, "HATCHDOOR_GIT_HTTPS_USERNAME")
-            .unwrap_or_else(|| "hatchdoor".to_string());
-        let debounce_seconds = snapshot
-            .required("HATCHDOOR_GIT_DEBOUNCE_SECONDS")
-            .ok()
-            .and_then(|v| v.parse::<u64>().ok())
-            .unwrap_or(30);
-        let author_name = non_empty_setting(snapshot, "HATCHDOOR_GIT_AUTHOR_NAME")
-            .unwrap_or_else(|| "Hatchdoor".to_string());
-        let author_email = non_empty_setting(snapshot, "HATCHDOOR_GIT_AUTHOR_EMAIL")
-            .unwrap_or_else(|| "hatchdoor@localhost".to_string());
-
-        Ok(Some(Self {
-            vault_path,
-            mode,
-            remote,
-            branch,
-            username,
-            token,
-            debounce_seconds,
-            author_name,
-            author_email,
-        }))
     }
 }
 
@@ -131,6 +88,20 @@ pub fn resolve_commit_identity(
     }
 }
 
+/// The instance-wide default commit identity, read from one settings
+/// snapshot. A Vault's own configured identity still overrides it (see
+/// [`resolve_commit_identity`]).
+pub(crate) fn author_defaults(
+    snapshot: &crate::runtime_config::ConfigSnapshot,
+) -> (String, String) {
+    (
+        non_empty_setting(snapshot, "HATCHDOOR_GIT_AUTHOR_NAME")
+            .unwrap_or_else(|| "Hatchdoor".to_string()),
+        non_empty_setting(snapshot, "HATCHDOOR_GIT_AUTHOR_EMAIL")
+            .unwrap_or_else(|| "hatchdoor@localhost".to_string()),
+    )
+}
+
 pub(crate) fn non_empty_setting(
     snapshot: &crate::runtime_config::ConfigSnapshot,
     key: &str,
@@ -142,87 +113,9 @@ pub(crate) fn non_empty_setting(
         .filter(|v| !v.is_empty())
 }
 
-pub(crate) fn parse_mode(value: &str) -> Result<Option<GitMode>, String> {
-    let normalized = value.trim().to_ascii_lowercase();
-    match normalized.as_str() {
-        "" | "off" | "false" | "0" | "no" => Ok(None),
-        "local" => Ok(Some(GitMode::Local)),
-        "remote" | "true" | "1" | "yes" | "on" => Ok(Some(GitMode::Remote)),
-        _ => Err("Choose versioning mode off, local, or remote.".to_string()),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
-
-    fn snapshot(
-        values: impl IntoIterator<Item = (&'static str, &'static str)>,
-    ) -> std::sync::Arc<crate::runtime_config::ConfigSnapshot> {
-        let dir = tempfile::tempdir().expect("tempdir");
-        crate::runtime_config::RuntimeConfig::load(
-            dir.path().join("settings.json"),
-            crate::runtime_config::Environment::from_values(
-                values
-                    .into_iter()
-                    .map(|(key, value)| (key.to_string(), value.to_string())),
-            ),
-            crate::runtime_config::live_settings_defaults(),
-        )
-        .expect("runtime config")
-        .snapshot()
-    }
-
-    #[test]
-    fn disabled_when_flag_unset() {
-        let snapshot = snapshot([]);
-        let cfg = GitConfig::from_snapshot(PathBuf::from("/vault"), &snapshot).expect("ok");
-        assert_eq!(cfg, None);
-    }
-
-    #[test]
-    fn enabled_requires_token() {
-        let snapshot = snapshot([("HATCHDOOR_GIT_SYNC_ENABLED", "true")]);
-        let result = GitConfig::from_snapshot(PathBuf::from("/vault"), &snapshot);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn applies_defaults_when_enabled_with_token() {
-        let snapshot = snapshot([
-            ("HATCHDOOR_GIT_SYNC_ENABLED", "1"),
-            ("HATCHDOOR_GIT_HTTPS_TOKEN", "secret"),
-        ]);
-        let cfg = GitConfig::from_snapshot(PathBuf::from("/vault"), &snapshot)
-            .expect("ok")
-            .expect("enabled");
-        assert_eq!(cfg.remote, "origin");
-        assert_eq!(cfg.branch, "main");
-        assert_eq!(cfg.username, "hatchdoor");
-        assert_eq!(cfg.debounce_seconds, 30);
-        assert_eq!(cfg.author_email, "hatchdoor@localhost");
-        assert_eq!(cfg.token, "secret");
-    }
-
-    #[test]
-    fn local_mode_needs_no_remote_credential_and_legacy_true_means_remote() {
-        let local = snapshot([("HATCHDOOR_GIT_SYNC_ENABLED", "local")]);
-        let local = GitConfig::from_snapshot(PathBuf::from("/vault"), &local)
-            .expect("local mode parses")
-            .expect("local mode enabled");
-        assert_eq!(local.mode, GitMode::Local);
-        assert!(local.token.is_empty());
-
-        let legacy = snapshot([
-            ("HATCHDOOR_GIT_SYNC_ENABLED", "true"),
-            ("HATCHDOOR_GIT_HTTPS_TOKEN", "secret"),
-        ]);
-        let legacy = GitConfig::from_snapshot(PathBuf::from("/vault"), &legacy)
-            .expect("legacy true parses")
-            .expect("legacy true enabled");
-        assert_eq!(legacy.mode, GitMode::Remote);
-    }
 
     #[test]
     fn resolve_commit_identity_prefers_the_vaults_own_identity_when_set() {

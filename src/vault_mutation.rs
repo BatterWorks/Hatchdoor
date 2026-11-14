@@ -31,8 +31,9 @@ use crate::vault::{
     TagRename, TagRenameError, VaultIndex, WriteError, WriteOutcome, append_note, archive_note,
     check_attachment_import_target, check_note_content_hash, create_note, delete_attachment,
     delete_note, delete_tag, edit_note, import_attachment_bytes, move_attachment,
-    move_or_rename_note, note_exists_conflict, note_target, rename_attachment, rename_tag,
-    replace_section, update_note, update_note_frontmatter,
+    move_or_rename_note, normalize_attachment_relative_path, normalize_note_relative_path,
+    note_exists_conflict, note_target, rename_attachment, rename_tag, replace_section, update_note,
+    update_note_frontmatter,
 };
 use crate::vault_error::VaultOperationError;
 use crate::vault_read::VaultReadCore;
@@ -236,18 +237,20 @@ impl<'a> VaultMutationCore<'a> {
     }
 
     /// Replace one note's whole content, under optimistic concurrency by
-    /// expected content hash.
+    /// expected content hash and, when given, the Vault-relative path the
+    /// caller believes the slug names (#627).
     pub async fn update_note(
         &self,
         vault_id: VaultId,
         slug: &str,
         content: &str,
         expected_content_hash: &str,
+        expected_relative_path: Option<&str>,
     ) -> Result<NoteWriteOutcome, VaultOperationError> {
         let target = self.open(vault_id)?;
         let _guard = target.acquire_mutation().await?;
         target
-            .update_note(slug, content, expected_content_hash)
+            .update_note(slug, content, expected_content_hash, expected_relative_path)
             .await
     }
 
@@ -587,6 +590,7 @@ pub fn write_operation_error(vault_id: VaultId, error: WriteError) -> VaultOpera
     let (code, message, retryable) = match error {
         WriteError::Conflict(message) => ("write_conflict", message, true),
         WriteError::InvalidInput(message) => ("invalid_write_input", message, false),
+        WriteError::HeadingNotFound(message) => ("heading_not_found", message, false),
         WriteError::Io(message) => {
             // The only record of an I/O write failure used to be whatever the
             // client happened to log, which is how a whole filesystem being
@@ -872,7 +876,7 @@ impl VaultMutation {
         overwrite: bool,
     ) -> Result<NoteWriteOutcome, VaultOperationError> {
         self.reject_marker_write(relative_path)?;
-        self.reject_noise_write(relative_path)?;
+        self.reject_noise_note_write(relative_path)?;
         // A metadata-only catalog, not the full index: `create_note` has no
         // pre-write entry to read a slug from, so it needs this to compute
         // one, but never touches the (expensive, content-reading) wikilink
@@ -891,14 +895,27 @@ impl VaultMutation {
     }
 
     /// Replace one note's whole content.
+    ///
+    /// A slug moves when a same-named note appears earlier in path order
+    /// (ADR-24), and two files with the same content share a hash, so the
+    /// hash alone cannot tell the note the caller opened from the one that
+    /// now holds its slug. `expected_relative_path` can: when the slug names
+    /// a different file, the write is refused with `note_moved` before the
+    /// hash is compared (#627).
     pub async fn update_note(
         &self,
         slug: &str,
         content: &str,
         expected_content_hash: &str,
+        expected_relative_path: Option<&str>,
     ) -> Result<NoteWriteOutcome, VaultOperationError> {
         let index = self.authoritative_index().await?;
         let entry = self.note_entry(&index, slug)?;
+        if let Some(expected) = expected_relative_path
+            && expected != entry.relative_path
+        {
+            return Err(self.note_moved(slug, expected));
+        }
         self.replace_entry(
             &index,
             entry,
@@ -1093,7 +1110,7 @@ impl VaultMutation {
         let entry = self.note_entry(&index, slug)?;
         let archive_prefix = self.archive_prefix()?;
         let archive_folder = archive_prefix.trim().trim_matches('/');
-        self.reject_noise_write(&format!(
+        self.reject_noise_note_write(&format!(
             "{archive_folder}/{}",
             file_name_of(&entry.relative_path)
         ))?;
@@ -1101,6 +1118,7 @@ impl VaultMutation {
         let layers = index.layers.clone();
         let vault_path = self.control.vault_path().to_path_buf();
         let expected_content_hash = expected_content_hash.to_string();
+        let intent_log = self.control.intent_log();
         let outcome = self
             .run_write("archive", slug, move || {
                 archive_note(
@@ -1109,6 +1127,7 @@ impl VaultMutation {
                     &entry,
                     &archive_prefix,
                     &expected_content_hash,
+                    Some(&intent_log),
                 )
             })
             .await?;
@@ -1126,9 +1145,16 @@ impl VaultMutation {
         let layers = index.layers.clone();
         let vault_path = self.control.vault_path().to_path_buf();
         let expected_content_hash = expected_content_hash.to_string();
+        let intent_log = self.control.intent_log();
         let outcome = self
             .run_write("delete", slug, move || {
-                delete_note(&vault_path, &index, &entry, &expected_content_hash)
+                delete_note(
+                    &vault_path,
+                    &index,
+                    &entry,
+                    &expected_content_hash,
+                    Some(&intent_log),
+                )
             })
             .await?;
         Ok(NoteWriteOutcome::resolve(&layers, outcome))
@@ -1146,10 +1172,11 @@ impl VaultMutation {
         target_relative_path: String,
         expected_content_hash: &str,
     ) -> Result<NoteWriteOutcome, VaultOperationError> {
-        self.reject_noise_write(&target_relative_path)?;
+        self.reject_noise_note_write(&target_relative_path)?;
         let layers = index.layers.clone();
         let vault_path = self.control.vault_path().to_path_buf();
         let expected_content_hash = expected_content_hash.to_string();
+        let intent_log = self.control.intent_log();
         let outcome = self
             .run_write(label, addressed, move || {
                 move_or_rename_note(
@@ -1158,6 +1185,7 @@ impl VaultMutation {
                     &entry,
                     &target_relative_path,
                     &expected_content_hash,
+                    Some(&intent_log),
                 )
             })
             .await?;
@@ -1210,9 +1238,9 @@ impl VaultMutation {
         target_relative_path: &str,
         expected_content_hash: Option<&str>,
     ) -> Result<(), VaultOperationError> {
-        let target_relative_path = &note_upload_path(target_relative_path);
+        let target_relative_path = target_relative_path.trim();
         self.reject_marker_write(target_relative_path)?;
-        self.reject_noise_write(target_relative_path)?;
+        self.reject_noise_note_write(target_relative_path)?;
         let Some(expected_content_hash) = expected_content_hash else {
             let target = self.note_target(target_relative_path).await?;
             if target.exists {
@@ -1250,14 +1278,14 @@ impl VaultMutation {
         }
         let content = String::from_utf8(bytes)
             .map_err(|_| invalid("an uploaded note must be valid UTF-8 text".to_string()))?;
-        let target_relative_path = &note_upload_path(target_relative_path);
+        let target_relative_path = target_relative_path.trim();
         let Some(expected_content_hash) = expected_content_hash else {
             return self
                 .create_note(target_relative_path, &content, false)
                 .await;
         };
         self.reject_marker_write(target_relative_path)?;
-        self.reject_noise_write(target_relative_path)?;
+        self.reject_noise_note_write(target_relative_path)?;
         let index = self.authoritative_index().await?;
         let entry = self.note_at_path(&index, target_relative_path).await?;
         self.replace_entry(
@@ -1284,8 +1312,15 @@ impl VaultMutation {
         let vault_path = self.control.vault_path().to_path_buf();
         let source_path = source_relative_path.to_string();
         let target_path = target_relative_path.to_string();
+        let intent_log = self.control.intent_log();
         self.run_write("move attachment", source_relative_path, move || {
-            move_attachment(&vault_path, &index, &source_path, &target_path)
+            move_attachment(
+                &vault_path,
+                &index,
+                &source_path,
+                &target_path,
+                Some(&intent_log),
+            )
         })
         .await
     }
@@ -1299,13 +1334,22 @@ impl VaultMutation {
         self.reject_marker_write(source_relative_path)?;
         self.reject_marker_write(new_filename)?;
         self.reject_noise_write(source_relative_path)?;
-        self.reject_noise_write(&sibling_path(source_relative_path, new_filename))?;
+        let source_path = normalize_attachment_relative_path(source_relative_path)
+            .map_err(|error| write_operation_error(self.vault_id, error))?;
+        self.reject_excluded_path(&sibling_path(&source_path, new_filename.trim()))?;
         let index = self.authoritative_index().await?;
         let vault_path = self.control.vault_path().to_path_buf();
         let source_path = source_relative_path.to_string();
         let new_filename = new_filename.to_string();
+        let intent_log = self.control.intent_log();
         self.run_write("rename attachment", source_relative_path, move || {
-            rename_attachment(&vault_path, &index, &source_path, &new_filename)
+            rename_attachment(
+                &vault_path,
+                &index,
+                &source_path,
+                &new_filename,
+                Some(&intent_log),
+            )
         })
         .await
     }
@@ -1325,8 +1369,9 @@ impl VaultMutation {
         let index = self.authoritative_index().await?;
         let vault_path = self.control.vault_path().to_path_buf();
         let source_path = source_relative_path.to_string();
+        let intent_log = self.control.intent_log();
         self.run_write("delete attachment", source_relative_path, move || {
-            delete_attachment(&vault_path, &index, &source_path)
+            delete_attachment(&vault_path, &index, &source_path, Some(&intent_log))
         })
         .await
     }
@@ -1349,15 +1394,18 @@ impl VaultMutation {
         let old_tag = old_tag.to_string();
         let new_tag = new_tag.to_string();
         let Some(expected_plan_hash) = expected_plan_hash.map(str::to_string) else {
-            return offload(move || rename_tag(&vault_path, &catalog, &old_tag, &new_tag, None))
-                .await
-                .map_err(|error| tag_rename_error(self.vault_id, error));
+            return offload(move || {
+                rename_tag(&vault_path, &catalog, &old_tag, &new_tag, None, None)
+            })
+            .await
+            .map_err(|error| tag_rename_error(self.vault_id, error));
         };
         let addressed = format!(
             "#{} -> #{}",
             old_tag.trim_start_matches('#'),
             new_tag.trim_start_matches('#')
         );
+        let intent_log = self.control.intent_log();
         self.run_recorded("rename tag", &addressed, tag_rename_error, move || {
             rename_tag(
                 &vault_path,
@@ -1365,6 +1413,7 @@ impl VaultMutation {
                 &old_tag,
                 &new_tag,
                 Some(&expected_plan_hash),
+                Some(&intent_log),
             )
         })
         .await
@@ -1381,13 +1430,20 @@ impl VaultMutation {
         let vault_path = self.control.vault_path().to_path_buf();
         let tag = tag.to_string();
         let Some(expected_plan_hash) = expected_plan_hash.map(str::to_string) else {
-            return offload(move || delete_tag(&vault_path, &catalog, &tag, None))
+            return offload(move || delete_tag(&vault_path, &catalog, &tag, None, None))
                 .await
                 .map_err(|error| tag_delete_error(self.vault_id, error));
         };
         let addressed = format!("#{}", tag.strip_prefix('#').unwrap_or(&tag).to_lowercase());
+        let intent_log = self.control.intent_log();
         self.run_recorded("delete tag", &addressed, tag_delete_error, move || {
-            delete_tag(&vault_path, &catalog, &tag, Some(&expected_plan_hash))
+            delete_tag(
+                &vault_path,
+                &catalog,
+                &tag,
+                Some(&expected_plan_hash),
+                Some(&intent_log),
+            )
         })
         .await
     }
@@ -1484,6 +1540,19 @@ impl VaultMutation {
             .ok_or_else(|| self.note_not_found(relative_path))
     }
 
+    /// The slug now names a different file than the one the caller opened.
+    /// Not retryable: the same request would land in the same other note.
+    fn note_moved(&self, slug: &str, expected_relative_path: &str) -> VaultOperationError {
+        VaultOperationError::new(
+            "note_moved",
+            format!(
+                "Note {slug} no longer names {expected_relative_path}: another note took over its slug. Nothing was written."
+            ),
+            Some(self.vault_id),
+            false,
+        )
+    }
+
     fn note_not_found(&self, slug: &str) -> VaultOperationError {
         VaultOperationError::new(
             "note_not_found",
@@ -1493,20 +1562,29 @@ impl VaultMutation {
         )
     }
 
-    /// Refuse a write whose target path matches this Vault's own
-    /// noise-exclusion patterns: the index applies the same matcher, so the
-    /// file would land on disk yet be invisible to every read surface.
-    /// Applied to an attachment operation's source as well as its destination
-    /// since #247. What a Vault excludes as noise - `.obsidian/` and the rest
-    /// of the built-in set, plus this Vault's own patterns - is not content,
-    /// and until the upload allowlist stopped gating files already in the
-    /// Vault it was that list, by accident, keeping the attachment tools out
-    /// of an Obsidian configuration folder. This is the policy that was
-    /// actually meant, and the Vault already states it.
+    /// Check the note filename the write layer will use, including `.md`,
+    /// rather than the caller's possibly extension-free spelling.
+    fn reject_noise_note_write(&self, path: &str) -> Result<(), VaultOperationError> {
+        let normalized = normalize_note_relative_path(path)
+            .map_err(|error| write_operation_error(self.vault_id, error))?;
+        self.reject_excluded_path(&normalized)
+    }
+
+    /// Refuse paths the index would hide, after the write layer's separator
+    /// normalisation. Attachment operations check both source and destination;
+    /// an excluded file such as `.obsidian/app.json` is not content to manage.
     fn reject_noise_write(&self, path: &str) -> Result<(), VaultOperationError> {
+        let normalized = normalize_attachment_relative_path(path)
+            .map_err(|error| write_operation_error(self.vault_id, error))?;
+        self.reject_excluded_path(&normalized)
+    }
+
+    /// Match an already-normalised path without trimming it again: removing a
+    /// leading `./` can expose whitespace that belongs to a real folder name.
+    fn reject_excluded_path(&self, path: &str) -> Result<(), VaultOperationError> {
         let exclude = ExcludeMatcher::new(self.control.definition().exclude_patterns())
             .map_err(|error| self.internal(error))?;
-        if exclude.is_excluded(std::path::Path::new(path.trim()), false) {
+        if exclude.is_excluded(std::path::Path::new(path), false) {
             return Err(VaultOperationError::new(
                 "noise_excluded_write",
                 format!(
@@ -1618,29 +1696,12 @@ impl VaultMutation {
 }
 
 /// Whether an upload to `target_relative_path` is a note upload rather than
-/// an attachment one (ADR-32): its filename ends in `.md`, in any case. A path
-/// with no extension is not a note, though `create_note` would add one.
+/// an attachment one (ADR-32): its filename ends in `.md`, in any case, by the
+/// rule the index and the write layer share (#637). A path with no extension
+/// is not a note, though `create_note` would add one. The target is written as
+/// given, so `Report.MD` replaces the `Report.MD` note the index lists.
 pub fn is_note_upload_target(target_relative_path: &str) -> bool {
-    std::path::Path::new(target_relative_path.trim())
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| extension.eq_ignore_ascii_case("md"))
-}
-
-/// The path a note upload writes: the target with its `.md` extension in
-/// lower case, so a link for `Report.MD` writes `Report.md` rather than
-/// `create_note`'s `Report.MD.md`, and replaces the note the index knows
-/// there.
-fn note_upload_path(target_relative_path: &str) -> String {
-    let trimmed = target_relative_path.trim();
-    match trimmed.len().checked_sub(3) {
-        Some(stem)
-            if trimmed.is_char_boundary(stem) && trimmed[stem..].eq_ignore_ascii_case(".md") =>
-        {
-            format!("{}.md", &trimmed[..stem])
-        }
-        _ => trimmed.to_string(),
-    }
+    crate::vault::is_note_path(std::path::Path::new(target_relative_path.trim()))
 }
 
 /// Run a blocking `vault/write` call on the blocking pool, turning a panic
@@ -1682,7 +1743,7 @@ mod tests {
 
     use tempfile::TempDir;
 
-    use super::{VaultMutationCore, VaultOperationError, is_note_upload_target, note_upload_path};
+    use super::{VaultMutationCore, VaultOperationError, is_note_upload_target};
     use crate::cache::SqliteCache;
     use crate::runtime_config::{ConfigSnapshot, RuntimeConfig};
     use crate::vault::SectionMode;
@@ -1699,13 +1760,6 @@ mod tests {
         for other in ["Report", "Imports/scan.png", ".md", "a.mdx", "md"] {
             assert!(!is_note_upload_target(other), "{other}");
         }
-    }
-
-    #[test]
-    fn a_note_upload_writes_its_target_with_a_lower_case_extension() {
-        assert_eq!(note_upload_path(" Imports/Report.MD "), "Imports/Report.md");
-        assert_eq!(note_upload_path("a.Md"), "a.md");
-        assert_eq!(note_upload_path("Imports/Report.md"), "Imports/Report.md");
     }
 
     /// One Vault on a real filesystem, reconciled through the real registry
@@ -1903,7 +1957,7 @@ mod tests {
 
         workspace
             .summarized("tighten the intro")
-            .update_note("home", "# Home\n\nrewritten\n", &hash("# Home\n"))
+            .update_note("home", "# Home\n\nrewritten\n", &hash("# Home\n"), None)
             .await
             .expect("update");
 
@@ -1979,7 +2033,7 @@ mod tests {
 
         workspace
             .summarized("never happened")
-            .update_note("home", "# Home\n\nrewritten\n", &hash("stale"))
+            .update_note("home", "# Home\n\nrewritten\n", &hash("stale"), None)
             .await
             .expect_err("stale hash is refused");
 
@@ -1996,6 +2050,7 @@ mod tests {
                 "home",
                 "# Home\n\nrewritten\n",
                 &hash("# Home\n"),
+                None,
             )
             .await
             .expect("update");
@@ -2016,6 +2071,7 @@ mod tests {
                 "home",
                 "clobbered",
                 "not-the-current-hash",
+                None,
             )
             .await
             .expect_err("stale hash must be refused");
@@ -2023,6 +2079,55 @@ mod tests {
         assert_code(&error, "write_conflict");
         assert!(error.retryable);
         assert_eq!(workspace.read("Home.md"), "# Home\n");
+    }
+
+    /// #627: a same-named note earlier in path order takes the slug over
+    /// (ADR-24). Same content means the same hash, so only the path can tell
+    /// the opened note from the one now answering to its slug.
+    #[tokio::test]
+    async fn update_note_refuses_when_the_slug_now_names_another_file() {
+        let workspace = workspace(Fixture::new(&[
+            ("z/Plan.md", "body\n"),
+            ("a/Plan.md", "body\n"),
+        ]));
+        let error = workspace
+            .core()
+            .update_note(
+                workspace.vault_id,
+                "plan",
+                "typed in z\n",
+                &hash("body\n"),
+                Some("z/Plan"),
+            )
+            .await
+            .expect_err("a slug naming another file must be refused");
+
+        assert_code(&error, "note_moved");
+        assert!(!error.retryable);
+        assert_eq!(workspace.read("a/Plan.md"), "body\n");
+        assert_eq!(workspace.read("z/Plan.md"), "body\n");
+    }
+
+    #[tokio::test]
+    async fn update_note_writes_when_the_expected_path_still_matches() {
+        let workspace = workspace(Fixture::new(&[
+            ("z/Plan.md", "body\n"),
+            ("a/Plan.md", "body\n"),
+        ]));
+        workspace
+            .core()
+            .update_note(
+                workspace.vault_id,
+                "plan-2",
+                "typed in z\n",
+                &hash("body\n"),
+                Some("z/Plan"),
+            )
+            .await
+            .expect("the note at the expected path takes the write");
+
+        assert_eq!(workspace.read("z/Plan.md"), "typed in z\n");
+        assert_eq!(workspace.read("a/Plan.md"), "body\n");
     }
 
     #[tokio::test]
@@ -2089,7 +2194,7 @@ mod tests {
         let workspace = workspace(Fixture::new(&[("Home.md", "# Home\n")]).disabled());
         let update = workspace
             .core()
-            .update_note(workspace.vault_id, "home", "x", &hash("# Home\n"))
+            .update_note(workspace.vault_id, "home", "x", &hash("# Home\n"), None)
             .await
             .expect_err("disabled Vault");
         assert_code(&update, "vault_disabled");
@@ -2108,7 +2213,7 @@ mod tests {
         let workspace = workspace(Fixture::new(&[("Home.md", "# Home\n")]).pull_only());
         let update = workspace
             .core()
-            .update_note(workspace.vault_id, "home", "x", &hash("# Home\n"))
+            .update_note(workspace.vault_id, "home", "x", &hash("# Home\n"), None)
             .await
             .expect_err("pull-only Vault");
         assert_code(&update, "capability_unavailable");
@@ -2164,6 +2269,83 @@ mod tests {
         assert_eq!(workspace.read("Home.md"), "# Overwritten\n");
     }
 
+    /// #630: refused as a retryable conflict, so a client retried into the
+    /// same symlink, each time leaving a sidecar holding its content.
+    #[tokio::test]
+    async fn an_overwrite_onto_a_symlinked_note_is_refused_for_good_and_leaves_nothing() {
+        let workspace = workspace(Fixture::new(&[]));
+        let outside = tempfile::tempdir().expect("outside");
+        let target = outside.path().join("target.md");
+        std::fs::write(&target, "outside\n").expect("outside note");
+        std::os::unix::fs::symlink(&target, workspace.vault_path.join("Out.md")).expect("link");
+
+        let error = workspace
+            .core()
+            .create_note(workspace.vault_id, "Out.md", "# Leaked\n", true)
+            .await
+            .expect_err("a symlinked note must not be replaced");
+
+        assert_code(&error, "invalid_write_input");
+        assert!(!error.retryable);
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "outside\n");
+        let names: Vec<_> = std::fs::read_dir(&workspace.vault_path)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, vec!["Out.md".to_string()]);
+    }
+
+    /// #630: a root stored through a symlink reported itself writable while
+    /// every write failed, because the write layer refuses to follow a
+    /// symlink anywhere above a note. The API stores canonical paths, so
+    /// only a hand-edited or old registry holds one.
+    #[tokio::test]
+    async fn a_vault_whose_stored_root_is_a_symlink_takes_writes() {
+        let workspace = workspace(Fixture::new(&[("Home.md", "# Home\n")]));
+        let state = workspace._directory.path().join("state/vaults.json");
+        let link = workspace._directory.path().join("vlink");
+        std::os::unix::fs::symlink(&workspace.vault_path, &link).expect("root link");
+        let real = std::fs::canonicalize(&workspace.vault_path).expect("canonical root");
+        let registry = std::fs::read_to_string(&state).expect("registry");
+        let real_json = serde_json::to_string(&real).expect("real path as JSON");
+        let link_json = serde_json::to_string(&link).expect("link path as JSON");
+        assert!(registry.contains(&real_json), "registry stores the root");
+        std::fs::write(&state, registry.replace(&real_json, &link_json)).expect("hand edit");
+        let store = VaultRegistryStore::new(state);
+        let crate::vault_registry::VaultRegistryState::Ready(snapshot) =
+            store.load().expect("reload registry")
+        else {
+            panic!("registry recovery");
+        };
+        assert_eq!(
+            store.vault_path(&snapshot.definitions().next().expect("definition")),
+            link,
+            "the registry now stores the symlink"
+        );
+        // A restart is what activates a hand-edited registry.
+        let restarted = VaultCollectionRuntime::new();
+        restarted.reconcile(&store, &snapshot);
+        let core = VaultMutationCore::new(
+            &workspace.cache,
+            &restarted,
+            std::sync::Arc::clone(&workspace.settings),
+            crate::git::WriteOrigin::web(),
+        );
+
+        let capabilities = core
+            .write_capabilities(workspace.vault_id)
+            .expect("capabilities");
+        assert!(capabilities.enabled());
+        core.create_note(workspace.vault_id, "New.md", "# New\n", false)
+            .await
+            .expect("a Vault reported writable must take a write");
+        core.append_to_note(workspace.vault_id, "home", "more\n", &hash("# Home\n"))
+            .await
+            .expect("an existing note, reached through the index, takes a write too");
+        assert_eq!(workspace.read("New.md"), "# New\n");
+    }
+
     #[tokio::test]
     async fn create_note_refuses_a_path_that_escapes_the_vault_root() {
         let workspace = workspace(Fixture::new(&[]));
@@ -2179,12 +2361,12 @@ mod tests {
 
     #[tokio::test]
     async fn create_note_refuses_a_target_this_vaults_own_patterns_exclude() {
-        let workspace = workspace(Fixture::new(&[]).excluding(&["*.tmp"]));
+        let workspace = workspace(Fixture::new(&[]).excluding(&["*.excalidraw.md"]));
         let error = workspace
             .core()
             .create_note(
                 workspace.vault_id,
-                "Notes/scratch.tmp",
+                "Notes/Drawing.excalidraw",
                 "# Ignored\n",
                 false,
             )
@@ -2192,7 +2374,166 @@ mod tests {
             .expect_err("noise target must be refused");
 
         assert_code(&error, "noise_excluded_write");
-        assert!(!workspace.exists("Notes/scratch.tmp"));
+        assert!(!workspace.exists("Notes/Drawing.excalidraw.md"));
+    }
+
+    #[tokio::test]
+    async fn create_note_cannot_overwrite_trash_through_backslashes() {
+        let workspace = workspace(Fixture::new(&[(
+            ".hatchdoor-trash/Precious.md",
+            "precious bytes\n",
+        )]));
+        for path in [
+            ".hatchdoor-trash/Precious.md",
+            r".hatchdoor-trash\Precious.md",
+        ] {
+            let error = workspace
+                .core()
+                .create_note(workspace.vault_id, path, "CLOBBERED", true)
+                .await
+                .expect_err("trash must be protected for either separator");
+            assert_code(&error, "noise_excluded_write");
+            assert_eq!(
+                workspace.read(".hatchdoor-trash/Precious.md"),
+                "precious bytes\n"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn create_note_matches_the_final_md_filename_not_the_callers_extension() {
+        let workspace = workspace(Fixture::new(&[]));
+        let created = workspace
+            .core()
+            .create_note(workspace.vault_id, r"Notes\x.tmp", "visible\n", false)
+            .await
+            .expect("a Markdown note is not a temporary file");
+        assert_eq!(created.relative_path.as_deref(), Some("Notes/x.tmp"));
+        assert_eq!(workspace.read("Notes/x.tmp.md"), "visible\n");
+    }
+
+    #[tokio::test]
+    async fn note_exclusion_checks_preserve_whitespace_in_path_components() {
+        let workspace = workspace(Fixture::new(&[]).excluding(&["[ ]private/"]));
+        let error = workspace
+            .core()
+            .create_note(workspace.vault_id, "./ private/Secret", "hidden\n", false)
+            .await
+            .expect_err("the actual space-prefixed destination is excluded");
+        assert_code(&error, "noise_excluded_write");
+        assert!(!workspace.exists(" private/Secret.md"));
+    }
+
+    #[tokio::test]
+    async fn note_exclusion_checks_allow_visible_whitespace_prefixed_folders() {
+        let workspace = workspace(Fixture::new(&[]));
+        workspace
+            .core()
+            .create_note(workspace.vault_id, "./ .obsidian/Note", "visible\n", false)
+            .await
+            .expect("a space-prefixed folder is not the Obsidian configuration folder");
+        assert_eq!(workspace.read(" .obsidian/Note.md"), "visible\n");
+        assert!(!workspace.exists(".obsidian"));
+    }
+
+    #[tokio::test]
+    async fn attachment_rename_checks_preserve_whitespace_in_the_source_directory() {
+        let workspace = workspace(
+            Fixture::new(&[(" Media/payload.png", "payload\n")])
+                .excluding(&["[ ]Media/blocked.png"]),
+        );
+        let error = workspace
+            .core()
+            .rename_attachment(workspace.vault_id, "./ Media/payload.png", "blocked.png")
+            .await
+            .expect_err("the actual sibling destination is excluded");
+        assert_code(&error, "noise_excluded_write");
+        assert_eq!(workspace.read(" Media/payload.png"), "payload\n");
+        assert!(!workspace.exists(" Media/blocked.png"));
+    }
+
+    #[tokio::test]
+    async fn note_moves_and_archive_check_normalized_destinations() {
+        for folder in ["private/", r"private\"] {
+            let workspace = workspace(
+                Fixture::new(&[("Home.md", "# Home\n")])
+                    .excluding(&["private/", "*.excalidraw.md"])
+                    .archiving_into(folder),
+            );
+            let core = workspace.core();
+            let id = workspace.vault_id;
+            let current = hash("# Home\n");
+            for error in [
+                core.move_note(id, "home", folder, &current)
+                    .await
+                    .unwrap_err(),
+                core.move_rename_note(id, "home", &format!("{folder}Home"), &current)
+                    .await
+                    .unwrap_err(),
+                core.move_rename_note(id, "home", "Drawing.excalidraw", &current)
+                    .await
+                    .unwrap_err(),
+                core.archive_note(id, "home", &current).await.unwrap_err(),
+            ] {
+                assert_code(&error, "noise_excluded_write");
+            }
+            assert_eq!(workspace.read("Home.md"), "# Home\n");
+            assert!(!workspace.exists("private"));
+            assert!(!workspace.exists("Drawing.excalidraw.md"));
+        }
+    }
+
+    #[tokio::test]
+    async fn attachment_destinations_and_upload_checks_cannot_bypass_exclusions() {
+        let workspace = workspace(
+            Fixture::new(&[("Media/payload.png", "payload\n")])
+                .excluding(&["Media/blocked.png", "*.excalidraw.md"]),
+        );
+        let core = workspace.core();
+        let id = workspace.vault_id;
+        for target in [
+            ".obsidian/plugins/x/main.js",
+            r".obsidian\plugins\x\main.js",
+        ] {
+            for error in [
+                core.move_attachment(id, "Media/payload.png", target)
+                    .await
+                    .unwrap_err(),
+                core.import_attachment(id, target, b"bytes".to_vec(), 1024, false)
+                    .await
+                    .unwrap_err(),
+                core.check_attachment_import(id, target, false)
+                    .await
+                    .unwrap_err(),
+            ] {
+                assert_code(&error, "noise_excluded_write");
+            }
+            assert_eq!(workspace.read("Media/payload.png"), "payload\n");
+            assert!(!workspace.exists(".obsidian"));
+        }
+        for source in ["Media/payload.png", r"Media\payload.png"] {
+            let error = core
+                .rename_attachment(id, source, " blocked.png ")
+                .await
+                .unwrap_err();
+            assert_code(&error, "noise_excluded_write");
+            assert_eq!(workspace.read("Media/payload.png"), "payload\n");
+            assert!(!workspace.exists("Media/blocked.png"));
+        }
+        // A note upload writes its target as named (#637); a note pattern
+        // still covers every case of the extension.
+        for path in [
+            "Notes/Drawing.excalidraw.md",
+            r"Notes\Drawing.excalidraw.MD",
+        ] {
+            let error = core.check_note_upload(id, path, None).await.unwrap_err();
+            assert_code(&error, "noise_excluded_write");
+            let error = core
+                .upload_note(id, path, b"drawing".to_vec(), 1024, None)
+                .await
+                .unwrap_err();
+            assert_code(&error, "noise_excluded_write");
+        }
     }
 
     #[tokio::test]
@@ -2257,20 +2598,22 @@ mod tests {
         let core = workspace.core();
         let vault_id = workspace.vault_id;
 
-        for error in [
-            core.move_attachment(vault_id, ".obsidian/app.json", "Media/app.json")
-                .await
-                .expect_err("move must refuse"),
-            core.rename_attachment(vault_id, ".obsidian/app.json", "stolen.json")
-                .await
-                .expect_err("rename must refuse"),
-            core.delete_attachment(vault_id, ".obsidian/app.json")
-                .await
-                .expect_err("delete must refuse"),
-        ] {
-            assert_code(&error, "noise_excluded_write");
+        for source in [".obsidian/app.json", r".obsidian\app.json"] {
+            for error in [
+                core.move_attachment(vault_id, source, "Media/app.json")
+                    .await
+                    .expect_err("move must refuse"),
+                core.rename_attachment(vault_id, source, "stolen.json")
+                    .await
+                    .expect_err("rename must refuse"),
+                core.delete_attachment(vault_id, source)
+                    .await
+                    .expect_err("delete must refuse"),
+            ] {
+                assert_code(&error, "noise_excluded_write");
+            }
+            assert_eq!(workspace.read(".obsidian/app.json"), "{}");
         }
-        assert!(workspace.exists(".obsidian/app.json"));
     }
 
     // -----------------------------------------------------------------
@@ -2468,6 +2811,84 @@ mod tests {
         assert!(!workspace.exists(".trash/Home.md"));
     }
 
+    /// #631: every multi-note write the core runs records its plan in the
+    /// Vault's intent log before its first step. With the log's folder
+    /// blocked, each one is refused and changes nothing, which shows the
+    /// core hands every one of them the log.
+    #[tokio::test]
+    async fn every_multi_note_write_records_its_plan_first() {
+        let workspace = workspace(Fixture::new(&[
+            ("Home.md", "---\ntags: [old]\n---\n# Home\n![[pic.png]]\n"),
+            ("Other.md", "# Other\n[[Home]]\n"),
+            ("pic.png", "png"),
+        ]));
+        let state = workspace
+            ._directory
+            .path()
+            .join("state")
+            .join("write-intents");
+        std::fs::write(&state, "a file where the record folder goes").expect("block");
+        let core = workspace.core();
+        let id = workspace.vault_id;
+        let home = hash("---\ntags: [old]\n---\n# Home\n![[pic.png]]\n");
+
+        let refusals = [
+            core.rename_note(id, "home", "Renamed", &home)
+                .await
+                .map(|_| ()),
+            core.move_note(id, "home", "Folder", &home)
+                .await
+                .map(|_| ()),
+            core.archive_note(id, "home", &home).await.map(|_| ()),
+            core.delete_note(id, "home", &home).await.map(|_| ()),
+            core.move_attachment(id, "pic.png", "media/pic.png")
+                .await
+                .map(|_| ()),
+            core.rename_attachment(id, "pic.png", "photo.png")
+                .await
+                .map(|_| ()),
+            core.delete_attachment(id, "pic.png").await.map(|_| ()),
+        ];
+        for refusal in refusals {
+            let error = refusal.expect_err("refused without a record");
+            assert!(
+                error.message.contains("could not record this change"),
+                "{error:?}"
+            );
+        }
+        let plan = core
+            .rename_tag(id, "old", "new", None)
+            .await
+            .expect("a plan writes nothing and needs no record");
+        let error = core
+            .rename_tag(id, "old", "new", plan.plan_hash.as_deref())
+            .await
+            .expect_err("refused without a record");
+        assert!(
+            error.message.contains("could not record this change"),
+            "{error:?}"
+        );
+        let plan = core
+            .delete_tag(id, "old", None)
+            .await
+            .expect("a plan writes nothing and needs no record");
+        let error = core
+            .delete_tag(id, "old", plan.plan_hash.as_deref())
+            .await
+            .expect_err("refused without a record");
+        assert!(
+            error.message.contains("could not record this change"),
+            "{error:?}"
+        );
+
+        assert!(workspace.exists("Home.md"));
+        assert!(workspace.exists("pic.png"));
+        assert_eq!(
+            std::fs::read_to_string(workspace.vault_path.join("Home.md")).expect("home"),
+            "---\ntags: [old]\n---\n# Home\n![[pic.png]]\n"
+        );
+    }
+
     #[tokio::test]
     async fn delete_note_trashes_the_file_and_refuses_a_stale_hash() {
         let workspace = workspace(Fixture::new(&[("Home.md", "# Home\n")]));
@@ -2492,6 +2913,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn replace_section_reports_heading_not_found_without_changing_frontmatter() {
+        let body = "---\ntitle: W\n# status: draft\ntags: [a]\n---\nIntro\n\n## Log\nMonday\n";
+        let workspace = workspace(Fixture::new(&[("Home.md", body)]));
+        let core = workspace.core();
+        for mode in [
+            SectionMode::Replace,
+            SectionMode::Before,
+            SectionMode::After,
+        ] {
+            let error = core
+                .replace_section(
+                    workspace.vault_id,
+                    "home",
+                    "# status: draft",
+                    mode,
+                    "new\n",
+                    &hash(body),
+                )
+                .await
+                .expect_err("frontmatter is not a section");
+            assert_code(&error, "heading_not_found");
+            assert!(!error.retryable);
+            assert_eq!(workspace.read("Home.md"), body);
+        }
+    }
+
+    #[tokio::test]
     async fn every_note_mutation_refuses_a_slug_this_vault_does_not_hold() {
         // The index a write resolves against is built from this Vault's own
         // directory, so a slug that lives anywhere else is simply absent.
@@ -2501,7 +2949,7 @@ mod tests {
         let irrelevant = hash("# Home\n");
 
         let mut refusals = vec![
-            core.update_note(vault_id, "nowhere", "x", &irrelevant)
+            core.update_note(vault_id, "nowhere", "x", &irrelevant, None)
                 .await
                 .expect_err("update"),
             core.append_to_note(vault_id, "nowhere", "x", &irrelevant)
@@ -2542,7 +2990,7 @@ mod tests {
         // An empty slug names no note either, and must not depend on how the
         // lookup happens to treat a degenerate key.
         refusals.push(
-            core.update_note(vault_id, "   ", "x", &irrelevant)
+            core.update_note(vault_id, "   ", "x", &irrelevant, None)
                 .await
                 .expect_err("empty slug"),
         );
@@ -2759,6 +3207,7 @@ mod tests {
                 "home",
                 "x",
                 &hash("# Home\n"),
+                None,
             )
             .await
             .expect_err("unknown Vault");

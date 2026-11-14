@@ -255,7 +255,10 @@ fn walk(
             _ => Some(commit.parent(0)?.tree()?),
         };
         let mut options = DiffOptions::new();
-        options.pathspec("*.md");
+        // A note's extension is `.md` in any case (#637, #675).
+        for pattern in ["*.md", "*.MD", "*.Md", "*.mD"] {
+            options.pathspec(pattern);
+        }
         let mut diff =
             repository.diff_tree_to_tree(parent_tree.as_ref(), Some(&tree), Some(&mut options))?;
         let mut find = DiffFindOptions::new();
@@ -388,7 +391,7 @@ fn path_key(path: &Path) -> Option<String> {
 }
 
 fn is_note(path: &str) -> bool {
-    Path::new(path).extension().and_then(|ext| ext.to_str()) == Some("md")
+    crate::vault::is_note_path(Path::new(path))
 }
 
 #[cfg(test)]
@@ -548,6 +551,22 @@ mod tests {
         repo.commit(AUG);
 
         assert_eq!(repo.first_adds().lookup("vault/idea.md"), nanos(FEB));
+    }
+
+    /// A `.MD` file is a note (#637), so history dates it as it does a
+    /// `.md` one, renames included (#675).
+    #[test]
+    fn a_note_with_an_upper_case_extension_is_dated() {
+        let repo = Fixture::new();
+        repo.write("Upper.MD", "# Upper\n\nWritten in capitals.\n");
+        repo.write("Draft.md", "# Draft\n\nA note that will change its case.\n");
+        repo.commit(FEB);
+        repo.rename("Draft.md", "Draft.Md");
+        repo.commit(AUG);
+
+        let dates = repo.first_adds();
+        assert_eq!(dates.lookup("Upper.MD"), nanos(FEB));
+        assert_eq!(dates.lookup("Draft.Md"), nanos(FEB));
     }
 
     /// A bulk rename like the em dash cleanup in #299, sized past libgit2's

@@ -31,6 +31,7 @@ function mockVault(
   content: string,
   links: Record<string, string>,
   archived: string[] = [],
+  otherContent = "# Other\n\n## Section two\n\nBody.\n",
 ) {
   vi.spyOn(globalThis, "fetch").mockImplementation(
     async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -61,10 +62,7 @@ function mockVault(
             title: slug,
             slug,
             relative_path: `${slug}.md`,
-            content:
-              slug === "home"
-                ? content
-                : "# Other\n\n## Section two\n\nBody.\n",
+            content: slug === "home" ? content : otherContent,
             content_hash: `hash-${slug}`,
             layer: null,
           },
@@ -75,7 +73,10 @@ function mockVault(
   );
 }
 
-function renderApp(overrides: Partial<Parameters<typeof NotePage>[0]> = {}) {
+function renderApp(
+  overrides: Partial<Parameters<typeof NotePage>[0]> = {},
+  entry = `/v/${VAULT}/n/home`,
+) {
   const props = {
     onActiveNoteChange: vi.fn(),
     onTagSelect: vi.fn(),
@@ -87,7 +88,7 @@ function renderApp(overrides: Partial<Parameters<typeof NotePage>[0]> = {}) {
     ...overrides,
   };
   return render(
-    <MemoryRouter initialEntries={[`/v/${VAULT}/n/home`]}>
+    <MemoryRouter initialEntries={[entry]}>
       <LocationProbe />
       <Routes>
         <Route path="/v/:vaultId/n/:slug" element={<NotePage {...props} />} />
@@ -171,6 +172,35 @@ describe("in-body note links", () => {
     );
   });
 
+  // A link that names no note points into the one it is written in (#727).
+  it("scrolls to the heading a link with no note name names", async () => {
+    const scrollIntoView = vi.fn();
+    Element.prototype.scrollIntoView = scrollIntoView;
+    vi.spyOn(window, "requestAnimationFrame").mockImplementation((cb) => {
+      cb(0);
+      return 0;
+    });
+
+    mockVault("Jump to [[#Second part]].\n\n## Second part\n\nBody.\n", {
+      "/home.md#Second part": "home",
+    });
+    renderApp();
+
+    fireEvent.click(await screen.findByRole("link", { name: "Second part" }), {
+      button: 0,
+    });
+
+    await waitFor(() => {
+      expect(scrollIntoView).toHaveBeenCalled();
+    });
+    expect(
+      scrollIntoView.mock.instances[0] ?? scrollIntoView.mock.contexts[0],
+    ).toBe(document.getElementById("second-part"));
+    expect(screen.getByTestId("pathname").textContent).toBe(
+      `/v/${VAULT}/n/home`,
+    );
+  });
+
   // The live editor asks the same resolver (#544): a target only the server
   // can place still styles as resolved, and the click lands on the heading.
   it("resolves a wikilink in the editor through the server and opens the note at its heading", async () => {
@@ -205,6 +235,33 @@ describe("in-body note links", () => {
         document.querySelector(".note-content")?.getAttribute("data-tail"),
       ).toBe("true");
     });
+  });
+
+  it("opens a link with no note name from the editor at its heading (#727)", async () => {
+    vi.spyOn(window, "requestAnimationFrame").mockImplementation((cb) => {
+      cb(0);
+      return 0;
+    });
+    mockVault("Jump to [[#Second part]].\n\n## Second part\n\nBody.\n", {
+      "/home.md#Second part": "home",
+    });
+    renderApp({ writeEnabled: true });
+
+    await screen.findByRole("textbox", { name: "Note body" });
+    const link = await waitFor(() => {
+      const widget = document.querySelector(".cm-atomic-wiki-link-resolved");
+      expect(widget).not.toBeNull();
+      return widget as HTMLElement;
+    });
+    expect(link.textContent).toBe("Second part");
+    fireEvent.click(link, { button: 0 });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("hash").textContent).toBe("#second-part");
+    });
+    expect(screen.getByTestId("pathname").textContent).toBe(
+      `/v/${VAULT}/n/home`,
+    );
   });
 
   // An asset URL is a file the browser fetches, not a route. Handing it to the
@@ -265,5 +322,149 @@ describe("in-body note links", () => {
     await waitFor(() => {
       expect(scrollIntoView).toHaveBeenCalledTimes(2);
     });
+  });
+});
+
+// A block id is a `^id` closing a paragraph. The page hides the text and
+// leaves the paragraph an anchor, which a link's `#^id` lands on (#578).
+describe("block links (#578)", () => {
+  const OTHER =
+    "# Other\n\n## Target\n\nFirst paragraph.\n\nThe one that matters. ^target\n";
+
+  function trackScrolls() {
+    const scrollIntoView = vi.fn();
+    Element.prototype.scrollIntoView = scrollIntoView;
+    vi.spyOn(window, "requestAnimationFrame").mockImplementation((cb) => {
+      cb(0);
+      return 0;
+    });
+    const landedOn = () =>
+      (scrollIntoView.mock.instances[0] ??
+        scrollIntoView.mock.contexts[0]) as HTMLElement;
+    return { scrollIntoView, landedOn };
+  }
+
+  it("lands on the paragraph a link into another note names", async () => {
+    const { scrollIntoView, landedOn } = trackScrolls();
+    mockVault(
+      "Jump to [[Other#^target]].\n",
+      { "Other#^target": "other" },
+      [],
+      OTHER,
+    );
+    renderApp();
+
+    fireEvent.click(await screen.findByRole("link", { name: "Other" }), {
+      button: 0,
+    });
+
+    await waitFor(() => {
+      expect(scrollIntoView).toHaveBeenCalled();
+    });
+    // The paragraph, not the heading of the same name.
+    expect(landedOn().tagName).toBe("P");
+    expect(landedOn().textContent).toBe("The one that matters.");
+    expect(document.getElementById("target")?.tagName).toBe("H2");
+  });
+
+  it("lands on the paragraph a Markdown link names", async () => {
+    const { scrollIntoView, landedOn } = trackScrolls();
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/resolve-batch")) {
+          return jsonResponse({
+            vault_id: VAULT,
+            results: [],
+            asset_results: [],
+            note_link_results: [
+              { target: "Other.md", slug: "other", archived: false },
+            ],
+          });
+        }
+        const slug = url.split("/notes/")[1]?.split(/[?#]/)[0] ?? "";
+        return jsonResponse({
+          vault_id: VAULT,
+          note: {
+            title: slug,
+            slug,
+            relative_path: `${slug}.md`,
+            content: slug === "home" ? "[go](Other.md#^target)\n" : OTHER,
+            content_hash: `hash-${slug}`,
+            layer: null,
+          },
+        });
+      },
+    );
+    renderApp();
+
+    fireEvent.click(await screen.findByRole("link", { name: "go" }), {
+      button: 0,
+    });
+
+    await waitFor(() => {
+      expect(scrollIntoView).toHaveBeenCalled();
+    });
+    expect(landedOn().textContent).toBe("The one that matters.");
+  });
+
+  it("lands on a paragraph of the same note", async () => {
+    const { scrollIntoView, landedOn } = trackScrolls();
+    mockVault("Jump to [[Home#^here|down]].\n\nFurther down. ^here\n", {
+      "Home#^here": "home",
+    });
+    renderApp();
+
+    fireEvent.click(await screen.findByRole("link", { name: "down" }), {
+      button: 0,
+    });
+
+    await waitFor(() => {
+      expect(scrollIntoView).toHaveBeenCalled();
+    });
+    expect(landedOn().textContent).toBe("Further down.");
+    expect(screen.queryByText(/\^here/)).toBeNull();
+  });
+
+  it("lands on a paragraph of the same note from a link with no note name (#727)", async () => {
+    const { scrollIntoView, landedOn } = trackScrolls();
+    mockVault("Jump to [[#^here|down]].\n\nFurther down. ^here\n", {
+      "/home.md#^here": "home",
+    });
+    renderApp();
+
+    fireEvent.click(await screen.findByRole("link", { name: "down" }), {
+      button: 0,
+    });
+
+    await waitFor(() => {
+      expect(scrollIntoView).toHaveBeenCalled();
+    });
+    expect(landedOn().textContent).toBe("Further down.");
+    expect(screen.getByTestId("pathname").textContent).toBe(
+      `/v/${VAULT}/n/home`,
+    );
+  });
+
+  it("lands on the paragraph when the page is loaded at the link's address", async () => {
+    const { scrollIntoView, landedOn } = trackScrolls();
+    mockVault("Top.\n\nFurther down. ^here\n", {});
+    renderApp({}, `/v/${VAULT}/n/home#^here`);
+
+    await waitFor(() => {
+      expect(scrollIntoView).toHaveBeenCalled();
+    });
+    expect(landedOn().textContent).toBe("Further down.");
+  });
+
+  it("opens the note at the top when the block is gone", async () => {
+    const { scrollIntoView } = trackScrolls();
+    mockVault("Top.\n\nFurther down. ^here\n", {});
+    renderApp({}, `/v/${VAULT}/n/home#^gone`);
+
+    await screen.findByText("Further down.");
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(scrollIntoView).not.toHaveBeenCalled();
+    expect(screen.queryByRole("alert")).toBeNull();
   });
 });

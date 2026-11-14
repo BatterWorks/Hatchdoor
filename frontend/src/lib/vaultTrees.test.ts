@@ -43,6 +43,21 @@ describe("attributeVaultTree", () => {
     ]);
   });
 
+  it("stamps a folder's canvases too, and leaves the list off a folder without any (#579)", () => {
+    const tree = attributeVaultTree({
+      ...WIRE,
+      tree: {
+        ...WIRE.tree,
+        files: [{ name: "Plan.canvas", relative_path: "Plan.canvas" }],
+      },
+    }).tree;
+
+    expect(tree.files).toEqual([
+      { vault_id: VAULT_ID, name: "Plan.canvas", relative_path: "Plan.canvas" },
+    ]);
+    expect("files" in tree.folders[0]).toBe(false);
+  });
+
   it("keeps the Vault's own identity on the tree it came from", () => {
     const attributed = attributeVaultTree(WIRE);
 

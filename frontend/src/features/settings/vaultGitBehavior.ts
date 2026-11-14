@@ -242,6 +242,17 @@ export type GitFailureDescription = {
   filesTotal?: number;
 };
 
+/** Issue #638: everything else was committed (and, for a Vault with a
+ * remote, synchronized); only the listed files were left out. A warning, not
+ * an error, because the rest of the Vault is safe. */
+const UNSUPPORTED_FILE_NAMES = {
+  label: "unreadable file names",
+  tier: "warn" as const,
+  files: true,
+  sentence: () =>
+    "Hatchdoor committed everything else, but left out the files below because their names are not valid UTF-8 text. They are still on disk. Rename them, then press Try again.",
+};
+
 /** Issue #121's nine failures, verbatim from its resolution: "the
  * destination is invalid, the remote is unreachable, authentication failed,
  * validation failed, the install failed, the working copy is dirty, a
@@ -345,6 +356,26 @@ const GIT_FAILURE_COPY: Record<
     files: true,
     sentence: () =>
       "This Vault's Git checkout is part-way through a merge or similar operation, so Hatchdoor committed and pushed nothing. Finish or abort it with Git in the checkout, then press Try again.",
+  },
+  // Issue #638. A branch the remote lacks is found only after a full
+  // download, so the server stops retrying until someone fixes the name.
+  managed_git_branch_not_found: {
+    label: "branch not found",
+    tier: "error",
+    files: false,
+    sentence: () =>
+      "This Vault's remote has no branch with the name set above, so nothing was downloaded. Nothing was lost. Correct the branch name, or create the branch on your Git host, then press Try again.",
+  },
+  managed_git_unsupported_file_names: UNSUPPORTED_FILE_NAMES,
+  existing_git_local_history_unsupported_file_names: UNSUPPORTED_FILE_NAMES,
+  // Issue #678. The Vault's own `.git` is gone; Hatchdoor no longer falls
+  // back to a repository that happens to enclose the folder.
+  existing_git_local_history_repository_missing: {
+    label: "repository missing",
+    tier: "error",
+    files: false,
+    sentence: () =>
+      "This Vault's Git repository is missing from its folder, so Hatchdoor committed nothing. Your notes are untouched. Put the repository's .git folder back, or start a new history there with git init, then press Try again.",
   },
 };
 
@@ -483,9 +514,14 @@ export { fetchRegistryRevision };
 /** The single recovery action: re-enable with whatever revision is current
  * right now, since the marker may be read on a visit long after the failure.
  * Shared by the index's management entry and a Vault's own page. */
-export async function recoverPausedVault(
-  vaultId: VaultId,
-): Promise<{ ok: boolean; message: string; vault?: VaultSummary }> {
+export async function recoverPausedVault(vaultId: VaultId): Promise<{
+  ok: boolean;
+  message: string;
+  vault?: VaultSummary;
+  /** The registry revision the enable produced, for a page that sequences
+   * its next mutation on it (#645). */
+  registryRevision?: number;
+}> {
   const registryRevision = await fetchRegistryRevision();
   if (registryRevision === null)
     return {
@@ -496,12 +532,53 @@ export async function recoverPausedVault(
     `/api/v1/vaults/${vaultId}/enable?expected_registry_revision=${registryRevision}`,
     { method: "POST" },
   );
-  const payload = result.payload as { vault?: VaultSummary; message?: string };
+  const payload = result.payload as {
+    vault?: VaultSummary;
+    message?: string;
+    registry_revision?: number;
+  };
   if (!result.ok)
     return {
       ok: false,
       message: payload.message ?? "This Vault is still paused. Try again.",
     };
   clearRecoveryPending(vaultId);
-  return { ok: true, message: "This Vault is back.", vault: payload.vault };
+  return {
+    ok: true,
+    message: "This Vault is back.",
+    vault: payload.vault,
+    registryRevision: payload.registry_revision,
+  };
+}
+
+/** What an identity change of a managed checkout set aside (#639): the old
+ * checkout moves to an archive in Hatchdoor's state folder and the Vault
+ * clones its new remote afresh. */
+export type RetiredCheckout = {
+  archive: string;
+  committed: boolean;
+  unpushed_commits: number;
+};
+
+/** Where an identity change kept the old checkout and what only it holds,
+ * or nothing when no checkout was set aside. */
+export function retiredCheckoutNote(
+  retired: RetiredCheckout | undefined,
+): string {
+  if (!retired) return "";
+  const committed = retired.committed
+    ? " Notes not yet committed were committed there first."
+    : "";
+  const unpushed =
+    retired.unpushed_commits === 0
+      ? ""
+      : retired.unpushed_commits === 1
+        ? " It holds 1 commit the old remote never received."
+        : ` It holds ${retired.unpushed_commits} commits the old remote never received.`;
+  return `The previous checkout was kept in Hatchdoor's state folder at ${retired.archive}.${committed}${unpushed}`;
+}
+
+export function savedMessage(retired: RetiredCheckout | undefined): string {
+  const note = retiredCheckoutNote(retired);
+  return note ? `Saved. ${note}` : "Saved.";
 }

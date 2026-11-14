@@ -1,5 +1,6 @@
 import {
   Children,
+  createElement,
   isValidElement,
   useCallback,
   useEffect,
@@ -11,6 +12,7 @@ import {
 import type { MermaidApi } from "../../types";
 import { copyText } from "../../lib/clipboard";
 import { UiButton } from "../ui";
+import { isNoteEmbedElement } from "./noteEmbeds";
 import { isParagraphElement, splitAtSoftBreaks } from "./paragraphs";
 import { flattenText } from "./text";
 
@@ -48,20 +50,27 @@ function CalloutLeadRule() {
   return <span className="callout-lead-rule" aria-hidden="true" />;
 }
 
-export function CalloutOrQuote({ children }: { children: ReactNode }) {
+export function CalloutOrQuote({
+  children,
+  id,
+}: {
+  children: ReactNode;
+  /** The quote's block anchor (#578), set on whichever element it draws as. */
+  id?: string;
+}) {
   const nodes = Children.toArray(children);
   const firstContentIndex = nodes.findIndex(
     (node) => !(typeof node === "string" && node.trim().length === 0),
   );
 
   if (firstContentIndex === -1) {
-    return <blockquote>{children}</blockquote>;
+    return <blockquote id={id}>{children}</blockquote>;
   }
 
   const first = nodes[firstContentIndex];
 
   if (
-    isValidElement<{ children?: ReactNode }>(first) &&
+    isValidElement<{ children?: ReactNode; id?: string }>(first) &&
     isParagraphElement(first)
   ) {
     const firstText = flattenText(first.props.children).trim();
@@ -114,21 +123,34 @@ export function CalloutOrQuote({ children }: { children: ReactNode }) {
       // The callout's body lines were split from one paragraph, so each is
       // drawn as its own line rather than fused back together.
       const inlineLines = splitAtSoftBreaks(inlineBody);
+      // The first paragraph is taken apart here, so a block anchor it carried
+      // (#578) moves to its last line, where the id was written, or to the
+      // callout when the title was all it held.
+      const firstId = first.props.id;
+      const rootId = id ?? (inlineLines.length === 0 ? firstId : undefined);
       const allBody =
         inlineLines.length > 0
           ? [
-              ...inlineLines.map((lineChildren, index) => (
-                <p key={`inline-callout-${index}`} className="callout-line">
-                  {lineChildren}
-                </p>
-              )),
+              ...inlineLines.map((lineChildren, index) =>
+                // A line holding a note embed (#699) draws a block, which a
+                // paragraph cannot contain.
+                createElement(
+                  lineChildren.some(isNoteEmbedElement) ? "div" : "p",
+                  {
+                    key: `inline-callout-${index}`,
+                    className: "callout-line",
+                    id: index === inlineLines.length - 1 ? firstId : undefined,
+                  },
+                  ...lineChildren,
+                ),
+              ),
               ...bodyNodes,
             ]
           : bodyNodes;
 
       if (kind === "quote" || kind === "cite") {
         return (
-          <figure className="pullquote">
+          <figure className="pullquote" id={rootId}>
             <blockquote>{allBody}</blockquote>
             {attribution && <figcaption>{attribution}</figcaption>}
           </figure>
@@ -138,6 +160,7 @@ export function CalloutOrQuote({ children }: { children: ReactNode }) {
       if (fold) {
         return (
           <details
+            id={rootId}
             className={`callout callout-${kind} callout-collapsible`}
             open={fold === "+"}
           >
@@ -153,7 +176,7 @@ export function CalloutOrQuote({ children }: { children: ReactNode }) {
       }
 
       return (
-        <div className={`callout callout-${kind}`}>
+        <div id={rootId} className={`callout callout-${kind}`}>
           <div className="callout-title">
             {title}
             <CalloutLeadRule />
@@ -164,21 +187,27 @@ export function CalloutOrQuote({ children }: { children: ReactNode }) {
     }
   }
 
-  return <blockquote>{children}</blockquote>;
+  return <blockquote id={id}>{children}</blockquote>;
 }
 
 /** A list item; a task item keeps its class so the box lines up. */
 export function ListItem({
   className,
   children,
+  id,
 }: {
   className?: string;
   children?: ReactNode;
+  id?: string;
 }) {
   const liClass = className?.includes("task-list-item")
     ? "task-list-item"
     : undefined;
-  return <li className={liClass}>{children}</li>;
+  return (
+    <li className={liClass} id={id}>
+      {children}
+    </li>
+  );
 }
 
 export function CodeBlock({

@@ -75,6 +75,22 @@ const RECOVERY: ErrorDocs = ErrorDocs {
 
 /// Every code that names a page, and the page.
 const POINTERS: &[(&str, ErrorDocs)] = &[
+    // A `vault_id` no Vault has: the guide says where IDs come from.
+    (
+        "vault_not_found",
+        ErrorDocs {
+            page: "guides/how-to-work-in-a-vault-as-an-agent",
+            heading: Some("discovery-workflow"),
+        },
+    ),
+    // A folder outside the Vault mount, refused to an agent (ADR-54).
+    (
+        "vault_path_outside_mount",
+        ErrorDocs {
+            page: "guides/how-to-work-in-a-vault-as-an-agent",
+            heading: Some("adding-or-moving-a-vault"),
+        },
+    ),
     ("vault_unavailable", BAD_STATE),
     ("vault_read_unavailable", BAD_STATE),
     ("vault_path_unavailable", FOLDER_ACCESS),
@@ -86,9 +102,9 @@ const POINTERS: &[(&str, ErrorDocs)] = &[
             heading: Some("pause-and-resume-a-vault"),
         },
     ),
-    // A Vault control or read the Vault cannot serve right now, such as
-    // refreshing a Vault that cannot be browsed. A write to a read-only Vault
-    // is a JSON-RPC invalid-params error instead, so it never reaches here.
+    // A Vault control, read or write the Vault cannot serve right now, such
+    // as refreshing a Vault that cannot be browsed or writing to a read-only
+    // one.
     (
         "capability_unavailable",
         ErrorDocs {
@@ -99,6 +115,12 @@ const POINTERS: &[(&str, ErrorDocs)] = &[
     ("write_failed", WRITE_FAILING),
     ("write_recovery_required", WRITE_FAILING),
     ("managed_git_authentication_failed", GIT_FAILING),
+    ("managed_git_branch_not_found", GIT_FAILING),
+    ("managed_git_unsupported_file_names", GIT_FAILING),
+    (
+        "existing_git_local_history_unsupported_file_names",
+        GIT_FAILING,
+    ),
     ("managed_git_remote_unreachable", GIT_FAILING),
     ("managed_git_install_failed", GIT_FAILING),
     ("managed_git_push_rejected", GIT_FAILING),
@@ -109,6 +131,7 @@ const POINTERS: &[(&str, ErrorDocs)] = &[
         "existing_git_local_history_manual_recovery_required",
         GIT_FAILING,
     ),
+    ("existing_git_local_history_repository_missing", GIT_FAILING),
     (
         "managed_git_conflict",
         ErrorDocs {

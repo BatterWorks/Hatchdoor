@@ -14,7 +14,6 @@
 import type { ReactNode } from "react";
 import katex from "katex";
 
-import { ensureSyntaxTree } from "@codemirror/language";
 import {
   RangeSetBuilder,
   type EditorState,
@@ -26,7 +25,7 @@ import { Decoration, WidgetType, type DecorationSet } from "@codemirror/view";
 import { MermaidDiagram } from "../RendererComponents";
 import { PdfPreview } from "../PdfPreview";
 import { SavedQueryBlock } from "../SavedQueryBlock";
-import { caretAwareField, caretTouches } from "./focusState";
+import { caretAwareField, caretTouches, treeSoFar } from "./focusState";
 import { assetsResolved } from "./imageWidgets";
 import type { PortalRegistry } from "./widgetPortals";
 
@@ -224,8 +223,8 @@ function fencedLines(state: EditorState): {
 } {
   const fenced = new Set<number>();
   const fences: Array<{ first: Line; last: Line; lang: string }> = [];
-  const tree = ensureSyntaxTree(state, state.doc.length, 50);
-  tree?.iterate({
+  const tree = treeSoFar(state);
+  tree.iterate({
     enter: (node) => {
       if (node.name !== "FencedCode") {
         return;
@@ -389,5 +388,6 @@ export function renderedBlocks(config: RenderedBlocksConfig): Extension {
     find: (state) => blocksIn(state, config),
     decorate,
     refindOn: assetsResolved,
+    refindOnParse: true,
   });
 }

@@ -17,82 +17,130 @@ afterEach(() => {
 });
 
 describe("writeDrafts", () => {
-  it("persists and clears existing-note drafts by vault and slug", () => {
-    const key = noteDraftKey("vault-1", "home");
-    expect(key).toBe("hatchdoor:draft:note:vault-1:home");
+  it("persists and clears existing-note drafts by vault and path", () => {
+    const key = noteDraftKey("vault-1", "Notes/Home");
+    expect(key).toBe("hatchdoor:draft:note-path:vault-1:Notes/Home");
 
-    saveNoteDraft("vault-1", "home", {
+    saveNoteDraft("vault-1", "Notes/Home", {
       vaultId: "vault-1",
-      slug: "home",
+      relativePath: "Notes/Home",
       content: "# Home\nDraft",
       baseContentHash: "abc123",
       savedAt: 1781630000000,
     });
 
-    expect(loadNoteDraft("vault-1", "home")).toEqual({
+    expect(loadNoteDraft("vault-1", "Notes/Home")).toEqual({
       vaultId: "vault-1",
-      slug: "home",
+      relativePath: "Notes/Home",
       content: "# Home\nDraft",
       baseContentHash: "abc123",
       savedAt: 1781630000000,
     });
 
-    clearNoteDraft("vault-1", "home");
-    expect(loadNoteDraft("vault-1", "home")).toBeNull();
+    clearNoteDraft("vault-1", "Notes/Home");
+    expect(loadNoteDraft("vault-1", "Notes/Home")).toBeNull();
   });
 
-  it("normalizes mismatched draft vault/slug when saving and rejects mismatched payloads when loading", () => {
-    saveNoteDraft("vault-1", "home", {
+  it("clears only the draft whose text was confirmed saved", () => {
+    saveNoteDraft("vault-1", "Home.md", {
+      vaultId: "vault-1",
+      relativePath: "Home.md",
+      content: "refused edit",
+      baseContentHash: "old",
+      savedAt: 1,
+    });
+    clearNoteDraft("vault-1", "Home.md", "another tab's text");
+    expect(loadNoteDraft("vault-1", "Home.md")?.content).toBe("refused edit");
+    clearNoteDraft("vault-1", "Home.md", "refused edit");
+    expect(loadNoteDraft("vault-1", "Home.md")).toBeNull();
+  });
+
+  it("holds an older-base draft before replacing it with a new edit", () => {
+    saveNoteDraft("vault-1", "Home.md", {
+      vaultId: "vault-1",
+      relativePath: "Home.md",
+      content: "refused edit",
+      baseContentHash: "old",
+      savedAt: 1,
+    });
+    saveNoteDraft("vault-1", "Home.md", {
+      vaultId: "vault-1",
+      relativePath: "Home.md",
+      content: "new edit",
+      baseContentHash: "new",
+      savedAt: 2,
+    });
+    clearNoteDraft("vault-1", "Home.md", "new edit");
+    expect(listHeldDrafts().map((draft) => draft.content)).toEqual([
+      "refused edit",
+    ]);
+  });
+
+  // #627: two notes can share a name, and a slug moves between them. A draft
+  // typed into one is never offered to the other.
+  it("keeps drafts for two same-named notes apart", () => {
+    saveNoteDraft("vault-1", "z/Plan", {
+      vaultId: "vault-1",
+      relativePath: "z/Plan",
+      content: "typed in z",
+      baseContentHash: "same",
+      savedAt: 1,
+    });
+
+    expect(loadNoteDraft("vault-1", "a/Plan")).toBeNull();
+    expect(loadNoteDraft("vault-1", "z/Plan")?.content).toBe("typed in z");
+  });
+
+  it("normalizes mismatched draft vault/path when saving and rejects mismatched payloads when loading", () => {
+    const key = "hatchdoor:draft:note-path:vault-1:Home";
+    saveNoteDraft("vault-1", "Home", {
       vaultId: "vault-2",
-      slug: "other",
+      relativePath: "Other",
       content: "# Home\nDraft",
       baseContentHash: "abc123",
       savedAt: 1781630000000,
     });
 
-    expect(
-      window.localStorage.getItem("hatchdoor:draft:note:vault-1:home"),
-    ).toContain('"vaultId":"vault-1"');
-    expect(
-      window.localStorage.getItem("hatchdoor:draft:note:vault-1:home"),
-    ).toContain('"slug":"home"');
-    expect(loadNoteDraft("vault-1", "home")).toEqual({
+    expect(window.localStorage.getItem(key)).toContain('"vaultId":"vault-1"');
+    expect(window.localStorage.getItem(key)).toContain('"relativePath":"Home"');
+    expect(loadNoteDraft("vault-1", "Home")).toEqual({
       vaultId: "vault-1",
-      slug: "home",
+      relativePath: "Home",
       content: "# Home\nDraft",
       baseContentHash: "abc123",
       savedAt: 1781630000000,
     });
 
     window.localStorage.setItem(
-      "hatchdoor:draft:note:vault-1:home",
+      key,
       JSON.stringify({
         vaultId: "vault-1",
-        slug: "other",
+        relativePath: "Other",
         content: "# Home\nDraft",
         baseContentHash: "abc123",
         savedAt: 1781630000000,
       }),
     );
-
-    expect(loadNoteDraft("vault-1", "home")).toBeNull();
+    expect(loadNoteDraft("vault-1", "Home")).toBeNull();
 
     window.localStorage.setItem(
-      "hatchdoor:draft:note:vault-1:home",
+      key,
       JSON.stringify({
         vaultId: "vault-2",
-        slug: "home",
+        relativePath: "Home",
         content: "# Home\nDraft",
         baseContentHash: "abc123",
         savedAt: 1781630000000,
       }),
     );
-
-    expect(loadNoteDraft("vault-1", "home")).toBeNull();
+    expect(loadNoteDraft("vault-1", "Home")).toBeNull();
   });
 
   it("returns null for malformed draft JSON", () => {
-    window.localStorage.setItem("hatchdoor:draft:note:vault-1:broken", "{");
+    window.localStorage.setItem(
+      "hatchdoor:draft:note-path:vault-1:broken",
+      "{",
+    );
     expect(loadNoteDraft("vault-1", "broken")).toBeNull();
   });
 
@@ -100,33 +148,40 @@ describe("writeDrafts", () => {
     const now = 2_000_000_000_000;
     saveNoteDraft("vault-1", "fresh", {
       vaultId: "vault-1",
-      slug: "fresh",
+      relativePath: "fresh",
       content: "keep",
       baseContentHash: "h",
       savedAt: now - 1000,
     });
     saveNoteDraft("vault-1", "stale", {
       vaultId: "vault-1",
-      slug: "stale",
+      relativePath: "stale",
       content: "drop",
       baseContentHash: "h",
       savedAt: now - 10 * 24 * 60 * 60 * 1000,
     });
-    window.localStorage.setItem("hatchdoor:draft:note:vault-1:broken", "{");
+    window.localStorage.setItem(
+      "hatchdoor:draft:note-path:vault-1:broken",
+      "{",
+    );
+    window.localStorage.setItem("hatchdoor:draft:note:vault-1:old", "{");
     window.localStorage.setItem("unrelated:key", "keep");
 
     const removed = pruneNoteDrafts(7 * 24 * 60 * 60 * 1000, now);
 
-    expect(removed).toBe(2);
+    expect(removed).toBe(3);
     expect(loadNoteDraft("vault-1", "fresh")).not.toBeNull();
     expect(loadNoteDraft("vault-1", "stale")).toBeNull();
     expect(
-      window.localStorage.getItem("hatchdoor:draft:note:vault-1:broken"),
+      window.localStorage.getItem("hatchdoor:draft:note-path:vault-1:broken"),
+    ).toBeNull();
+    expect(
+      window.localStorage.getItem("hatchdoor:draft:note:vault-1:old"),
     ).toBeNull();
     expect(window.localStorage.getItem("unrelated:key")).toBe("keep");
   });
 
-  it("collectLegacyHeldDrafts moves a pre-#137 slug-only note draft and leaves a current-format draft alone", () => {
+  it("collectLegacyHeldDrafts holds every slug-keyed note draft and leaves a path-keyed draft alone", () => {
     window.localStorage.setItem(
       "hatchdoor:draft:note:orphaned",
       JSON.stringify({
@@ -136,9 +191,21 @@ describe("writeDrafts", () => {
         savedAt: 1000,
       }),
     );
+    // #627: a Vault-qualified slug draft cannot say which file it was typed
+    // into either, so it is held rather than restored into the slug's holder.
+    window.localStorage.setItem(
+      "hatchdoor:draft:note:vault-1:plan",
+      JSON.stringify({
+        vaultId: "vault-1",
+        slug: "plan",
+        content: "typed somewhere",
+        baseContentHash: "same",
+        savedAt: 1500,
+      }),
+    );
     saveNoteDraft("vault-1", "current", {
       vaultId: "vault-1",
-      slug: "current",
+      relativePath: "current",
       content: "still active",
       baseContentHash: "def456",
       savedAt: 2000,
@@ -147,6 +214,14 @@ describe("writeDrafts", () => {
     const held = collectLegacyHeldDrafts();
 
     expect(held).toEqual([
+      {
+        id: "note:vault-1:plan",
+        kind: "note",
+        slug: "plan",
+        content: "typed somewhere",
+        baseContentHash: "same",
+        savedAt: 1500,
+      },
       {
         id: "note:orphaned",
         kind: "note",
@@ -159,8 +234,11 @@ describe("writeDrafts", () => {
     expect(
       window.localStorage.getItem("hatchdoor:draft:note:orphaned"),
     ).toBeNull();
-    // The current-format draft is untouched: still readable through the
-    // ordinary per-note lookup, not swept into held drafts.
+    expect(
+      window.localStorage.getItem("hatchdoor:draft:note:vault-1:plan"),
+    ).toBeNull();
+    // The path-keyed draft is untouched: still readable through the ordinary
+    // per-note lookup, not swept into held drafts.
     expect(loadNoteDraft("vault-1", "current")).not.toBeNull();
     expect(listHeldDrafts()).toEqual(held);
   });
@@ -240,7 +318,7 @@ describe("saveNoteDraft reports storage failures (#330)", () => {
     expect(
       saveNoteDraft("vault-1", "home", {
         vaultId: "vault-1",
-        slug: "home",
+        relativePath: "home",
         content: "kept",
         baseContentHash: "abc",
         savedAt: 1,
@@ -256,7 +334,7 @@ describe("saveNoteDraft reports storage failures (#330)", () => {
       expect(
         saveNoteDraft("vault-1", "home", {
           vaultId: "vault-1",
-          slug: "home",
+          relativePath: "home",
           content: "lost",
           baseContentHash: "abc",
           savedAt: 2,

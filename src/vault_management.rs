@@ -25,20 +25,22 @@
 //! which is a transport concern with no MCP counterpart.
 
 use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use tracing::error;
+use tracing::{error, info};
 
 use crate::app_state::AppState;
 use crate::git::GitPollingClock;
 use crate::vault::{LinkPathForm, LinkStyle};
 use crate::vault_error::VaultOperationError;
 use crate::vault_registry::{
-    HttpsCredentials, NewVaultDefinition, VaultCommitIdentity, VaultDefinition,
-    VaultDefinitionEdit, VaultDefinitionError, VaultId, VaultRegistryError, VaultRegistryRecovery,
-    VaultRegistryRecoveryKind, VaultRegistrySnapshot, VaultRegistryState, VaultSource,
+    HttpsCredentials, NewVaultDefinition, PendingEdit, PreparedEditError, VaultCommitIdentity,
+    VaultDefinition, VaultDefinitionEdit, VaultDefinitionError, VaultId, VaultRegistryError,
+    VaultRegistryRecovery, VaultRegistryRecoveryKind, VaultRegistrySnapshot, VaultRegistryState,
+    VaultSource,
 };
 use crate::vault_runtime::{
     CollectionVaultSnapshot, LocalContentStatus, RecoveryBranchStatus, VaultActivationStatus,
@@ -170,6 +172,25 @@ pub struct VaultMutationResponse {
     /// write does not advance it, so it cannot say whether a collection read
     /// includes a write. That read's participants can.
     pub collection_revision: u64,
+    /// Present only on an edit that changed a managed Git Vault's
+    /// repository, branch or folder and found a checkout to set aside (#639).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retired_checkout: Option<RetiredCheckoutReport>,
+}
+
+/// The old checkout a managed Git Vault's identity change set aside (#639).
+/// Its work is kept, never deleted: the next Git turn clones the new remote
+/// afresh, and anything the old remote never received stays in the archive.
+#[derive(Debug, Serialize, JsonSchema, Deserialize)]
+pub struct RetiredCheckoutReport {
+    /// Where the old checkout now lives, relative to the instance state
+    /// directory.
+    pub archive: String,
+    /// Whether notes not yet committed were committed there before it moved.
+    pub committed: bool,
+    /// Commits in the old checkout that its remote does not have. Only the
+    /// archive holds them.
+    pub unpushed_commits: usize,
 }
 
 #[derive(Debug, Serialize, JsonSchema, Deserialize)]
@@ -313,6 +334,8 @@ pub(crate) const MANAGEMENT_ERROR_CODES: &[&str] = &[
     "identity_change_requires_disabled",
     "identity_change_requires_confirmation",
     "registry_revision_conflict",
+    "checkout_set_aside_failed",
+    "vault_path_outside_mount",
     "vault_disabled",
     "capability_unavailable",
     "vault_registry_recovery_required",
@@ -386,6 +409,68 @@ fn registry_error(error: VaultRegistryError, vault_id: Option<VaultId>) -> Vault
         VaultRegistryError::InvalidDefinition(error) => definition_error(error, vault_id),
         VaultRegistryError::Storage(detail) => internal_error(detail, vault_id),
     }
+}
+
+/// The folders on this machine a source names: `checked`, which must sit
+/// inside the mount (a `local` path, an `existing_git` repository), and
+/// `read`, the folder Hatchdoor reads (the repository joined with its
+/// subdirectory).
+#[derive(Debug, PartialEq, Eq)]
+struct LocalFolders {
+    checked: PathBuf,
+    read: PathBuf,
+}
+
+impl LocalFolders {
+    /// The folders as the source spells them, unresolved. `None` for a
+    /// managed Git source, whose checkout Hatchdoor places itself (ADR-54
+    /// decision 4).
+    fn as_written(source: &VaultSource) -> Option<Self> {
+        match source {
+            VaultSource::Local { path } => Some(Self {
+                checked: path.clone(),
+                read: path.clone(),
+            }),
+            VaultSource::ExistingGit {
+                repository_path,
+                vault_subdirectory,
+                ..
+            } => Some(Self {
+                checked: repository_path.clone(),
+                read: vault_subdirectory.as_ref().map_or_else(
+                    || repository_path.clone(),
+                    |subdirectory| repository_path.join(subdirectory),
+                ),
+            }),
+            VaultSource::ManagedGit { .. } => None,
+        }
+    }
+
+    /// The same folders resolved through [`resolve_folder`].
+    fn resolved(source: &VaultSource) -> Option<Self> {
+        Self::as_written(source).map(|folders| Self {
+            checked: resolve_folder(&folders.checked),
+            read: resolve_folder(&folders.read),
+        })
+    }
+}
+
+/// A folder resolved the way the registry will resolve it when it saves:
+/// through the operating system first, as its `canonicalize` does, so
+/// `link/..` resolves through the symlink here exactly as it will there. Only
+/// a path that does not exist falls back to the registry's lexical form,
+/// which the registry then refuses as unreadable anyway.
+fn resolve_folder(path: &Path) -> PathBuf {
+    path.canonicalize()
+        .unwrap_or_else(|_| crate::vault_registry::canonical_or_normalized(path))
+}
+
+/// Who may name which folder (ADR-54). The web app may name any folder the
+/// process can read; an agent only one inside the Vault mount.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FolderScope {
+    Anywhere,
+    InsideMount,
 }
 
 fn vault_not_found(vault_id: VaultId) -> VaultOperationError {
@@ -564,11 +649,70 @@ fn vault_summary_for(
 /// together, and reconciling them in that order within one call is the behaviour this module exists to own.
 pub struct VaultCollectionManagement<'a> {
     state: &'a AppState,
+    folder_scope: FolderScope,
 }
 
 impl<'a> VaultCollectionManagement<'a> {
     pub fn new(state: &'a AppState) -> Self {
-        Self { state }
+        Self {
+            state,
+            folder_scope: FolderScope::Anywhere,
+        }
+    }
+
+    /// The same core for a caller that may name a folder on this machine
+    /// only inside the Vault mount (`VAULT_PATH`): the MCP tools (ADR-54). A
+    /// `create` or `edit` that names or moves to a folder outside it is
+    /// refused with `vault_path_outside_mount`; every other operation, and an
+    /// edit that leaves a Vault's folder where it is, behaves as from
+    /// [`Self::new`].
+    pub fn within_vault_mount(state: &'a AppState) -> Self {
+        Self {
+            state,
+            folder_scope: FolderScope::InsideMount,
+        }
+    }
+
+    /// Refuse a source whose local folder lies outside the mount, unless it
+    /// is the folder `previous` already names (ADR-54 decisions 1 and 2).
+    /// A caller from [`Self::new`] is never refused.
+    fn ensure_folder_inside_mount(
+        &self,
+        source: &VaultSource,
+        previous: Option<&VaultSource>,
+        vault_id: Option<VaultId>,
+    ) -> Result<(), VaultOperationError> {
+        if self.folder_scope == FolderScope::Anywhere {
+            return Ok(());
+        }
+        let Some(folders) = LocalFolders::resolved(source) else {
+            return Ok(());
+        };
+        // Unchanged means the same kind of source on the folders the
+        // registry saved, compared as saved: the registry stored them
+        // resolved, and resolving them again now would follow a symlink that
+        // appeared since. A change of kind on the same folder, such as a
+        // plain folder becoming a Local history repository, is a move.
+        if let Some(previous) = previous
+            && std::mem::discriminant(previous) == std::mem::discriminant(source)
+            && let Some(saved) = LocalFolders::as_written(previous)
+            && (LocalFolders::as_written(source).as_ref() == Some(&saved) || folders == saved)
+        {
+            return Ok(());
+        }
+        let resolved_mount = resolve_folder(&self.state.vault_mount_root);
+        if folders.checked.starts_with(&resolved_mount) {
+            return Ok(());
+        }
+        Err(VaultOperationError::new(
+            "vault_path_outside_mount",
+            format!(
+                "An agent can add or move a Vault only to a folder inside the Vault mount, {}. This folder is outside it, so nothing changed. The maintainer can add it from Settings in the Hatchdoor web app.",
+                resolved_mount.display()
+            ),
+            vault_id,
+            false,
+        ))
     }
 
     /// Discovery: every Vault this instance serves, with the collection
@@ -665,6 +809,7 @@ impl<'a> VaultCollectionManagement<'a> {
             Ok(VaultRegistryState::Recovery(recovery)) => return Err(recovery_error(&recovery)),
             Err(error) => return Err(internal_error(error.to_string(), None)),
         };
+        self.ensure_folder_inside_mount(&request.source, None, None)?;
 
         let definition = NewVaultDefinition {
             name: request.name,
@@ -712,6 +857,22 @@ impl<'a> VaultCollectionManagement<'a> {
             HttpsCredentialsPatch::Replace { .. }
         );
 
+        // Checked first against the definition read now, so a folder outside
+        // the mount is refused before the registry says whether it exists,
+        // and again below against the definition the save replaces, so a
+        // change that lands in between cannot slip past (ADR-54 decision 2).
+        if self.folder_scope == FolderScope::InsideMount
+            && let Ok(VaultRegistryState::Ready(snapshot)) = self.state.vault_registry.load()
+            && let Some(current) = snapshot.definition(vault_id)
+        {
+            self.ensure_folder_inside_mount(
+                &request.source,
+                Some(current.source()),
+                Some(vault_id),
+            )?;
+        }
+        let checked_source = request.source.clone();
+
         let edit = VaultDefinitionEdit {
             name: request.name,
             source: request.source,
@@ -721,11 +882,36 @@ impl<'a> VaultCollectionManagement<'a> {
             archive_folder: request.archive_folder,
             commit_identity: request.commit_identity,
         };
+        let mut retired = None;
         let snapshot = self
             .state
             .vault_registry
-            .edit(request.expected_registry_revision, vault_id, edit)
-            .map_err(|error| registry_error(error, Some(vault_id)))?;
+            .edit_prepared(
+                request.expected_registry_revision,
+                vault_id,
+                edit,
+                |pending| {
+                    self.ensure_folder_inside_mount(
+                        &checked_source,
+                        Some(pending.previous),
+                        Some(vault_id),
+                    )?;
+                    retired = self.retire_managed_checkout(vault_id, &pending)?;
+                    Ok(())
+                },
+            )
+            .map_err(|error| match error {
+                PreparedEditError::Registry(error) => {
+                    // The save failed after the checkout was set aside: put it
+                    // back, so the Vault keeps the checkout of the remote its
+                    // definition still names.
+                    if let Some(retired) = &retired {
+                        self.restore_retired_checkout(vault_id, retired);
+                    }
+                    registry_error(error, Some(vault_id))
+                }
+                PreparedEditError::Prepare(error) => error,
+            })?;
 
         self.reconcile_after_commit(&snapshot)
             .await
@@ -740,7 +926,101 @@ impl<'a> VaultCollectionManagement<'a> {
             // Git/capability state after a real secret rotation.
             self.state.vaults.notify_definition_changed(vault_id);
         }
-        Ok(self.mutation_response(&snapshot, Some(vault_id)))
+        let mut response = self.mutation_response(&snapshot, Some(vault_id));
+        response.retired_checkout = retired.map(|retired| RetiredCheckoutReport {
+            archive: retired.archive.to_string_lossy().into_owned(),
+            committed: retired.committed,
+            unpushed_commits: retired.unpushed_commits,
+        });
+        Ok(response)
+    }
+
+    /// Set a managed Git Vault's checkout aside when a validated edit is about
+    /// to change its repository, branch or folder (#639), so the next Git
+    /// turn clones the new identity instead of failing validation against
+    /// the old checkout forever. Runs before the edit is saved: when the old
+    /// checkout's notes cannot be committed, the edit is refused and the
+    /// checkout stays where it is.
+    ///
+    /// This also covers a change away from managed Git: a later change back
+    /// would otherwise find a checkout of whatever remote it last named.
+    fn retire_managed_checkout(
+        &self,
+        vault_id: VaultId,
+        pending: &PendingEdit<'_>,
+    ) -> Result<Option<crate::git::RetiredCheckout>, VaultOperationError> {
+        let VaultSource::ManagedGit { mode, .. } = pending.previous else {
+            return Ok(None);
+        };
+        if !pending.identity_changed {
+            return Ok(None);
+        }
+        let state_directory = self.managed_state_directory();
+        let (default_name, default_email) =
+            crate::git::config::author_defaults(&self.state.runtime_config.snapshot());
+        let (author_name, author_email) = crate::git::config::resolve_commit_identity(
+            pending.previous_commit_identity,
+            &default_name,
+            &default_email,
+        );
+        crate::git::retire_managed_checkout(
+            &state_directory,
+            vault_id,
+            *mode,
+            &author_name,
+            &author_email,
+        )
+        .map_err(|error| {
+            VaultOperationError::new(
+                "checkout_set_aside_failed",
+                format!(
+                    "Nothing changed: the Vault's current checkout could not be set aside, so it and its notes stay where they are. {}",
+                    error.message()
+                ),
+                Some(vault_id),
+                error.retryable(),
+            )
+        })
+        .inspect(|retired| {
+            if let Some(retired) = retired {
+                info!(
+                    %vault_id,
+                    archive = %retired.archive.display(),
+                    committed = retired.committed,
+                    unpushed_commits = retired.unpushed_commits,
+                    "set a managed checkout aside for an identity change"
+                );
+            }
+        })
+    }
+
+    /// Move a checkout [`Self::retire_managed_checkout`] set aside back, for
+    /// an edit whose save then failed. A failure is logged with the archive's
+    /// place: the checkout is still whole there, and the next turn clones
+    /// afresh.
+    fn restore_retired_checkout(&self, vault_id: VaultId, retired: &crate::git::RetiredCheckout) {
+        match crate::git::restore_retired_checkout(
+            &self.managed_state_directory(),
+            vault_id,
+            &retired.archive,
+        ) {
+            Ok(()) => info!(%vault_id, "put a set-aside checkout back after a failed save"),
+            Err(error) => error!(
+                %vault_id,
+                archive = %retired.archive.display(),
+                error = %error.message(),
+                "could not put a set-aside checkout back after a failed save; it stays in its archive"
+            ),
+        }
+    }
+
+    /// The instance state directory: the folder holding the registry file,
+    /// where managed checkouts live. The executor derives it the same way.
+    fn managed_state_directory(&self) -> std::path::PathBuf {
+        self.state.vault_registry.path().parent().map_or_else(
+            || std::path::PathBuf::from("."),
+            std::path::Path::to_path_buf,
+        )
     }
 
     /// Enable or disable an existing Vault definition.
@@ -791,10 +1071,52 @@ impl<'a> VaultCollectionManagement<'a> {
         self.managed_git_control(vault_id, false)
     }
 
-    /// The same admitted operation as [`Self::sync`], kept as a distinctly
-    /// named entry point (mirrors `ManagedGitScheduler::retry_now`).
-    pub fn retry(&self, vault_id: VaultId) -> Result<VaultScheduleResponse, VaultOperationError> {
-        self.managed_git_control(vault_id, true)
+    /// For a Vault with Git, the same admitted operation as [`Self::sync`],
+    /// kept as a distinctly named entry point (mirrors
+    /// `ManagedGitScheduler::retry_now`).
+    ///
+    /// A Local Vault has no Git turn to retry. Its retry looks at the folder
+    /// again now, restarts a watcher that failed to start, and asks for an
+    /// Index turn once the folder can be read (#641). A folder that still
+    /// cannot be read answers `vault_unavailable` with the reason the probe
+    /// found.
+    pub async fn retry(
+        &self,
+        vault_id: VaultId,
+    ) -> Result<VaultScheduleResponse, VaultOperationError> {
+        let definition = self.enabled_definition(vault_id)?;
+        if !matches!(definition.source(), VaultSource::Local { .. }) {
+            return self.managed_git_control(vault_id, true);
+        }
+        let runtime = self
+            .state
+            .vaults
+            .runtime(vault_id)
+            .ok_or_else(|| vault_unavailable(vault_id))?;
+        // The probe stats the folder, which a stalled network share can hold
+        // up, so it runs off the workers that serve requests.
+        let probe = runtime.clone();
+        let readable = tokio::task::spawn_blocking(move || probe.retry_local_content())
+            .await
+            .map_err(|error| internal_error(error.to_string(), Some(vault_id)))?;
+        if !readable {
+            let message = runtime.snapshot().activation_error.map_or_else(
+                || "The Vault's folder cannot be read".to_string(),
+                |error| error.message,
+            );
+            return Err(VaultOperationError::new(
+                "vault_unavailable",
+                message,
+                Some(vault_id),
+                true,
+            ));
+        }
+        schedule_response(
+            vault_id,
+            self.state
+                .vault_work
+                .request(vault_id, VaultWorkKind::Index),
+        )
     }
 
     /// Admit a request to publish this Vault's side of a sync conflict to its
@@ -879,14 +1201,22 @@ impl<'a> VaultCollectionManagement<'a> {
     /// Request one Vault's next Index turn. This only admits work to the
     /// shared FIFO; the runtime worker performs the authoritative Markdown
     /// scan and atomic snapshot publication.
-    pub fn refresh(&self, vault_id: VaultId) -> Result<VaultScheduleResponse, VaultOperationError> {
+    pub async fn refresh(
+        &self,
+        vault_id: VaultId,
+    ) -> Result<VaultScheduleResponse, VaultOperationError> {
         self.enabled_definition(vault_id)?;
-        if self
-            .state
-            .vaults
-            .runtime(vault_id)
-            .is_none_or(|runtime| !runtime.snapshot().capabilities.browse)
-        {
+        let runtime = self.state.vaults.runtime(vault_id);
+        // A Local Vault's folder is looked at again first, off the request
+        // workers, so a refresh answers for the folder as it stands, not as
+        // activation found it (#641).
+        if let Some(runtime) = &runtime {
+            let probe = runtime.clone();
+            tokio::task::spawn_blocking(move || probe.reprobe_local_content())
+                .await
+                .map_err(|error| internal_error(error.to_string(), Some(vault_id)))?;
+        }
+        if runtime.is_none_or(|runtime| !runtime.snapshot().capabilities.browse) {
             return Err(VaultOperationError::new(
                 "capability_unavailable",
                 "Vault refresh requires currently usable local Markdown content",
@@ -977,6 +1307,7 @@ impl<'a> VaultCollectionManagement<'a> {
             vault,
             registry_revision: snapshot.revision(),
             collection_revision: collection_snapshot.collection_revision,
+            retired_checkout: None,
         }
     }
 
@@ -1145,6 +1476,67 @@ mod tests {
             panic!("registry entered recovery");
         };
         snapshot
+    }
+
+    /// ADR-54: the check both `edit` sites call. An unchanged folder is the
+    /// same kind of source on the folders as the registry saved them; any
+    /// other source must resolve inside the mount, and `new` checks nothing.
+    #[test]
+    fn the_mount_rule_admits_only_unchanged_folders_outside_the_mount() {
+        let (mut state, _worker, directory) = test_state();
+        let mount = directory.path().join("mount");
+        let outside = directory.path().join("outside");
+        let inside = mount.join("inside");
+        std::fs::create_dir_all(&inside).expect("inside dir");
+        std::fs::create_dir_all(&outside).expect("outside dir");
+        state.vault_mount_root = mount.clone();
+        let outside = outside.canonicalize().expect("canonical outside");
+        let agent = VaultCollectionManagement::within_vault_mount(&state);
+        let refused = |result: Result<(), VaultOperationError>| {
+            assert_eq!(
+                result.expect_err("refused").code,
+                "vault_path_outside_mount"
+            );
+        };
+        let local = |path: &Path| VaultSource::Local {
+            path: path.to_path_buf(),
+        };
+        let history = |path: &Path| VaultSource::ExistingGit {
+            repository_path: path.to_path_buf(),
+            repository_url: None,
+            branch: None,
+            vault_subdirectory: None,
+            mode: VaultGitMode::LocalHistory,
+            poll_interval_secs: DEFAULT_MANAGED_GIT_POLL_INTERVAL_SECS,
+        };
+
+        let saved = local(&outside);
+        agent
+            .ensure_folder_inside_mount(&local(&outside), Some(&saved), None)
+            .expect("the saved folder, as listed");
+        agent
+            .ensure_folder_inside_mount(&local(&outside.join(".")), Some(&saved), None)
+            .expect("the saved folder, spelled differently");
+        refused(agent.ensure_folder_inside_mount(&local(&outside), None, None));
+        // A plain folder turned into a Local history repository in place
+        // would make Hatchdoor create `.git` outside the mount.
+        refused(agent.ensure_folder_inside_mount(&history(&outside), Some(&saved), None));
+
+        // A saved folder inside the mount that became a symlink to the
+        // outside is compared as saved, not as it resolves today.
+        let swapped = mount.join("swapped");
+        std::os::unix::fs::symlink(&outside, &swapped).expect("symlink");
+        refused(agent.ensure_folder_inside_mount(&local(&outside), Some(&local(&swapped)), None));
+
+        agent
+            .ensure_folder_inside_mount(&local(&inside), Some(&saved), None)
+            .expect("a move into the mount");
+        agent
+            .ensure_folder_inside_mount(&managed_git_source(900), Some(&saved), None)
+            .expect("managed Git places its own checkout");
+        VaultCollectionManagement::new(&state)
+            .ensure_folder_inside_mount(&local(&outside), None, None)
+            .expect("the web app may name any folder");
     }
 
     #[test]
@@ -1477,6 +1869,204 @@ mod tests {
             VaultCapabilities::default(),
             "a demo offers no retry for a Vault a visitor cannot retry"
         );
+    }
+
+    fn two_way_source(url: &str, vault_subdirectory: Option<&str>) -> VaultSource {
+        VaultSource::ManagedGit {
+            repository_url: url.to_string(),
+            branch: None,
+            vault_subdirectory: vault_subdirectory.map(std::path::PathBuf::from),
+            mode: VaultGitMode::TwoWay,
+            poll_interval_secs: DEFAULT_MANAGED_GIT_POLL_INTERVAL_SECS,
+        }
+    }
+
+    /// A disabled Two-way managed Vault with a checkout of `url` on disk, the
+    /// way a first clone leaves it: one commit, `origin` and the receipt
+    /// naming `url`. Returns the Vault and its checkout folder.
+    async fn disabled_vault_with_checkout(
+        state: &AppState,
+        url: &str,
+        vault_subdirectory: Option<&str>,
+    ) -> (VaultId, std::path::PathBuf) {
+        VaultCollectionManagement::new(state)
+            .create(CreateVaultRequest {
+                enabled: false,
+                ..create_request("Remote notes", two_way_source(url, vault_subdirectory))
+            })
+            .await
+            .expect("create the disabled Vault");
+        let vault_id = ready_snapshot(state).vault_ids().next().expect("one Vault");
+        let vault_directory = state
+            .vault_registry
+            .path()
+            .parent()
+            .expect("state directory")
+            .join("vaults")
+            .join(vault_id.to_string());
+        let checkout = vault_directory.join("repository");
+        let notes = vault_subdirectory.map_or_else(|| checkout.clone(), |sub| checkout.join(sub));
+        std::fs::create_dir_all(&notes).expect("checkout folders");
+        let repository = git2::Repository::init(&checkout).expect("checkout repository");
+        std::fs::write(notes.join("Home.md"), "# Home\n").expect("note");
+        let mut index = repository.index().expect("index");
+        index
+            .add_all(["*"], git2::IndexAddOption::DEFAULT, None)
+            .expect("stage");
+        let tree = repository
+            .find_tree(index.write_tree().expect("tree"))
+            .expect("tree");
+        let signature = git2::Signature::now("Test", "test@example.test").expect("signature");
+        repository
+            .commit(Some("HEAD"), &signature, &signature, "first", &tree, &[])
+            .expect("commit");
+        repository.remote("origin", url).expect("origin");
+        let branch = repository
+            .head()
+            .expect("HEAD")
+            .shorthand()
+            .expect("branch")
+            .to_string();
+        std::fs::write(
+            vault_directory.join(".hatchdoor-managed-checkout.json"),
+            serde_json::json!({
+                "repository_url": url,
+                "resolved_branch": branch,
+                "vault_subdirectory": vault_subdirectory,
+            })
+            .to_string(),
+        )
+        .expect("receipt");
+        (vault_id, checkout)
+    }
+
+    fn identity_edit(revision: u64, source: VaultSource) -> EditVaultRequest {
+        EditVaultRequest {
+            expected_registry_revision: revision,
+            name: "Remote notes".to_string(),
+            source,
+            exclude_patterns: Vec::new(),
+            https_credentials: HttpsCredentialsPatch::Keep,
+            confirm_identity_change: true,
+            archive_folder: None,
+            commit_identity: None,
+        }
+    }
+
+    /// #639: a confirmed URL change on a managed Vault commits the old
+    /// checkout's pending note, moves the checkout into the Vault's
+    /// `retired-checkouts/` folder and reports it, so the next turn clones
+    /// the new remote instead of failing validation for good.
+    #[tokio::test]
+    async fn a_managed_identity_change_sets_the_old_checkout_aside_and_reports_it() {
+        let (state, _worker, _directory) = test_state();
+        let (vault_id, checkout) =
+            disabled_vault_with_checkout(&state, "https://example.test/owner/old.git", None).await;
+        std::fs::write(checkout.join("After.md"), "after\n").expect("note not yet committed");
+
+        let response = VaultCollectionManagement::new(&state)
+            .edit(
+                vault_id,
+                identity_edit(
+                    ready_snapshot(&state).revision(),
+                    two_way_source("https://example.test/owner/new.git", None),
+                ),
+            )
+            .await
+            .expect("the identity change saves");
+
+        let retired = response
+            .retired_checkout
+            .expect("the old checkout is reported");
+        assert!(retired.committed);
+        assert_eq!(
+            retired.unpushed_commits, 2,
+            "its remote never received either"
+        );
+        assert!(!checkout.exists(), "the next turn clones afresh");
+        let state_directory = state
+            .vault_registry
+            .path()
+            .parent()
+            .expect("state directory")
+            .canonicalize()
+            .expect("canonical state directory");
+        let archived = state_directory.join(&retired.archive).join("repository");
+        assert!(archived.join("After.md").is_file());
+        let archived_repository = git2::Repository::open(&archived).expect("archived repository");
+        let head = archived_repository
+            .head()
+            .expect("HEAD")
+            .peel_to_tree()
+            .expect("tree");
+        assert!(head.get_path(std::path::Path::new("After.md")).is_ok());
+        assert!(matches!(
+            ready_snapshot(&state)
+                .definition(vault_id)
+                .expect("definition")
+                .source(),
+            VaultSource::ManagedGit { repository_url, .. }
+                if repository_url == "https://example.test/owner/new.git"
+        ));
+    }
+
+    /// #639: when the old checkout's notes cannot be committed, the edit is
+    /// refused, the definition is unchanged and the checkout stays put.
+    #[tokio::test]
+    async fn a_managed_identity_change_whose_notes_cannot_be_committed_changes_nothing() {
+        let (state, _worker, _directory) = test_state();
+        let (vault_id, checkout) = disabled_vault_with_checkout(
+            &state,
+            "https://example.test/owner/old.git",
+            Some("vault"),
+        )
+        .await;
+        // A change outside the Vault folder is one a Vault commit refuses.
+        std::fs::write(checkout.join("Outside.md"), "outside\n").expect("outside change");
+        let revision = ready_snapshot(&state).revision();
+
+        let refused = VaultCollectionManagement::new(&state)
+            .edit(
+                vault_id,
+                identity_edit(
+                    revision,
+                    two_way_source("https://example.test/owner/new.git", Some("vault")),
+                ),
+            )
+            .await
+            .expect_err("the edit is refused");
+
+        assert_eq!(refused.code, "checkout_set_aside_failed");
+        assert!(refused.message.starts_with("Nothing changed"));
+        assert_eq!(ready_snapshot(&state).revision(), revision, "nothing saved");
+        assert!(checkout.join("Outside.md").is_file(), "nothing moved");
+    }
+
+    /// An edit that keeps the managed source's identity never touches the
+    /// checkout.
+    #[tokio::test]
+    async fn an_ordinary_edit_leaves_the_managed_checkout_alone() {
+        let (state, _worker, _directory) = test_state();
+        let (vault_id, checkout) =
+            disabled_vault_with_checkout(&state, "https://example.test/owner/old.git", None).await;
+
+        let response = VaultCollectionManagement::new(&state)
+            .edit(
+                vault_id,
+                EditVaultRequest {
+                    confirm_identity_change: false,
+                    name: "Renamed notes".to_string(),
+                    ..identity_edit(
+                        ready_snapshot(&state).revision(),
+                        two_way_source("https://example.test/owner/old.git", None),
+                    )
+                },
+            )
+            .await
+            .expect("an ordinary edit saves");
+
+        assert!(response.retired_checkout.is_none());
+        assert!(checkout.join("Home.md").is_file());
     }
 
     /// #325: replacing credentials on a *disabled* remote-backed Vault used to
@@ -1898,6 +2488,7 @@ mod tests {
         core.sync(vault_id)
             .expect("manual sync must no longer be refused for an ExistingGit PullOnly Vault");
         core.retry(vault_id)
+            .await
             .expect("manual retry must no longer be refused for an ExistingGit PullOnly Vault");
     }
 
@@ -1959,14 +2550,15 @@ mod tests {
         );
 
         core.retry(vault_id)
+            .await
             .expect("manual retry admits the same commit turn");
     }
 
-    /// A `Local` Vault has no Git at all, so both manual controls still
-    /// refuse it outright. This is what is left of the blanket refusal #267
-    /// narrowed: "no remote" no longer means "nothing to do".
+    /// A `Local` Vault has no Git at all, so manual sync still refuses it
+    /// outright. Retry does not: it looks at the folder again and asks for an
+    /// Index turn (#641), and still never a Git or commit turn.
     #[tokio::test]
-    async fn sync_and_retry_still_refuse_a_local_vault() {
+    async fn sync_refuses_a_local_vault_and_retry_reprobes_it() {
         let (state, _worker, directory) = test_state();
         let path = directory.path().join("plain-notes");
         std::fs::create_dir_all(&path).expect("vault dir");
@@ -1985,14 +2577,65 @@ mod tests {
             core.sync(vault_id).expect_err("sync refused").code,
             "capability_unavailable"
         );
-        assert_eq!(
-            core.retry(vault_id).expect_err("retry refused").code,
-            "capability_unavailable"
-        );
         assert!(
             !state.vault_work.has_work(vault_id, VaultWorkKind::Commit),
             "a refused control queues nothing"
         );
+        core.retry(vault_id)
+            .await
+            .expect("retry re-probes a readable Local Vault");
+        assert!(state.vault_work.has_work(vault_id, VaultWorkKind::Index));
+        assert!(!state.vault_work.has_work(vault_id, VaultWorkKind::Commit));
+        assert!(!state.vault_work.has_work(vault_id, VaultWorkKind::Git));
+    }
+
+    /// A Local Vault whose folder was missing at activation: Try again says
+    /// why while the folder is still missing, and once it exists, makes the
+    /// Vault active with its watcher running and asks for its first Index
+    /// turn, with no wait for the next tick (#641).
+    #[tokio::test]
+    async fn retry_activates_a_local_vault_whose_folder_appeared() {
+        let (state, _worker, directory) = test_state();
+        let path = directory.path().join("later-notes");
+        std::fs::create_dir_all(&path).expect("vault dir");
+        VaultCollectionManagement::new(&state)
+            .create(create_request(
+                "Later notes",
+                VaultSource::Local { path: path.clone() },
+            ))
+            .await
+            .expect("create the Vault");
+        let vault_id = ready_snapshot(&state)
+            .vault_ids()
+            .next()
+            .expect("one Vault");
+        std::fs::remove_dir_all(&path).expect("the folder goes away");
+
+        let core = VaultCollectionManagement::new(&state);
+        let refused = core
+            .retry(vault_id)
+            .await
+            .expect_err("folder still missing");
+        assert_eq!(refused.code, "vault_unavailable");
+        assert!(refused.retryable);
+        assert!(
+            refused.message.contains("later-notes"),
+            "{}",
+            refused.message
+        );
+        let status = state.vaults.runtime(vault_id).expect("runtime").snapshot();
+        assert_eq!(status.activation, VaultActivationStatus::Unavailable);
+        assert!(status.capabilities.retry);
+        assert_eq!(status.watcher, VaultWatcherStatus::Disabled);
+
+        std::fs::create_dir_all(&path).expect("the folder comes back");
+        std::fs::write(path.join("Found.md"), "# Found").expect("write note");
+        core.retry(vault_id).await.expect("retry finds the folder");
+        let status = state.vaults.runtime(vault_id).expect("runtime").snapshot();
+        assert_eq!(status.activation, VaultActivationStatus::Active);
+        assert_eq!(status.local_content, LocalContentStatus::ReadWrite);
+        assert!(status.capabilities.browse);
+        assert!(state.vault_work.has_work(vault_id, VaultWorkKind::Index));
     }
 
     /// Hatchdoor never writes into the operator's folder on its own: a brand

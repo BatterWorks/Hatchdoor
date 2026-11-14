@@ -1,4 +1,5 @@
 mod chunk_ops;
+pub(crate) mod keyword;
 mod migrate;
 pub mod parse;
 mod populate;
@@ -9,10 +10,12 @@ pub(crate) mod vault_snapshots;
 pub use populate::BuildOptions;
 pub(crate) use populate::{BuildHandles, IndexYield};
 pub use queries::SemanticHit;
+pub use schema::ModelFiles;
 use std::collections::BTreeMap;
 use std::fs;
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Condvar, Mutex, MutexGuard, Once};
 
 use rusqlite::Connection;
@@ -68,6 +71,11 @@ pub struct SqliteCache {
     /// Signalled whenever a reader lease is returned, so a caller queued at the
     /// ceiling wakes as soon as a slot frees instead of polling.
     read_lease_available: Condvar,
+    /// Reporting never takes database locks. The runtime waits for this signal
+    /// and recovers off-thread after all callers have released their handles.
+    corruption: tokio::sync::Notify,
+    corruption_reported: AtomicBool,
+    recovering: AtomicBool,
 }
 
 static SQLITE_VEC_INIT: Once = Once::new();
@@ -114,6 +122,8 @@ pub struct ReadConn<'a> {
     cache: &'a SqliteCache,
     pooled: Option<Connection>,
     shared: Option<MutexGuard<'a, Connection>>,
+    query_deadline: Option<std::time::Instant>,
+    reusable: bool,
 }
 
 /// A pinned SQLite read snapshot. Dropping an unfinished snapshot rolls it
@@ -132,7 +142,13 @@ impl Deref for ReadSnapshot<'_> {
 }
 
 impl ReadSnapshot<'_> {
+    pub(crate) fn limit_query_time(&mut self, duration: std::time::Duration) -> Result<(), String> {
+        self.conn.limit_query_time(duration)
+    }
+
     pub(crate) fn commit(&mut self) -> Result<(), String> {
+        self.conn.cache.report_connection_error(&self.conn);
+        self.conn.check_query_deadline()?;
         self.conn
             .execute_batch("COMMIT")
             .map_err(|error| format!("commit SQLite read snapshot: {error}"))?;
@@ -143,6 +159,9 @@ impl ReadSnapshot<'_> {
 
 impl Drop for ReadSnapshot<'_> {
     fn drop(&mut self) {
+        self.conn.cache.report_connection_error(&self.conn);
+        // Rollback must not itself be interrupted by the expired query.
+        self.conn.clear_query_limit();
         if !self.complete {
             let _ = self.conn.execute_batch("ROLLBACK");
         }
@@ -161,10 +180,62 @@ impl Deref for ReadConn<'_> {
     }
 }
 
+impl ReadConn<'_> {
+    fn connection_mut(&mut self) -> &mut Connection {
+        match (&mut self.pooled, &mut self.shared) {
+            (Some(conn), _) => conn,
+            (_, Some(guard)) => guard,
+            (None, None) => unreachable!("ReadConn holds exactly one connection"),
+        }
+    }
+
+    fn limit_query_time(&mut self, duration: std::time::Duration) -> Result<(), String> {
+        let deadline = std::time::Instant::now() + duration;
+        self.connection_mut()
+            .progress_handler(1_000, Some(move || std::time::Instant::now() >= deadline))
+            .map_err(|error| format!("install SQLite query time limit: {error}"))?;
+        self.query_deadline = Some(deadline);
+        Ok(())
+    }
+
+    fn check_query_deadline(&self) -> Result<(), String> {
+        if self
+            .query_deadline
+            .is_some_and(|deadline| std::time::Instant::now() >= deadline)
+        {
+            Err("keyword query exceeded its time limit; try fewer terms".to_string())
+        } else {
+            Ok(())
+        }
+    }
+
+    fn clear_query_limit(&mut self) {
+        if self.query_deadline.take().is_some() {
+            // A connection cannot fail to remove its own handler while alive.
+            // If SQLite ever refuses, discard a pooled handle rather than lend
+            // an expired deadline to the next request.
+            if let Err(error) = self
+                .connection_mut()
+                .progress_handler(0, None::<fn() -> bool>)
+            {
+                tracing::error!(%error, "could not clear SQLite query time limit");
+                self.reusable = false;
+            }
+        }
+    }
+}
+
 impl Drop for ReadConn<'_> {
     fn drop(&mut self) {
+        self.cache.report_connection_error(self);
+        self.clear_query_limit();
         if let Some(conn) = self.pooled.take() {
-            self.cache.return_read_connection(conn);
+            if self.reusable {
+                self.cache.return_read_connection(conn);
+            } else {
+                drop(conn);
+                self.cache.release_read_lease();
+            }
         }
     }
 }
@@ -185,6 +256,106 @@ fn register_sqlite_vec() {
 }
 
 impl SqliteCache {
+    pub(crate) async fn wait_for_corruption(&self) {
+        self.corruption.notified().await;
+    }
+
+    /// String errors here originate in cache SQL, not filesystem or note
+    /// parsing failures. Preserve the existing quarantine classification.
+    pub(crate) fn report_corruption(&self, error: &str) {
+        if is_physical_cache_corruption(error) {
+            self.signal_corruption();
+        }
+    }
+
+    fn signal_corruption(&self) {
+        if matches!(self.source, CacheSource::File(_))
+            && !self.recovering.load(Ordering::Acquire)
+            && !self.corruption_reported.swap(true, Ordering::AcqRel)
+        {
+            tracing::error!("SQLite cache corruption detected; scheduling quarantine and rebuild");
+            self.corruption.notify_one();
+        }
+    }
+
+    fn report_connection_error(&self, conn: &Connection) {
+        // SAFETY: the guard owns a live SQLite handle exclusively on this
+        // thread. Reading its last error code neither mutates it nor retains
+        // the pointer. Do this before COMMIT/ROLLBACK can clear that error.
+        let code = unsafe { rusqlite::ffi::sqlite3_errcode(conn.handle()) };
+        if matches!(
+            code,
+            rusqlite::ffi::SQLITE_CORRUPT | rusqlite::ffi::SQLITE_NOTADB
+        ) {
+            self.signal_corruption();
+        }
+    }
+
+    /// Drain handles before renaming a WAL database. A reader left on the old
+    /// inode must never return to the new pool, and an old writer must not
+    /// checkpoint or unlink the replacement database's sidecars.
+    pub(crate) fn recover_corruption(&self, embedding_dim: usize) -> Result<bool, String> {
+        let CacheSource::File(path) = &self.source else {
+            return Ok(false);
+        };
+        let _epoch = self
+            .snapshot_model_epoch
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !self.corruption_reported.load(Ordering::Acquire) {
+            return Ok(false);
+        }
+        self.recovering.store(true, Ordering::Release);
+        self.read_lease_available.notify_all();
+        let leases = self
+            .read_leases
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let (leases, _) = self
+            .read_lease_available
+            .wait_timeout_while(leases, READ_LEASE_WAIT, |leases| *leases != 0)
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if *leases != 0 {
+            return Err("cache recovery is waiting for active readers; retrying".into());
+        }
+        let mut writer = self
+            .conn
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        self.read_pool
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clear();
+        let placeholder = Connection::open_in_memory()
+            .map_err(|error| format!("close damaged SQLite writer: {error}"))?;
+        drop(std::mem::replace(&mut *writer, placeholder));
+        if path.exists() {
+            let quarantine = quarantine_corrupt_cache(path)?;
+            tracing::warn!(cache = %path.display(), quarantine = %quarantine.display(),
+                "SQLite cache quarantined; rebuilding every active Vault from Markdown");
+        }
+        // On failure the recovering flag stays set: callers must not see the
+        // empty placeholder, and the runtime retries instead of needing a restart.
+        let replacement = Self::open_file(path, embedding_dim)?;
+        *writer = replacement
+            .conn
+            .into_inner()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        self.corruption_reported.store(false, Ordering::Release);
+        self.recovering.store(false, Ordering::Release);
+        drop(leases);
+        self.read_lease_available.notify_all();
+        Ok(true)
+    }
+
+    fn ensure_not_recovering(&self) -> Result<(), String> {
+        if self.recovering.load(Ordering::Acquire) {
+            Err("SQLite cache is being rebuilt after corruption; retry shortly".into())
+        } else {
+            Ok(())
+        }
+    }
+
     pub fn open(path: impl AsRef<Path>, embedding_dim: usize) -> Result<Self, String> {
         let path = path.as_ref();
         if let Some(parent) = path.parent() {
@@ -217,10 +388,14 @@ impl SqliteCache {
         let conn = Connection::open(path).map_err(|error| {
             format!("failed to open SQLite cache '{}': {error}", path.display())
         })?;
+        check_physical_integrity(&conn)?;
         apply_writer_pragmas(&conn)?;
         let cache = Self {
             conn: Mutex::new(conn),
             source: CacheSource::File(path.to_path_buf()),
+            corruption: tokio::sync::Notify::new(),
+            corruption_reported: AtomicBool::new(false),
+            recovering: AtomicBool::new(false),
             read_pool: Mutex::new(Vec::new()),
             vault_snapshot_attempts: Mutex::new(BTreeMap::new()),
             snapshot_model_epoch: Mutex::new(()),
@@ -239,6 +414,9 @@ impl SqliteCache {
         let cache = Self {
             conn: Mutex::new(conn),
             source: CacheSource::Memory,
+            corruption: tokio::sync::Notify::new(),
+            corruption_reported: AtomicBool::new(false),
+            recovering: AtomicBool::new(false),
             read_pool: Mutex::new(Vec::new()),
             vault_snapshot_attempts: Mutex::new(BTreeMap::new()),
             snapshot_model_epoch: Mutex::new(()),
@@ -260,10 +438,14 @@ impl SqliteCache {
         // on unwind (RAII), so the worst a panic leaves behind is a rolled-back
         // write. Recover the guard rather than erroring, or a single panic would
         // permanently wedge every future reindex and cache write.
-        Ok(self
+        self.ensure_not_recovering()?;
+        let guard = self
             .conn
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()))
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        self.ensure_not_recovering()?;
+        self.report_connection_error(&guard);
+        Ok(guard)
     }
 
     /// Check out a connection for read-only queries. File-backed caches draw
@@ -272,11 +454,14 @@ impl SqliteCache {
     /// caches share the single writer connection. The returned guard returns
     /// its connection to the pool when dropped.
     pub fn read(&self) -> Result<ReadConn<'_>, String> {
+        self.ensure_not_recovering()?;
         match &self.source {
             CacheSource::Memory => Ok(ReadConn {
                 cache: self,
                 pooled: None,
                 shared: Some(self.connection()?),
+                query_deadline: None,
+                reusable: true,
             }),
             CacheSource::File(path) => {
                 self.reserve_read_lease()?;
@@ -292,6 +477,7 @@ impl SqliteCache {
                     None => match open_read_connection(path) {
                         Ok(conn) => conn,
                         Err(error) => {
+                            self.report_corruption(&error);
                             self.release_read_lease();
                             return Err(error);
                         }
@@ -301,6 +487,8 @@ impl SqliteCache {
                     cache: self,
                     pooled: Some(conn),
                     shared: None,
+                    query_deadline: None,
+                    reusable: true,
                 })
             }
         }
@@ -347,9 +535,10 @@ impl SqliteCache {
         let (mut leases, wait) = self
             .read_lease_available
             .wait_timeout_while(leases, READ_LEASE_WAIT, |leases| {
-                *leases >= MAX_READ_CONNECTIONS
+                *leases >= MAX_READ_CONNECTIONS && !self.recovering.load(Ordering::Acquire)
             })
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        self.ensure_not_recovering()?;
         if wait.timed_out() {
             return Err(format!(
                 "SQLite read connection limit ({MAX_READ_CONNECTIONS}) reached; retry shortly"
@@ -438,6 +627,17 @@ impl SqliteCache {
     }
 }
 
+fn check_physical_integrity(conn: &Connection) -> Result<(), String> {
+    let result: String = conn
+        .query_row("PRAGMA quick_check(1)", [], |row| row.get(0))
+        .map_err(|error| format!("check SQLite cache integrity: {error}"))?;
+    if result == "ok" {
+        Ok(())
+    } else {
+        Err(format!("database corruption: {result}"))
+    }
+}
+
 fn is_physical_cache_corruption(error: &str) -> bool {
     let normalized = error.to_ascii_lowercase();
     normalized.contains("file is not a database")
@@ -454,6 +654,22 @@ fn quarantine_corrupt_cache(path: &Path) -> Result<PathBuf, String> {
     loop {
         let candidate = PathBuf::from(format!("{}.corrupt-{stamp}-{attempt}", path.display()));
         if !candidate.exists() {
+            // No live handles remain. Preserve sidecars before moving the main
+            // file, so an interrupted quarantine cannot replay an old WAL into
+            // the replacement cache. A failed rename aborts before reopening.
+            for suffix in ["-wal", "-shm", "-journal"] {
+                let mut source = path.as_os_str().to_os_string();
+                source.push(suffix);
+                let mut destination = candidate.as_os_str().to_os_string();
+                destination.push(suffix);
+                match fs::rename(&source, &destination) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => {
+                        return Err(format!("failed quarantining SQLite sidecar: {error}"));
+                    }
+                }
+            }
             fs::rename(path, &candidate).map_err(|error| {
                 format!(
                     "failed quarantining malformed SQLite cache '{}' as '{}': {error}",
@@ -474,6 +690,35 @@ mod metadata_tests {
     use std::time::Duration;
 
     use tempfile::tempdir;
+
+    #[test]
+    fn sqlite_time_limit_interrupts_cpu_work_and_is_removed_before_reuse() {
+        let dir = tempdir().unwrap();
+        let cache = SqliteCache::open(dir.path().join("cache.sqlite3"), 384).unwrap();
+        let start = std::time::Instant::now();
+        {
+            let mut reader = cache.read().unwrap();
+            reader.limit_query_time(Duration::from_millis(10)).unwrap();
+            let error = reader.query_row(
+                "WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<1000000000) SELECT sum(x) FROM n",
+                [], |row| row.get::<_, i64>(0),
+            ).expect_err("SQLite CPU work must be interrupted");
+            assert_eq!(
+                error.sqlite_error_code(),
+                Some(rusqlite::ErrorCode::OperationInterrupted)
+            );
+        }
+        assert!(start.elapsed() < Duration::from_secs(1));
+        let reader = cache.read().unwrap();
+        assert_eq!(
+            reader.query_row(
+                "WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<10000) SELECT sum(x) FROM n",
+                [], |row| row.get::<_, i64>(0),
+            ).unwrap(),
+            50_005_000,
+            "the reused handle must run beyond the old progress-handler interval"
+        );
+    }
 
     #[test]
     fn set_and_get_metadata_roundtrip() {
@@ -615,6 +860,161 @@ mod metadata_tests {
         );
         drop(next);
         assert_eq!(cache.active_read_leases(), 0);
+    }
+
+    fn damage_three_data_pages(path: &Path) {
+        let cache = SqliteCache::open(path, 384).expect("cache");
+        {
+            let conn = cache.connection().unwrap();
+            conn.execute_batch(
+                "CREATE TABLE damage_me(id INTEGER PRIMARY KEY, payload TEXT);
+                WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<50)
+                INSERT INTO damage_me SELECT x, printf('%3500s', 'x') FROM n;
+                PRAGMA wal_checkpoint(TRUNCATE);",
+            )
+            .unwrap();
+        }
+        let (page_size, pages) = {
+            let conn = cache.connection().unwrap();
+            let page_size: i64 = conn
+                .pragma_query_value(None, "page_size", |row| row.get(0))
+                .unwrap();
+            let mut statement = conn.prepare("SELECT pageno FROM dbstat WHERE name='damage_me' AND pagetype='leaf' ORDER BY pageno LIMIT 3").unwrap();
+            let pages = statement
+                .query_map([], |row| row.get::<_, i64>(0))
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap();
+            (page_size, pages)
+        };
+        assert_eq!(pages.len(), 3);
+        drop(cache);
+        overwrite_pages(path, page_size, pages);
+    }
+
+    fn overwrite_pages(path: &Path, page_size: i64, pages: Vec<i64>) {
+        use std::io::{Seek, SeekFrom, Write};
+        let mut file = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+        for page in pages {
+            file.seek(SeekFrom::Start(((page - 1) * page_size) as u64))
+                .unwrap();
+            file.write_all(&vec![0x55; page_size as usize]).unwrap();
+        }
+        file.sync_all().unwrap();
+    }
+
+    #[test]
+    fn transactional_writer_reports_corruption_even_when_rollback_clears_it() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("cache.sqlite3");
+        let cache = SqliteCache::open(&path, 384).unwrap();
+        let vault_id: VaultId = "00000000-0000-4000-8000-000000000001".parse().unwrap();
+        let (size, pages) = {
+            let conn = cache.connection().unwrap();
+            conn.execute(
+                "WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<50)
+                INSERT INTO vault_note_fts(vault_id,title,relative_path,content,slug)
+                SELECT ?1,'Home','Home.md',printf('%3500s','x'),x FROM n",
+                [vault_id.to_string()],
+            )
+            .unwrap();
+            conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
+                .unwrap();
+            let size: i64 = conn
+                .pragma_query_value(None, "page_size", |row| row.get(0))
+                .unwrap();
+            let pages = {
+                let mut statement = conn.prepare("SELECT pageno FROM dbstat WHERE name='vault_note_fts_content' AND pagetype='leaf' ORDER BY pageno LIMIT 3").unwrap();
+                statement
+                    .query_map([], |row| row.get::<_, i64>(0))
+                    .unwrap()
+                    .collect::<rusqlite::Result<Vec<_>>>()
+                    .unwrap()
+            };
+            conn.execute_batch("PRAGMA shrink_memory").unwrap();
+            (size, pages)
+        };
+        assert_eq!(pages.len(), 3);
+        overwrite_pages(&path, size, pages);
+        let error = cache
+            .disconnect_vault_snapshot(vault_id)
+            .expect_err("damaged FTS data");
+        assert!(error.contains("malformed"), "{error}");
+        assert!(
+            cache.recover_corruption(384).unwrap(),
+            "a rollback must not lose the recovery signal"
+        );
+        cache
+            .set_metadata("after_writer_recovery", "works")
+            .unwrap();
+        assert_eq!(
+            cache
+                .get_metadata("after_writer_recovery")
+                .unwrap()
+                .as_deref(),
+            Some("works")
+        );
+    }
+
+    #[test]
+    fn runtime_corruption_replaces_connections_and_leaves_a_working_cache() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("cache.sqlite3");
+        let cache = SqliteCache::open(&path, 384).unwrap();
+        damage_three_data_pages(&path);
+        {
+            let reader = cache.read().unwrap();
+            let failure = reader
+                .query_row("SELECT sum(length(payload)) FROM damage_me", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .expect_err("damaged leaf pages");
+            assert_eq!(
+                failure.sqlite_error_code(),
+                Some(rusqlite::ErrorCode::DatabaseCorrupt)
+            );
+        }
+        assert!(cache.recover_corruption(384).expect("runtime recovery"));
+        cache
+            .set_metadata("after_runtime_recovery", "works")
+            .unwrap();
+        let reader = cache.read().unwrap();
+        assert_eq!(
+            reader
+                .query_row(
+                    "SELECT value FROM metadata WHERE key='after_runtime_recovery'",
+                    [],
+                    |row| row.get::<_, String>(0)
+                )
+                .unwrap(),
+            "works"
+        );
+        assert!(
+            std::fs::read_dir(dir.path())
+                .unwrap()
+                .filter_map(Result::ok)
+                .any(|entry| entry.file_name().to_string_lossy().contains(".corrupt-"))
+        );
+    }
+
+    #[test]
+    fn damaged_data_pages_are_quarantined_even_when_schema_is_readable() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("cache.sqlite3");
+        damage_three_data_pages(&path);
+        let cache = SqliteCache::open(&path, 384).expect("rebuild damaged data pages");
+        assert!(cache.get_metadata("schema_version").unwrap().is_some());
+        cache.set_metadata("after_rebuild", "works").unwrap();
+        assert_eq!(
+            cache.get_metadata("after_rebuild").unwrap().as_deref(),
+            Some("works")
+        );
+        assert!(
+            std::fs::read_dir(dir.path())
+                .unwrap()
+                .filter_map(Result::ok)
+                .any(|entry| entry.file_name().to_string_lossy().contains(".corrupt-"))
+        );
     }
 
     #[test]

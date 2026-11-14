@@ -9,11 +9,12 @@
   overflow-x: hidden;
 }
 
-/* Two-col layout: body + TOC. The note column is the reading measure: 38rem
-   holds about 75 characters of the body serif at 1.18rem, and the title,
-   properties, tables and diagrams all keep to it so the page has one edge. */
+/* Two-col layout: body + TOC. The note column is the reading measure, and
+   the title, properties, tables and diagrams all keep to it so the page has
+   one edge. The Layout setting Note width picks the measure (#698): Default
+   unless it says otherwise. */
 .note-page-layout {
-  --note-measure: 38rem;
+  --note-measure: var(--note-measure-default);
   display: grid;
   grid-template-columns: minmax(0, 1fr) 220px;
   gap: 1.4rem;
@@ -26,6 +27,18 @@
    review sets two versions side by side: they keep the wide column. */
 .note-page-layout:has(.note-editor) {
   --note-measure: 1120px;
+}
+
+/* Wide is a longer reading line; Source keeps its own wider column above. */
+.note-page-layout[data-note-width="wide"]:not(:has(.note-editor)) {
+  --note-measure: var(--note-measure-wide);
+}
+
+/* Full lifts the cap in every view, Source included: the column takes the
+   pane's width less its padding and the outline. Two attribute-qualified
+   classes outrank the narrow-screen rule in noteEnhancements.css. */
+.note-page-layout[data-note-width="full"] {
+  max-width: none;
 }
 
 /* Article wrapper */
@@ -220,6 +233,51 @@
   -webkit-box-decoration-break: clone;
 }
 
+/* Obsidian's colour highlights (#577): `==🔴text==` takes one of the six
+   --highlight-<colour> surfaces, in the rendered views and, through
+   `live-editor-highlight-<colour>`, in the editor. The colour replaces the
+   plain tint rather than layering over it; the doubled class outweighs the
+   editor package's own rule for highlights in table cells. */
+.note-body mark.note-highlight-red,
+.live-editor .live-editor-highlight.live-editor-highlight-red {
+  background: var(--highlight-red);
+}
+.note-body mark.note-highlight-orange,
+.live-editor .live-editor-highlight.live-editor-highlight-orange {
+  background: var(--highlight-orange);
+}
+.note-body mark.note-highlight-yellow,
+.live-editor .live-editor-highlight.live-editor-highlight-yellow {
+  background: var(--highlight-yellow);
+}
+.note-body mark.note-highlight-green,
+.live-editor .live-editor-highlight.live-editor-highlight-green {
+  background: var(--highlight-green);
+}
+.note-body mark.note-highlight-blue,
+.live-editor .live-editor-highlight.live-editor-highlight-blue {
+  background: var(--highlight-blue);
+}
+.note-body mark.note-highlight-purple,
+.live-editor .live-editor-highlight.live-editor-highlight-purple {
+  background: var(--highlight-purple);
+}
+/* The editor's own highlight span sits inside or around the coloured one;
+   its translucent tint would mix into the colour, so it steps aside. */
+.live-editor .live-editor-highlight .cm-atomic-highlight,
+.live-editor .cm-atomic-highlight:has(> .live-editor-highlight) {
+  background: transparent;
+}
+/* In a table cell the emoji is wrapped instead of replaced, since the cell
+   is its own small editor: hidden at rest, shown while the caret is in the
+   cell. */
+.live-editor .live-editor-highlight-marker {
+  display: none;
+}
+.live-editor .cm-atomic-table-cell-source:focus .live-editor-highlight-marker {
+  display: inline;
+}
+
 .note-body code {
   font-family: var(--font-mono);
   font-size: 0.86em;
@@ -287,7 +345,7 @@
   max-width: 100%;
   margin: 1rem auto;
   border: 1px solid var(--rule);
-  background: white;
+  background: var(--pdf-page);
 }
 
 .pdf-preview-controls {
@@ -327,10 +385,62 @@
   color: var(--err-fg);
 }
 
+/* Embedded note (#699): another note's content drawn where `![[Note]]` sits.
+   The frame and its head row are the PDF preview's, so an embed reads as
+   something brought in from elsewhere, and the head names and links the
+   source note in the PDF title's type. The body keeps the note's own type. */
+.note-body .note-embed {
+  margin: 1.5rem 0;
+  border: 1px solid var(--rule-strong);
+  background: var(--paper);
+}
+
+.note-embed-head {
+  display: flex;
+  align-items: baseline;
+  gap: 0.75rem;
+  padding: 0.65rem 0.8rem;
+  border-bottom: 1px solid var(--rule);
+  background: var(--paper-2);
+  font-family: var(--font-display);
+  font-variation-settings:
+    "wdth" 92,
+    "wght" 600;
+  font-size: 0.72rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.note-embed-eyebrow {
+  flex: 0 0 auto;
+  color: var(--muted);
+}
+
+.note-body a.note-embed-source {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.note-embed-body {
+  padding: 0.25rem 0.9rem;
+}
+
+.note-body .note-embed-status {
+  font-family: var(--font-sans);
+  color: var(--muted);
+}
+
 @media (max-width: 920px) {
   .pdf-preview-toolbar,
-  .pdf-preview-controls {
+  .pdf-preview-controls,
+  .note-embed-head {
     padding: 0.5rem;
+  }
+
+  .note-embed-body {
+    padding-inline: 0.5rem;
   }
 
   .pdf-preview-controls {

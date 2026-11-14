@@ -398,6 +398,66 @@ fn build_gives_the_unsuffixed_slug_to_the_default_surface() {
     );
 }
 
+/// The layer guarantees the cache's retired resolver used to carry (#653),
+/// now held by the one resolution rule.
+#[test]
+fn resolve_wikilink_prefers_the_default_surface_over_a_layered_namesake() {
+    // `sources/` sorts before `wiki/`, and the link sits next to the clipping,
+    // so neither path order nor folder distance may decide this tie.
+    let dir = tempdir().expect("temp dir");
+    fs::create_dir_all(dir.path().join("sources")).expect("dirs");
+    fs::create_dir_all(dir.path().join("wiki")).expect("dirs");
+    fs::write(dir.path().join("sources/.hatchdoor-layer"), "sources").expect("marker");
+    fs::write(
+        dir.path().join("sources/Melatonin.md"),
+        "# Melatonin\n\nraw clipping",
+    )
+    .expect("note");
+    fs::write(
+        dir.path().join("wiki/Melatonin.md"),
+        "# Melatonin\n\ncompiled page",
+    )
+    .expect("note");
+
+    let index = VaultIndex::build(dir.path()).expect("index");
+
+    for note_dir in ["", "sources", "wiki"] {
+        assert_eq!(
+            index
+                .resolve_wikilink_from("Melatonin", note_dir)
+                .map(|entry| entry.relative_path.as_str()),
+            Some("wiki/Melatonin"),
+            "[[Melatonin]] linked from {note_dir:?} must reach the default-surface page"
+        );
+    }
+}
+
+#[test]
+fn resolve_wikilink_still_reaches_a_note_that_lives_only_in_a_layer() {
+    let dir = tempdir().expect("temp dir");
+    fs::create_dir_all(dir.path().join("sources")).expect("dirs");
+    fs::create_dir_all(dir.path().join("wiki")).expect("dirs");
+    fs::write(dir.path().join("sources/.hatchdoor-layer"), "sources").expect("marker");
+    fs::write(
+        dir.path().join("sources/Ashwagandha.md"),
+        "# Ashwagandha\n\nraw clipping",
+    )
+    .expect("note");
+    fs::write(
+        dir.path().join("wiki/Page.md"),
+        "# Page\n\nsee [[Ashwagandha]]",
+    )
+    .expect("note");
+
+    let index = VaultIndex::build(dir.path()).expect("index");
+
+    let resolved = index
+        .resolve_wikilink_from("Ashwagandha", "wiki")
+        .expect("a layered-only note still resolves");
+    assert_eq!(resolved.relative_path, "sources/Ashwagandha");
+    assert_eq!(resolved.layer.as_deref(), Some("sources"));
+}
+
 #[test]
 fn build_with_config_honours_user_supplied_exclude_patterns() {
     let dir = tempdir().expect("temp dir");
@@ -843,4 +903,366 @@ fn markdown_links_in_each_inserted_path_form_resolve_and_count_as_backlinks() {
     let backlinks = index.note_links(&japanese).expect("links").backlinks;
     assert_eq!(backlinks.len(), 1);
     assert_eq!(backlinks[0].relative_path, "Archive/Short");
+}
+
+// #626: a wikilink names the note its author meant, or none at all.
+
+fn duplicate_name_vault() -> tempfile::TempDir {
+    let dir = tempdir().expect("temp dir");
+    let root = dir.path();
+    fs::create_dir_all(root.join("links/a")).expect("create a");
+    fs::create_dir_all(root.join("links/b")).expect("create b");
+    fs::write(root.join("links/a/Duplicate Name.md"), "a").expect("write a");
+    fs::write(root.join("links/b/Duplicate Name.md"), "b").expect("write b");
+    fs::write(
+        root.join("links/ambiguous links.md"),
+        "[[a/Duplicate Name]] [[b/Duplicate Name]] [[links/b/Duplicate Name]]",
+    )
+    .expect("write ambiguous links");
+    dir
+}
+
+#[test]
+fn resolve_wikilink_matches_a_partial_folder_path_as_a_suffix() {
+    let dir = duplicate_name_vault();
+    let vault = VaultIndex::build(dir.path()).expect("build vault");
+
+    let b = vault
+        .resolve_wikilink("b/Duplicate Name")
+        .expect("b resolves");
+    assert_eq!(b.relative_path, "links/b/Duplicate Name");
+    let a = vault
+        .resolve_wikilink("a/Duplicate Name")
+        .expect("a resolves");
+    assert_eq!(a.relative_path, "links/a/Duplicate Name");
+    let full = vault
+        .resolve_wikilink("links/b/Duplicate Name")
+        .expect("full path resolves");
+    assert_eq!(full.relative_path, "links/b/Duplicate Name");
+}
+
+#[test]
+fn link_graph_gives_each_qualified_link_its_own_edge() {
+    let dir = duplicate_name_vault();
+    let vault = VaultIndex::build(dir.path()).expect("build vault");
+    let source = vault.resolve_wikilink("ambiguous links").expect("source");
+    let a = vault.resolve_wikilink("a/Duplicate Name").expect("a");
+    let b = vault.resolve_wikilink("b/Duplicate Name").expect("b");
+
+    assert_eq!(
+        vault.outgoing_by_slug[&source.slug],
+        vec![a.slug.clone(), b.slug.clone()]
+    );
+}
+
+#[test]
+fn resolve_wikilink_prefers_an_exact_case_title() {
+    let dir = tempdir().expect("temp dir");
+    fs::write(dir.path().join("UPPER lower MiXeD.md"), "first").expect("write");
+    fs::write(dir.path().join("upper LOWER mixed.md"), "second").expect("write");
+
+    let vault = VaultIndex::build(dir.path()).expect("build vault");
+    let resolved = vault
+        .resolve_wikilink("upper LOWER mixed")
+        .expect("resolves");
+    assert_eq!(resolved.relative_path, "upper LOWER mixed");
+    let resolved = vault
+        .resolve_wikilink("UPPER lower MiXeD")
+        .expect("resolves");
+    assert_eq!(resolved.relative_path, "UPPER lower MiXeD");
+    // A case-folded match still resolves when no exact one exists.
+    assert!(vault.resolve_wikilink("upper lower mixed").is_some());
+}
+
+#[test]
+fn resolve_wikilink_ignores_a_generated_suffix_slug() {
+    let dir = duplicate_name_vault();
+    let vault = VaultIndex::build(dir.path()).expect("build vault");
+
+    assert!(vault.find_by_slug("duplicate-name-2").is_some());
+    assert!(vault.resolve_wikilink("Duplicate Name 2").is_none());
+    assert!(vault.resolve_wikilink("duplicate-name-2").is_none());
+    // A note's own slug still reaches it.
+    assert!(vault.resolve_wikilink("duplicate-name").is_some());
+}
+
+#[test]
+fn resolve_wikilink_reaches_a_decomposed_filename_from_a_composed_link() {
+    use unicode_normalization::UnicodeNormalization;
+
+    let dir = tempdir().expect("temp dir");
+    let korean_nfd: String = "한국어".nfd().collect();
+    let kana_nfd: String = "がっこう".nfd().collect();
+    assert_ne!(korean_nfd, "한국어");
+    fs::write(dir.path().join(format!("{korean_nfd}.md")), "k").expect("write korean");
+    fs::write(dir.path().join(format!("{kana_nfd}.md")), "j").expect("write kana");
+    fs::write(dir.path().join("Linker.md"), "[[한국어]] [[がっこう]]").expect("write linker");
+
+    let vault = VaultIndex::build(dir.path()).expect("build vault");
+    let korean = vault.resolve_wikilink("한국어").expect("korean resolves");
+    assert_eq!(korean.title, korean_nfd);
+    assert_eq!(korean.slug, "한국어");
+    assert!(vault.resolve_wikilink("がっこう").is_some());
+    assert_eq!(vault.outgoing_by_slug["linker"].len(), 2);
+}
+
+#[test]
+fn resolve_wikilink_from_a_folder_prefers_the_nearest_namesake() {
+    let dir = duplicate_name_vault();
+    fs::write(dir.path().join("links/b/Sibling.md"), "[[Duplicate Name]]").expect("write");
+
+    let vault = VaultIndex::build(dir.path()).expect("build vault");
+    let sibling = vault.resolve_wikilink("Sibling").expect("sibling");
+    let b = vault.resolve_wikilink("b/Duplicate Name").expect("b");
+    assert_eq!(vault.outgoing_by_slug[&sibling.slug], vec![b.slug.clone()]);
+}
+
+#[test]
+fn resolve_wikilink_by_slug_keeps_the_folder_qualifier() {
+    let dir = tempdir().expect("temp dir");
+    fs::create_dir_all(dir.path().join("a")).expect("a");
+    fs::create_dir_all(dir.path().join("b")).expect("b");
+    fs::write(dir.path().join("a/11 - Used.md"), "a").expect("a");
+    fs::write(dir.path().join("b/11 - Used.md"), "b").expect("b");
+
+    let vault = VaultIndex::build(dir.path()).expect("build vault");
+    let found = vault
+        .resolve_wikilink_match("b/11 — Used", "")
+        .expect("punctuation-drifted link resolves");
+    assert_eq!(found.entry.relative_path, "b/11 - Used");
+    assert!(found.unique);
+    let from_b = vault
+        .resolve_wikilink_match("11 — Used", "b")
+        .expect("resolves from b");
+    assert_eq!(from_b.entry.relative_path, "b/11 - Used");
+    // From the root the two are equally near: a tie, not a unique match.
+    let tie = vault.resolve_wikilink_match("11 — Used", "").expect("tie");
+    assert!(!tie.unique);
+}
+
+#[test]
+fn resolve_wikilink_by_slug_reaches_a_note_that_lost_its_slug_to_a_counter() {
+    let dir = tempdir().expect("temp dir");
+    fs::create_dir_all(dir.path().join("a")).expect("a");
+    fs::create_dir_all(dir.path().join("b")).expect("b");
+    fs::write(dir.path().join("a/Meeting.md"), "a").expect("a");
+    fs::write(dir.path().join("b/Meeting.md"), "b").expect("b");
+    fs::create_dir_all(dir.path().join("z")).expect("z");
+    fs::write(dir.path().join("z/Meeting 2.md"), "z").expect("z");
+
+    let vault = VaultIndex::build(dir.path()).expect("build vault");
+    let owner = vault.resolve_wikilink("Meeting 2").expect("title");
+    assert_eq!(owner.relative_path, "z/Meeting 2");
+    assert_ne!(owner.slug, "meeting-2");
+    let by_slug = vault.resolve_wikilink("meeting-2").expect("slug");
+    assert_eq!(by_slug.relative_path, "z/Meeting 2");
+}
+
+#[test]
+fn resolve_wikilink_reads_a_leading_slash_as_the_vault_root() {
+    let dir = tempdir().expect("temp dir");
+    fs::create_dir_all(dir.path().join("a/b")).expect("a/b");
+    fs::create_dir_all(dir.path().join("b")).expect("b");
+    fs::write(dir.path().join("Plan.md"), "root").expect("root");
+    fs::write(dir.path().join("a/Plan.md"), "a").expect("a");
+    fs::write(dir.path().join("b/Plan.md"), "b").expect("b");
+    fs::write(dir.path().join("a/b/Plan.md"), "ab").expect("ab");
+
+    let vault = VaultIndex::build(dir.path()).expect("build vault");
+    let root = vault.resolve_wikilink_from("/Plan", "a").expect("root");
+    assert_eq!(root.relative_path, "Plan");
+    let anchored = vault
+        .resolve_wikilink_from("/b/Plan", "a")
+        .expect("anchored");
+    assert_eq!(anchored.relative_path, "b/Plan");
+    // Unanchored, a full path still beats a nearer suffix match.
+    let full = vault.resolve_wikilink_from("b/Plan", "a").expect("full");
+    assert_eq!(full.relative_path, "b/Plan");
+    let suffix = vault.resolve_wikilink_from("a/b/Plan", "").expect("suffix");
+    assert_eq!(suffix.relative_path, "a/b/Plan");
+}
+
+/// Whether this process ignores file permissions, as root does: a test that
+/// takes a folder's permissions away proves nothing then.
+#[cfg(unix)]
+fn permissions_are_ignored() -> bool {
+    // SAFETY: `geteuid` reads the process's effective user and cannot fail.
+    unsafe { libc::geteuid() == 0 }
+}
+
+/// Puts a folder's permissions back when dropped, so a failed assertion still
+/// lets the temporary directory be removed.
+#[cfg(unix)]
+struct LockedFolder(std::path::PathBuf);
+
+#[cfg(unix)]
+impl LockedFolder {
+    fn lock(path: std::path::PathBuf) -> Self {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o000)).expect("lock folder");
+        Self(path)
+    }
+}
+
+#[cfg(unix)]
+impl Drop for LockedFolder {
+    fn drop(&mut self) {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(&self.0, fs::Permissions::from_mode(0o755));
+    }
+}
+
+/// One unreadable folder, even an excluded one the layer-marker walk still
+/// enters, used to fail the whole build and take the Vault offline (#637).
+#[cfg(unix)]
+#[test]
+fn an_unreadable_folder_costs_only_itself() {
+    if permissions_are_ignored() {
+        return;
+    }
+    let dir = tempdir().expect("tempdir");
+    fs::write(dir.path().join("Home.md"), "# Home\n").expect("note");
+    fs::create_dir_all(dir.path().join(".trash/private")).expect("trash");
+    fs::create_dir_all(dir.path().join("Shared/locked")).expect("shared");
+    fs::write(dir.path().join("Shared/Open.md"), "# Open\n").expect("note");
+    fs::write(dir.path().join("Shared/locked/Hidden.md"), "# Hidden\n").expect("note");
+    let _trash = LockedFolder::lock(dir.path().join(".trash/private"));
+    let _shared = LockedFolder::lock(dir.path().join("Shared/locked"));
+
+    let index = VaultIndex::build(dir.path()).expect("the rest of the Vault still builds");
+
+    assert!(index.find_by_slug("home").is_some());
+    assert!(index.find_by_slug("open").is_some());
+    assert!(index.find_by_slug("hidden").is_none());
+}
+
+#[test]
+fn an_unreadable_root_still_fails_the_build() {
+    let dir = tempdir().expect("tempdir");
+    assert!(VaultIndex::build(dir.path().join("missing")).is_err());
+}
+
+/// A path that is not UTF-8 used to become `Untitled` at the root, sharing
+/// that name with every other such note and with a real `Untitled.md` (#637).
+#[cfg(unix)]
+#[test]
+fn a_note_path_that_is_not_utf8_is_left_out() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+
+    let dir = tempdir().expect("tempdir");
+    fs::write(dir.path().join("Untitled.md"), "# Untitled\n").expect("note");
+    fs::write(dir.path().join(OsStr::from_bytes(b"bad\xffname.md")), "x").expect("note");
+    let folder = dir.path().join(OsStr::from_bytes(b"dir\xfe"));
+    fs::create_dir_all(&folder).expect("folder");
+    fs::write(folder.join(OsStr::from_bytes(b"n\xffx.md")), "x").expect("note");
+    // A layer marker there has no folder path to name either.
+    fs::write(folder.join(MARKER_FILE_NAME), "layer: raw\n").expect("marker");
+
+    let index = VaultIndex::build(dir.path()).expect("build");
+
+    assert_eq!(index.total_notes(), 1);
+    let note = index.find_by_slug("untitled").expect("Untitled.md stays");
+    assert_eq!(note.relative_path, "Untitled");
+    assert!(note.path.ends_with("Untitled.md"));
+    assert!(index.layers.layer_names().is_empty());
+}
+
+/// A Markdown link written `.MD` is a note link like one written `.md`
+/// (#675).
+#[test]
+fn a_markdown_link_ending_upper_case_md_counts() {
+    let dir = tempdir().expect("tempdir");
+    fs::write(dir.path().join("Upper.MD"), "# Upper\n").expect("note");
+    fs::write(
+        dir.path().join("Linker.md"),
+        "# Linker\n\n[up](Upper.MD) and [ref][r]\n\n[r]: Upper.Md#Top\n",
+    )
+    .expect("note");
+
+    let vault = VaultIndex::build(dir.path()).expect("build vault");
+
+    assert_eq!(outgoing_slugs(&vault, "linker"), vec!["upper".to_string()]);
+    let upper = vault.note_links("upper").expect("upper links");
+    assert_eq!(upper.backlinks.len(), 1);
+    assert_eq!(upper.backlinks[0].slug, "linker");
+}
+
+/// `.MD` was invisible to the index while the write layer called it a note
+/// (#247, #637).
+#[test]
+fn an_upper_case_extension_is_a_note() {
+    let dir = tempdir().expect("tempdir");
+    fs::write(dir.path().join("Upper.MD"), "# Upper\n").expect("note");
+    fs::write(dir.path().join("Mixed.Md"), "# Mixed\n").expect("note");
+    fs::write(dir.path().join("Readme.mdx"), "not a note").expect("file");
+
+    let index = VaultIndex::build(dir.path()).expect("build");
+
+    let upper = index.find_by_slug("upper").expect("Upper.MD is a note");
+    assert_eq!(upper.title, "Upper");
+    assert_eq!(upper.relative_path, "Upper");
+    assert!(index.find_by_slug("mixed").is_some());
+    assert_eq!(index.total_notes(), 2);
+    assert_eq!(
+        index
+            .read_note_by_slug("upper")
+            .expect("read")
+            .expect("note")
+            .content,
+        "# Upper\n"
+    );
+}
+
+#[test]
+fn strip_md_extension_matches_any_case() {
+    assert_eq!(strip_md_extension("Note.MD"), "Note");
+    assert_eq!(strip_md_extension("a/Note.Md"), "a/Note");
+    assert_eq!(strip_md_extension("Note.mdx"), "Note.mdx");
+    assert_eq!(strip_md_extension("é.MD"), "é");
+    assert_eq!(strip_md_extension("md"), "md");
+}
+
+/// `.git/` was walked on every exact read and served as Vault content (#637).
+#[test]
+fn a_git_folder_is_not_content_unless_re_included() {
+    let dir = tempdir().expect("tempdir");
+    fs::write(dir.path().join("Home.md"), "# Home\n").expect("note");
+    fs::create_dir_all(dir.path().join(".git/objects/ab")).expect("git");
+    fs::write(dir.path().join(".git/hooks-readme.md"), "# Hooks\n").expect("note");
+    fs::write(dir.path().join(".git/objects/ab/cdef"), "blob").expect("object");
+    // A marker there must not classify anything either.
+    fs::write(dir.path().join(".git/.hatchdoor-layer"), "layer: raw\n").expect("marker");
+
+    let index = VaultIndex::build(dir.path()).expect("build");
+    assert!(index.find_by_slug("hooks-readme").is_none());
+    assert_eq!(index.total_notes(), 1);
+    assert!(index.layers.layer_names().is_empty());
+
+    let reinstated = VaultScanConfig {
+        exclude: ExcludeMatcher::new(&["!.git/".to_string()]).expect("patterns"),
+    };
+    let index = VaultIndex::build_with_config(dir.path(), &reinstated).expect("build");
+    assert!(index.find_by_slug("hooks-readme").is_some());
+}
+
+/// `Twin.md` and `Twin.MD` in one folder would share one relative path, so
+/// one note address. The lower-case one is kept (#637).
+#[test]
+fn extension_case_twins_keep_the_lower_case_note() {
+    let dir = tempdir().expect("tempdir");
+    for name in ["Twin.MD", "Twin.Md", "Twin.md"] {
+        fs::write(dir.path().join(name), format!("# {name}\n")).expect("note");
+    }
+    fs::write(dir.path().join("Solo.MD"), "# Solo\n").expect("note");
+
+    let index = VaultIndex::build(dir.path()).expect("build");
+
+    assert_eq!(index.total_notes(), 2);
+    let twin = index.find_by_slug("twin").expect("one twin");
+    assert!(twin.path.ends_with("Twin.md"));
+    assert!(index.find_by_slug("twin-2").is_none());
+    assert_eq!(note_file_name(dir.path(), "Twin"), "Twin.md");
+    assert_eq!(note_file_name(dir.path(), "Solo"), "Solo.MD");
+    assert_eq!(note_file_name(dir.path(), "Gone"), "Gone.md");
 }

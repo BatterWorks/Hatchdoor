@@ -550,6 +550,22 @@ button.side-head[data-open="true"] .side-caret {
   color: var(--hot);
 }
 
+/* A listed file that is not a note (an Obsidian canvas) carries a glyph in
+   the index's place. It takes the index's own three-character column, so
+   the labels of notes and files share one left edge, and it needs none of
+   the digits' optical nudge. */
+.file-glyph {
+  display: inline-flex;
+  justify-content: center;
+  width: 3ch;
+  transform: none;
+}
+
+.file-glyph svg {
+  width: 1.45em;
+  height: 1.45em;
+}
+
 /* Recent notes panel. Hatchdoor's own standing list, so it lines up with the
    Scope zone's head rather than with the Vault accordion — the negative
    margins cancel `.explorer-nav`'s 1rem inset back to the zone's 0.5rem, so

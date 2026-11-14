@@ -3,7 +3,7 @@
 //
 // The renderer is fed a transform of the file:
 //
-//   file -> parseFrontmatter -> body -> stripBlockIds -> resolveWikilinks
+//   file -> parseFrontmatter -> body -> hideComments -> resolveWikilinks
 //
 // A rendered node's position gives line numbers in that transformed text, so
 // slicing the right lines out of the file means adding back the frontmatter

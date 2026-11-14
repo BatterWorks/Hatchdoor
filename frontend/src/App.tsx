@@ -56,6 +56,7 @@ import { NotePage } from "./components/NotePage";
 import { TokenPrompt } from "./components/TokenPrompt";
 import { GraphPage } from "./components/graph/GraphPage";
 import { SettingsPage } from "./features/settings/SettingsPage";
+import { useLayoutSettings } from "./features/settings";
 import { StatsPage } from "./components/StatsPage";
 import { StateBlock } from "./components/ui";
 import { useNoteActions } from "./hooks/useNoteActions";
@@ -94,9 +95,12 @@ import { WhatsNew } from "./features/whats-new";
 
 function VaultWorkspace({
   startupStatus,
+  modelSetupError = null,
   onRetryModelSetup,
 }: {
   startupStatus: StartupStatus | null;
+  /** Why the last "Retry setup" did not start (#642). */
+  modelSetupError?: string | null;
   onRetryModelSetup: () => void;
 }) {
   const [drawerOpen, setDrawerOpen] = useState<boolean>(() => {
@@ -204,6 +208,12 @@ function VaultWorkspace({
   // Without `!vaultsLoading` here, the sidebar footer's Settings link would
   // render and stay clickable for that entire fetch on a demo instance.
   const settingsEnabled = !vaultsLoading && !demoMode;
+  // Whether Changed on disk and Recently viewed show, in the sidebar and on
+  // Home (#684), and how wide a note's text may run (#698).
+  const { sidebarSections, noteWidth } = useLayoutSettings({
+    settingsEnabled,
+    demoMode,
+  });
   // The first-run checklist (#419): on a fresh install (#424) until closed,
   // or once reopened from Help, and never in demo mode.
   const firstRun = useFirstRunState();
@@ -973,6 +983,7 @@ function VaultWorkspace({
           onToggleHelp={() =>
             help.isOpen ? help.closeHelp() : help.openHelp()
           }
+          sections={sidebarSections}
         />
 
         {!isMobile ? (
@@ -1063,6 +1074,7 @@ function VaultWorkspace({
                     writeEnabled={writeEnabled}
                     onNewNote={() => openCreateDialog("")}
                     onOpenSearch={() => setSearchOpen(true)}
+                    sections={sidebarSections}
                   />
                 )
               }
@@ -1130,6 +1142,7 @@ function VaultWorkspace({
                   <Navigate to="/" replace />
                 ) : (
                   <NotePage
+                    noteWidth={noteWidth}
                     onActiveNoteChange={setActiveNote}
                     onHeadingsChange={setNoteHeadings}
                     onTagSelect={openSearchForTag}
@@ -1182,6 +1195,7 @@ function VaultWorkspace({
           scope={scope}
           inputRef={searchInputRef}
           startupStatus={startupStatus}
+          modelSetupError={modelSetupError}
           onRetryModelSetup={onRetryModelSetup}
           demoMode={demoMode}
           onClose={() => setSearchOpen(false)}
@@ -1369,11 +1383,13 @@ function AppSession({ onUnlockInPlace }: { onUnlockInPlace: () => void }) {
         hasRegistryRecovery={hasRegistryRecovery}
         hasNoVaults={hasNoVaults}
         demoMode={collection.demoMode}
+        actionError={startup.actionError}
         onAcceptGemma={() => void startup.acceptGemma()}
         onDeclineGemma={() => void startup.declineGemma()}
       >
         <VaultWorkspace
           startupStatus={startup.status}
+          modelSetupError={startup.actionError}
           onRetryModelSetup={() => void startup.retryModelSetup()}
         />
         {/* After an upgrade (#418), over the workspace only: the gate holds

@@ -1,4 +1,11 @@
-import { useCallback, useEffect, useId, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from "react";
 import type { ReactNode, Ref } from "react";
 
 import { CONTEXTUAL_HELP, ContextualHelpLink } from "../help";
@@ -316,8 +323,10 @@ export function FolderPicker({
   }, [loadLevel]);
 
   // Going into a folder or back up replaces the button that had focus, so
-  // focus moves to the new level's first row instead of falling out.
-  useEffect(() => {
+  // focus moves to the new level's first row instead of falling out. A layout
+  // effect, so it lands in the same commit that draws the level: a passive
+  // effect runs later, leaving focus on the page in between (#728).
+  useLayoutEffect(() => {
     if (listing && moveFocus.current) {
       moveFocus.current = false;
       firstRow.current?.focus();

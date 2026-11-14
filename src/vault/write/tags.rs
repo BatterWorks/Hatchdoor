@@ -23,7 +23,6 @@
 //! editor, backstop and journal.
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
-use std::fs;
 use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Value};
@@ -32,11 +31,13 @@ use crate::cache::parse::{
     InlineTag, content_hash, extract_tags, frontmatter_span, inline_tags, is_tag_char,
 };
 use crate::search::tag_matches;
+use crate::vault::BoundedReadError;
 use crate::vault::types::{NoteEntry, VaultIndex};
 
 use super::frontmatter::{FrontmatterEdit, edit_frontmatter_block};
-use super::fs_ops::MutationJournal;
-use super::rewrites::read_note_text;
+use super::fs_ops::{MutationJournal, read_note_bounded};
+use super::intent::IntentLog;
+use super::rewrites::read_note_for_rewrite;
 use super::types::{TextRewrite, WriteError};
 
 /// A rename that was planned, or planned and applied.
@@ -116,6 +117,7 @@ pub fn rename_tag(
     old_tag: &str,
     new_tag: &str,
     expected_plan_hash: Option<&str>,
+    intent_log: Option<&IntentLog>,
 ) -> Result<TagRename, TagRenameError> {
     rename_tag_with_hook(
         vault_root,
@@ -123,6 +125,7 @@ pub fn rename_tag(
         old_tag,
         new_tag,
         expected_plan_hash,
+        intent_log,
         |_| Ok(()),
     )
 }
@@ -133,6 +136,7 @@ fn rename_tag_with_hook(
     old_tag: &str,
     new_tag: &str,
     expected_plan_hash: Option<&str>,
+    intent_log: Option<&IntentLog>,
     after_write: impl FnMut(usize) -> Result<(), WriteError>,
 ) -> Result<TagRename, TagRenameError> {
     let (old_tag, new_tag) = validated_names(old_tag, new_tag)?;
@@ -143,7 +147,7 @@ fn rename_tag_with_hook(
     if plan.report.plan_hash.as_deref() != Some(expected.trim()) {
         return Err(TagRenameError::StalePlan);
     }
-    apply(vault_root, plan, after_write)
+    apply(vault_root, plan, intent_log, after_write)
 }
 
 /// The two names, normalised. A leading `#` is accepted on either, since that
@@ -225,7 +229,7 @@ fn plan(index: &VaultIndex, old: &str, new: &str) -> Result<Plan, TagRenameError
     let mut already_tagged_notes = 0usize;
     for entry in index.ordered_entries() {
         // A note that cannot be opened carries no tag the index knows of.
-        let Some(note) = read_note_text(&entry.path) else {
+        let Some(note) = read_note_for_rewrite(&entry.path) else {
             continue;
         };
         let tags = extract_tags(&note.content);
@@ -459,6 +463,7 @@ fn write_error_message(error: &WriteError) -> &str {
     match error {
         WriteError::Conflict(message)
         | WriteError::InvalidInput(message)
+        | WriteError::HeadingNotFound(message)
         | WriteError::Io(message) => message,
         WriteError::LinkRewriteUnsupported(_) => "a linking note cannot be rewritten",
     }
@@ -530,12 +535,14 @@ fn renamed_item(item: &str, old: &str, new: &str) -> Option<String> {
 fn apply(
     vault_root: &Path,
     plan: Plan,
+    intent_log: Option<&IntentLog>,
     after_write: impl FnMut(usize) -> Result<(), WriteError>,
 ) -> Result<TagRename, TagRenameError> {
     let affected_paths = write_rewrites(
         vault_root,
         &plan.rewrites,
         TagOperation::Rename,
+        intent_log,
         after_write,
     )?;
     let mut report = plan.report;
@@ -599,6 +606,7 @@ fn write_rewrites(
     vault_root: &Path,
     rewrites: &[PlannedRewrite],
     operation: TagOperation,
+    intent_log: Option<&IntentLog>,
     mut after_write: impl FnMut(usize) -> Result<(), WriteError>,
 ) -> Result<Vec<PathBuf>, ApplyError> {
     // The plan was read under the same lock this write holds, but a person
@@ -612,33 +620,47 @@ fn write_rewrites(
     // its own `original_hash` into the commit, and the journal checks that
     // one per note at the moment it writes it (#321).
     for rewrite in rewrites {
-        let current = fs::read_to_string(&rewrite.path).map_err(|error| {
-            ApplyError::Write(WriteError::Io(format!(
-                "failed to re-read '{}' before {}: {error}",
-                rewrite.path.display(),
-                operation.editing()
-            )))
-        })?;
+        // Bounded (#672): the plan read this note as text under the bound, so
+        // one that is now over it, not text, or not a file has gone stale.
+        let current = match read_note_bounded(&rewrite.path) {
+            Ok(current) => current,
+            Err(BoundedReadError::Io(error)) => {
+                return Err(ApplyError::Write(WriteError::Io(format!(
+                    "failed to re-read '{}' before {}: {error}",
+                    rewrite.path.display(),
+                    operation.editing()
+                ))));
+            }
+            Err(_) => return Err(ApplyError::Stale),
+        };
         if content_hash(&current) != rewrite.original_hash {
             return Err(ApplyError::Stale);
         }
     }
 
-    let mut journal = MutationJournal::new(vault_root);
+    let text_rewrites = rewrites
+        .iter()
+        .map(|rewrite| TextRewrite {
+            path: rewrite.path.clone(),
+            original_hash: rewrite.original_hash.clone(),
+            content: rewrite.content.clone(),
+        })
+        .collect::<Vec<_>>();
+    let mut journal = MutationJournal::new(vault_root, intent_log);
+    if let Err(error) = journal.begin(&format!("{} tag", operation.noun()), &[], &text_rewrites) {
+        return Err(ApplyError::Write(journal.rollback(error)));
+    }
     let mut affected_paths = Vec::with_capacity(rewrites.len());
-    for (position, rewrite) in rewrites.iter().enumerate() {
+    for (position, rewrite) in text_rewrites.into_iter().enumerate() {
         let written = journal
-            .apply_rewrites(vec![TextRewrite {
-                path: rewrite.path.clone(),
-                original_hash: rewrite.original_hash.clone(),
-                content: rewrite.content.clone(),
-            }])
+            .apply_rewrites(vec![rewrite])
             .and_then(|written| after_write(position).map(|()| written));
         match written {
             Ok(written) => affected_paths.extend(written),
             Err(error) => return Err(ApplyError::Write(journal.rollback(error))),
         }
     }
+    journal.finish();
     Ok(affected_paths)
 }
 
@@ -720,6 +742,7 @@ pub fn delete_tag(
     index: &VaultIndex,
     tag: &str,
     expected_plan_hash: Option<&str>,
+    intent_log: Option<&IntentLog>,
 ) -> Result<TagDelete, TagDeleteError> {
     let tag = tag_name(tag, "tag")
         .map_err(TagDeleteError::InvalidTagName)?
@@ -731,8 +754,13 @@ pub fn delete_tag(
     if report.plan_hash.as_deref() != Some(expected.trim()) {
         return Err(TagDeleteError::StalePlan);
     }
-    report.affected_paths =
-        write_rewrites(vault_root, &rewrites, TagOperation::Delete, |_| Ok(()))?;
+    report.affected_paths = write_rewrites(
+        vault_root,
+        &rewrites,
+        TagOperation::Delete,
+        intent_log,
+        |_| Ok(()),
+    )?;
     for (note, rewrite) in report.notes.iter_mut().zip(&rewrites) {
         note.content_hash = content_hash(&rewrite.content);
     }
@@ -750,7 +778,7 @@ fn plan_delete(
     let mut notes = Vec::new();
     let mut rewrites = Vec::new();
     for entry in index.ordered_entries() {
-        let Some(note) = read_note_text(&entry.path) else {
+        let Some(note) = read_note_for_rewrite(&entry.path) else {
             continue;
         };
         let tags = extract_tags(&note.content);
@@ -901,6 +929,7 @@ pub(super) fn rename_tag_with_failure(
         old_tag,
         new_tag,
         expected_plan_hash,
+        None,
         after_write,
     )
 }

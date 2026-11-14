@@ -41,6 +41,7 @@ function mergeVaultTrees(vaultTrees: VaultTree[]): ExplorerFolder | null {
     name: "Vaults",
     folders: vaultTrees.flatMap((vaultTree) => vaultTree.tree.folders),
     notes: vaultTrees.flatMap((vaultTree) => vaultTree.tree.notes),
+    files: vaultTrees.flatMap((vaultTree) => vaultTree.tree.files ?? []),
   };
 }
 

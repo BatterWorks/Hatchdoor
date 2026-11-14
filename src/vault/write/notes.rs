@@ -1,16 +1,18 @@
-use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::cache::parse::content_hash;
-use crate::vault::paths::{slugify, strip_md_extension};
+use crate::vault::paths::{note_slug_base, strip_md_extension};
 use crate::vault::sections::NoteSections;
 use crate::vault::types::{NoteEntry, VaultIndex};
 
 use super::assets::asset_move_plan;
+use super::canvas::{SkippedCanvas, canvas_rewrite_plan, split_rewritten};
 use super::frontmatter::{FrontmatterEdit, edit_frontmatter_block};
 use super::fs_ops::{
     MutationJournal, atomic_create, atomic_write, atomic_write_if_unchanged, ensure_content_hash,
+    read_existing_note,
 };
+use super::intent::IntentLog;
 use super::paths::{
     create_parent_dir_inside_root, normalize_note_relative_path, resolve_new_note_path,
     unique_trash_relative_path,
@@ -235,10 +237,7 @@ fn slug_for_relative_path(
     exclude_slug: Option<&str>,
 ) -> String {
     let stem = relative_path.rsplit('/').next().unwrap_or(relative_path);
-    let mut base = slugify(stem);
-    if base.is_empty() {
-        base = "untitled".to_string();
-    }
+    let base = note_slug_base(stem);
     let priority = slug_priority(catalog, relative_path, path);
 
     let mut idx = 1usize;
@@ -382,6 +381,11 @@ pub fn update_note_frontmatter(
     }
     ensure_content_hash(entry, expected_content_hash)?;
     let content = read_note(entry)?;
+    let bom = if content.starts_with('\u{feff}') {
+        "\u{feff}"
+    } else {
+        ""
+    };
     let span = frontmatter_span(&content);
     let had_frontmatter = span.is_some();
     // Surface the same frontmatter quality contract as the sibling note
@@ -418,7 +422,7 @@ pub fn update_note_frontmatter(
                 };
                 end + 4 + spaces + line_ending
             });
-            content[body_start..].to_string()
+            format!("{bom}{}", &content[body_start..])
         }
         // Rewrite exactly the inner region so the opening/closing markers and
         // everything after them keep their original bytes. The edited block
@@ -434,9 +438,9 @@ pub fn update_note_frontmatter(
             None => match content.contains("\r\n") {
                 true => {
                     let edited = edited.replace('\n', "\r\n");
-                    format!("---\r\n{edited}\r\n---\r\n{content}")
+                    format!("{bom}---\r\n{edited}\r\n---\r\n{}", &content[bom.len()..])
                 }
-                false => format!("---\n{edited}\n---\n{content}"),
+                false => format!("{bom}---\n{edited}\n---\n{}", &content[bom.len()..]),
             },
         },
     };
@@ -585,12 +589,7 @@ pub fn replace_section(
 }
 
 fn read_note(entry: &NoteEntry) -> Result<String, WriteError> {
-    fs::read_to_string(&entry.path).map_err(|error| {
-        WriteError::Io(format!(
-            "failed to read note '{}': {error}",
-            entry.relative_path
-        ))
-    })
+    read_existing_note(&entry.path, &entry.relative_path)
 }
 
 /// Byte range `[start, end)` covering the requested section, by the shared
@@ -609,7 +608,7 @@ fn section_span(
         .map(|(idx, _)| idx)
         .collect();
     match matched.as_slice() {
-        [] => Err(WriteError::InvalidInput(format!(
+        [] => Err(WriteError::HeadingNotFound(format!(
             "heading '{requested}' not found in note '{relative_path}'"
         ))),
         [idx] => {
@@ -666,6 +665,7 @@ pub fn move_or_rename_note(
     entry: &NoteEntry,
     target_relative_path: &str,
     expected_content_hash: &str,
+    intent_log: Option<&IntentLog>,
 ) -> Result<WriteOutcome, WriteError> {
     move_or_rename_note_with_hook(
         vault_root,
@@ -673,6 +673,7 @@ pub fn move_or_rename_note(
         entry,
         target_relative_path,
         expected_content_hash,
+        intent_log,
         |_| Ok(()),
     )
 }
@@ -683,6 +684,7 @@ fn move_or_rename_note_with_hook(
     entry: &NoteEntry,
     target_relative_path: &str,
     expected_content_hash: &str,
+    intent_log: Option<&IntentLog>,
     mut after_phase: impl FnMut(MutationPhase) -> Result<(), WriteError>,
 ) -> Result<WriteOutcome, WriteError> {
     ensure_content_hash(entry, expected_content_hash)?;
@@ -722,11 +724,14 @@ fn move_or_rename_note_with_hook(
     create_destination_dirs(vault_root, &target_path, "destination", &asset_moves)?;
     let mutation = execute_note_mutation(
         vault_root,
+        intent_log,
+        "move note",
         entry,
         &target_path,
         expected_content_hash,
         &asset_moves,
         merge_rewrites(backlink_rewrites, asset_rewrites),
+        CanvasRepair::Retarget(index),
         &mut after_phase,
     )?;
     let moved_assets = asset_moves.len();
@@ -734,9 +739,11 @@ fn move_or_rename_note_with_hook(
     // which this operation already reports as its subject. `rewritten_notes`
     // counts the *other* notes, so counting it would report the same write
     // twice, and `affected_paths` would name the destination twice (#254).
-    let mut affected_paths = mutation.rewritten;
+    // A rewritten canvas is an affected path and not a note (ADR-53).
+    let (mut affected_paths, rewritten_canvases) = split_rewritten(mutation.rewritten);
     let rewrote_its_own_body = affected_paths.contains(&target_path);
     let rewritten_notes = affected_paths.len() - usize::from(rewrote_its_own_body);
+    affected_paths.extend(rewritten_canvases);
     affected_paths.push(entry.path.clone());
     if !rewrote_its_own_body {
         affected_paths.push(target_path.clone());
@@ -750,7 +757,7 @@ fn move_or_rename_note_with_hook(
         slug: Some(slug),
         relative_path: Some(target_without_ext),
         content_hash: Some(content_hash(&mutation.moved_content)),
-        quality_warnings: Vec::new(),
+        quality_warnings: mutation.canvas_warnings,
         rewritten_notes,
         moved_assets,
         trashed_path: None,
@@ -764,6 +771,7 @@ pub fn archive_note(
     entry: &NoteEntry,
     archive_prefix: &str,
     expected_content_hash: &str,
+    intent_log: Option<&IntentLog>,
 ) -> Result<WriteOutcome, WriteError> {
     let archive_folder = archive_prefix.trim().trim_matches('/');
     if archive_folder.is_empty() {
@@ -805,6 +813,7 @@ pub fn archive_note(
         entry,
         &target_relative_path,
         expected_content_hash,
+        intent_log,
     )
 }
 
@@ -813,8 +822,16 @@ pub fn delete_note(
     index: &VaultIndex,
     entry: &NoteEntry,
     expected_content_hash: &str,
+    intent_log: Option<&IntentLog>,
 ) -> Result<WriteOutcome, WriteError> {
-    delete_note_with_hook(vault_root, index, entry, expected_content_hash, |_| Ok(()))
+    delete_note_with_hook(
+        vault_root,
+        index,
+        entry,
+        expected_content_hash,
+        intent_log,
+        |_| Ok(()),
+    )
 }
 
 fn delete_note_with_hook(
@@ -822,6 +839,7 @@ fn delete_note_with_hook(
     index: &VaultIndex,
     entry: &NoteEntry,
     expected_content_hash: &str,
+    intent_log: Option<&IntentLog>,
     mut after_phase: impl FnMut(MutationPhase) -> Result<(), WriteError>,
 ) -> Result<WriteOutcome, WriteError> {
     ensure_content_hash(entry, expected_content_hash)?;
@@ -846,11 +864,16 @@ fn delete_note_with_hook(
     create_destination_dirs(vault_root, &trash_path, "trash", &asset_moves)?;
     let mutation = execute_note_mutation(
         vault_root,
+        intent_log,
+        "delete note",
         entry,
         &trash_path,
         expected_content_hash,
         &asset_moves,
         merge_rewrites(backlink_rewrites, asset_rewrites),
+        // A delete leaves every canvas as written: its cards show as
+        // missing, as they do after a delete in Obsidian (ADR-53).
+        CanvasRepair::Leave,
         &mut after_phase,
     )?;
     let moved_assets = asset_moves.len();
@@ -893,20 +916,55 @@ fn create_destination_dirs(
 }
 
 struct CompletedNoteMutation {
+    /// Every path a rewrite landed on, notes first and then canvases.
     rewritten: Vec<std::path::PathBuf>,
     moved_content: String,
+    /// One sentence per canvas that may name a moved file and was skipped.
+    canvas_warnings: Vec<String>,
 }
 
+/// What a note mutation does about the Vault's canvases (ADR-53).
+#[derive(Clone, Copy)]
+enum CanvasRepair<'a> {
+    /// Point every canvas card that names a moved file at its new path,
+    /// reading the canvases this index catalogued.
+    Retarget(&'a VaultIndex),
+    /// Write no canvas.
+    Leave,
+}
+
+#[allow(clippy::too_many_arguments)]
 fn execute_note_mutation(
     vault_root: &Path,
+    intent_log: Option<&IntentLog>,
+    operation: &str,
     entry: &NoteEntry,
     target_path: &Path,
     expected_content_hash: &str,
     asset_moves: &[AssetMove],
-    rewrites: Vec<TextRewrite>,
+    mut rewrites: Vec<TextRewrite>,
+    canvases: CanvasRepair<'_>,
     after_phase: &mut impl FnMut(MutationPhase) -> Result<(), WriteError>,
 ) -> Result<CompletedNoteMutation, WriteError> {
-    let mut journal = MutationJournal::new(vault_root);
+    let mut journal = MutationJournal::new(vault_root, intent_log);
+    let moves = std::iter::once((entry.path.as_path(), target_path))
+        .chain(
+            asset_moves
+                .iter()
+                .map(|asset| (asset.source.as_path(), asset.destination.as_path())),
+        )
+        .collect::<Vec<_>>();
+    // Canvas rewrites go last in the one plan, so they are recorded, applied
+    // and undone with the note rewrites (ADR-51, ADR-53).
+    let mut canvas_warnings = Vec::new();
+    if let CanvasRepair::Retarget(index) = canvases {
+        let plan = canvas_rewrite_plan(vault_root, index, &moves);
+        canvas_warnings = plan.skipped.iter().map(SkippedCanvas::warning).collect();
+        rewrites.extend(plan.rewrites);
+    }
+    if let Err(error) = journal.begin(operation, &moves, &rewrites) {
+        return Err(journal.rollback(error));
+    }
 
     if let Err(error) = journal.move_note(&entry.path, target_path, expected_content_hash) {
         return Err(journal.rollback(error));
@@ -937,19 +995,19 @@ fn execute_note_mutation(
         return Err(journal.rollback(error));
     }
 
-    let moved_content = match fs::read_to_string(target_path) {
+    // Bounded and refused like the pre-edit check that let the move start:
+    // a note that grew past the bound or stopped being a file since is
+    // `invalid_write_input`, and the move is undone (#672).
+    let moved_content = match read_existing_note(target_path, &entry.relative_path) {
         Ok(content) => content,
-        Err(error) => {
-            return Err(journal.rollback(WriteError::Io(format!(
-                "failed to read moved note '{}': {error}",
-                target_path.display()
-            ))));
-        }
+        Err(error) => return Err(journal.rollback(error)),
     };
 
+    journal.finish();
     Ok(CompletedNoteMutation {
         rewritten,
         moved_content,
+        canvas_warnings,
     })
 }
 
@@ -968,6 +1026,7 @@ pub(super) fn move_or_rename_note_with_failure(
         entry,
         target_relative_path,
         expected_content_hash,
+        None,
         after_phase,
     )
 }
@@ -980,5 +1039,12 @@ pub(super) fn delete_note_with_failure(
     expected_content_hash: &str,
     after_phase: impl FnMut(MutationPhase) -> Result<(), WriteError>,
 ) -> Result<WriteOutcome, WriteError> {
-    delete_note_with_hook(vault_root, index, entry, expected_content_hash, after_phase)
+    delete_note_with_hook(
+        vault_root,
+        index,
+        entry,
+        expected_content_hash,
+        None,
+        after_phase,
+    )
 }

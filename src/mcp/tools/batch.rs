@@ -10,6 +10,13 @@
 //! chaining between items in the same call that touch the same note — see
 //! [`apply_hash_chain`].
 //!
+//! A note the batch only *read* is a fourth, opt-in relaxation (#599): a
+//! write that passes the marker `"from_batch"` as its `expected_content_hash`
+//! is checked against the hash an earlier `get_note`, `get_note_outline`,
+//! `get_note_section` or `get_frontmatter` item returned for that note. See
+//! [`apply_read_hash`]. Nothing is skipped: the write still compares that hash
+//! with the file, so a note changed since the read is a `write_conflict`.
+//!
 //! Chaining trusts this batch's own prior write, not the caller's own value,
 //! so it must never be checked against a Vault an external writer could have
 //! touched in between: [`batch_tool`] acquires every touched Vault's mutation
@@ -73,7 +80,9 @@ use crate::vault_registry::VaultId;
 
 use super::super::config::McpConfig;
 use super::super::limits::{BATCH_MAX_READ_ITEMS, BATCH_MAX_WRITE_ITEMS};
-use super::super::protocol::{JsonRpcFailure, OUTCOME_FIELD, tool_success};
+use super::super::protocol::{
+    JsonRpcFailure, MAX_JSONRPC_RESPONSE_BYTES, OUTCOME_FIELD, tool_success,
+};
 use super::super::results::{BatchItemResult, BatchResult, result_to_value};
 use super::write::WRITE_OPS;
 use super::{
@@ -105,6 +114,16 @@ const HASH_CHAINED_OPS: &[&str] = &[
 /// promise among many.
 const NOT_BATCHABLE_WRITE_OPS: &[&str] = &["rename_tag", "delete_tag"];
 
+/// The reads whose result carries the whole note's `content_hash`, the same
+/// string a write compares. A successful item of one of these records that
+/// hash for a later `"from_batch"` write on the same note (#599).
+const HASH_READ_OPS: &[&str] = &[
+    "get_note",
+    "get_note_outline",
+    "get_note_section",
+    "get_frontmatter",
+];
+
 /// `(vault_id, slug) -> content_hash`, tracking each note's most recent
 /// resulting hash from an earlier item in this same batch call. Keyed by the
 /// raw `vault_id` string rather than a parsed `VaultId`: this is pure
@@ -112,6 +131,14 @@ const NOT_BATCHABLE_WRITE_OPS: &[&str] = &["rename_tag", "delete_tag"];
 /// dispatch still parses and validates `vault_id` itself), and `VaultId`
 /// carries no `Hash` impl to key a map with.
 type HashChain = HashMap<(String, String), String>;
+
+/// `(vault_id, slug) -> content_hash` for notes an earlier item in this batch
+/// call *read*, kept apart from [`HashChain`] because the two are trusted
+/// differently. A written hash replaces whatever the caller sent. A read hash
+/// is used only when the caller asks for it with [`write::FROM_BATCH_HASH`]:
+/// a caller who sends a real hash planned the edit on that version, and must
+/// not have it re-pointed at one it never saw.
+type ReadHashes = HashMap<(String, String), String>;
 
 /// One Vault this batch call writes to: the guard it holds on that Vault for
 /// the whole call, and the control block that guard was taken from, resolved
@@ -238,6 +265,18 @@ pub(super) async fn batch_tool(
     arguments: Value,
     config: &McpConfig,
 ) -> Result<Value, JsonRpcFailure> {
+    run_batch(state, arguments, config, &mut |_| {}).await
+}
+
+/// [`batch_tool`], calling `before_item` with each item's index just before
+/// that item runs. Production passes a no-op; a test uses it to change a file
+/// between two items, which nothing outside the call can otherwise time.
+pub(super) async fn run_batch(
+    state: AppState,
+    arguments: Value,
+    config: &McpConfig,
+    before_item: &mut (dyn FnMut(usize) + Send),
+) -> Result<Value, JsonRpcFailure> {
     let args = parse_batch_args(arguments)?;
     if args.operations.is_empty() {
         return Err(JsonRpcFailure::invalid_params(
@@ -277,6 +316,7 @@ pub(super) async fn batch_tool(
     }
 
     let mut chain: HashChain = HashMap::new();
+    let mut read_hashes: ReadHashes = HashMap::new();
     // Taken before the first item runs, in one canonical order, and held
     // across the whole loop below (dropped only when `batch_tool` returns):
     // nothing outside this call can land a write that a later chained item's
@@ -286,48 +326,78 @@ pub(super) async fn batch_tool(
     let mut items = Vec::with_capacity(args.operations.len());
     let mut succeeded = 0usize;
     let mut failed = 0usize;
+    // Serialized bytes of the items so far, against [`BATCH_REPLY_BUDGET`].
+    let mut reply_bytes = 0usize;
 
     for (index, item) in args.operations.into_iter().enumerate() {
         let BatchOperation { op, arguments } = item;
+        before_item(index);
         let arguments = apply_hash_chain(&op, arguments, &chain);
-        match dispatch_one(state.clone(), config, &op, arguments, &mut locks).await {
-            Ok(value) => {
+        let arguments = apply_read_hash(&op, arguments, &read_hashes);
+        let remaining = BATCH_REPLY_BUDGET.saturating_sub(reply_bytes);
+        let mut item = match dispatch_one(
+            state.clone(),
+            config,
+            &op,
+            arguments,
+            &mut locks,
+            remaining,
+        )
+        .await
+        {
+            Ok(mut value) => {
                 if value.get("isError").and_then(Value::as_bool) == Some(true) {
-                    failed += 1;
                     let error = item_error_value(&value);
-                    items.push(BatchItemResult {
+                    BatchItemResult {
                         index,
                         op,
                         ok: false,
                         result: None,
                         error: Some(error),
-                    });
+                    }
                 } else {
-                    succeeded += 1;
-                    let result = value.get("structuredContent").cloned();
+                    // Moved, not copied: it can be an attachment of several MB.
+                    let result = value.get_mut("structuredContent").map(Value::take);
                     if let Some(result) = &result {
                         record_chain(&mut chain, &op, result);
                     }
-                    items.push(BatchItemResult {
+                    BatchItemResult {
                         index,
                         op,
                         ok: true,
                         result,
                         error: None,
-                    });
+                    }
                 }
             }
-            Err(failure) => {
-                failed += 1;
-                items.push(BatchItemResult {
-                    index,
-                    op,
-                    ok: false,
-                    result: None,
-                    error: Some(failure_to_error_value(failure)),
-                });
-            }
+            Err(failure) => BatchItemResult {
+                index,
+                op,
+                ok: false,
+                result: None,
+                error: Some(failure_to_error_value(failure)),
+            },
+        };
+        let mut size = serialized_len(&item);
+        // A read's answer that does not fit is dropped here rather than kept
+        // for a reply that would then be refused whole. A write's answer is
+        // always kept: the write happened, and its result is small.
+        if item.ok && READ_OPS.contains(&item.op.as_str()) && size > remaining {
+            item = reply_budget_exceeded(item.index, item.op);
+            size = serialized_len(&item);
         }
+        reply_bytes = reply_bytes.saturating_add(size);
+        // After the budget check, so a read whose answer was dropped, which
+        // the caller sees as a failed item, lends no hash to a later write.
+        if let Some(result) = &item.result {
+            record_read_hash(&mut read_hashes, &item.op, result);
+        }
+        if item.ok {
+            succeeded += 1;
+        } else {
+            failed += 1;
+        }
+        items.push(item);
     }
 
     Ok(tool_success(result_to_value(&BatchResult {
@@ -428,8 +498,31 @@ async fn dispatch_one(
     op: &str,
     arguments: Value,
     locks: &mut VaultLocks,
+    reply_budget: usize,
 ) -> Result<Value, JsonRpcFailure> {
     match op {
+        // A base64 attachment is the one read whose size the batch can know
+        // before reading it, so it is refused up front when it cannot fit in
+        // what is left of the reply (#632).
+        "get_attachment" => {
+            let limit = config.base64_limit();
+            let cap = limit.min(base64_bytes_fitting(reply_budget));
+            let mut value = super::read::get_attachment_tool(state, arguments, config, cap).await?;
+            // The refusal names the cap it was held to; when that was the
+            // reply's room rather than the base64 limit, it says so, since
+            // the same call made on its own may well be answered.
+            let refused_for_room = cap < limit
+                && value.pointer("/structuredContent/code")
+                    == Some(&json!("attachment_too_large_for_base64"));
+            if refused_for_room {
+                value["structuredContent"]["message"] = json!(format!(
+                    "This attachment does not fit in what is left of the batch reply ({cap} bytes \
+                     before encoding). Nothing was read: call get_attachment on its own, or \
+                     split the batch."
+                ));
+            }
+            Ok(value)
+        }
         _ if READ_OPS.contains(&op) => dispatch_read_tool(state, config, op, arguments).await,
         _ if WRITE_OPS.contains(&op) => {
             // The refusal carries a stable string code (#327), like every
@@ -483,6 +576,62 @@ async fn dispatch_one(
     }
 }
 
+/// The serialized bytes a batch's items may add up to (#632): a reply is
+/// refused whole past `MAX_JSONRPC_RESPONSE_BYTES`, so the batch stops
+/// accumulating before it, leaving room for the envelope. Without this, fifty
+/// base64 attachments were all read, encoded and held, several hundred
+/// megabytes, only for the finished reply to be refused.
+const BATCH_REPLY_BUDGET: usize = MAX_JSONRPC_RESPONSE_BYTES - 64 * 1024;
+
+/// What one item adds to the reply besides an attachment's encoded bytes:
+/// its index, op, the result's other fields.
+const ITEM_FRAMING_BYTES: usize = 4 * 1024;
+
+/// The most decoded attachment bytes whose base64 fits in `reply_budget`.
+fn base64_bytes_fitting(reply_budget: usize) -> u64 {
+    (reply_budget.saturating_sub(ITEM_FRAMING_BYTES) / 4 * 3) as u64
+}
+
+/// The item that stands in for a read whose answer did not fit in the reply.
+fn reply_budget_exceeded(index: usize, op: String) -> BatchItemResult {
+    BatchItemResult {
+        index,
+        op,
+        ok: false,
+        result: None,
+        error: Some(json!({
+            "code": BATCH_REPLY_TOO_LARGE_CODE,
+            "message": format!(
+                "This item's answer did not fit in the batch reply, which holds {BATCH_REPLY_BUDGET} \
+                 bytes in all. Nothing was changed: call it on its own, or split the batch."
+            ),
+            "retryable": false,
+        })),
+    }
+}
+
+/// The code a read item carries when its answer did not fit (#632).
+const BATCH_REPLY_TOO_LARGE_CODE: &str = "batch_reply_too_large";
+
+/// How many bytes `value` serializes to, without keeping them.
+fn serialized_len(value: &impl serde::Serialize) -> usize {
+    struct Counter(usize);
+    impl std::io::Write for Counter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0 += bytes.len();
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut counter = Counter(0);
+    // Serializing a `Value`-backed result into a sink that never fails cannot
+    // fail; were it to, counting nothing only makes the budget more lenient.
+    let _ = serde_json::to_writer(&mut counter, value);
+    counter.0
+}
+
 /// Before dispatch, substitutes the tracked in-batch hash for a hash-chained
 /// op's `expected_content_hash` when this batch call has already written the
 /// same `(vault_id, slug)` — silently discarding whatever the caller supplied
@@ -493,23 +642,62 @@ fn apply_hash_chain(op: &str, mut arguments: Value, chain: &HashChain) -> Value 
     if !HASH_CHAINED_OPS.contains(&op) {
         return arguments;
     }
-    let key = arguments
-        .get("vault_id")
-        .and_then(Value::as_str)
-        .map(str::to_string)
-        .zip(
-            arguments
-                .get("slug")
-                .and_then(Value::as_str)
-                .map(str::to_string),
-        );
-    if let Some(key) = key
+    if let Some(key) = note_key(&arguments)
         && let Some(hash) = chain.get(&key)
         && let Some(object) = arguments.as_object_mut()
     {
         object.insert("expected_content_hash".to_string(), json!(hash));
     }
     arguments
+}
+
+/// The `(vault_id, slug)` an item's arguments name, as the caller spelled
+/// them, when both are strings.
+fn note_key(arguments: &Value) -> Option<(String, String)> {
+    let vault_id = arguments.get("vault_id").and_then(Value::as_str)?;
+    let slug = arguments.get("slug").and_then(Value::as_str)?;
+    Some((vault_id.to_string(), slug.to_string()))
+}
+
+/// Runs after [`apply_hash_chain`]: a hash-chained op that still carries the
+/// marker [`write::FROM_BATCH_HASH`], so one this batch has not written, gets
+/// the hash an earlier read item in this call returned for the same
+/// `(vault_id, slug)` (#599). The write then validates that hash against the
+/// file like any other, so a note changed since the read fails with
+/// `write_conflict`. With no such read the marker is left in place, and
+/// [`write::dispatch_write_tool`] refuses it before anything is written.
+///
+/// Any other value is left alone, a real hash above all: an earlier read of a
+/// newer version must not rescue an edit planned on an older one.
+fn apply_read_hash(op: &str, mut arguments: Value, read_hashes: &ReadHashes) -> Value {
+    if !HASH_CHAINED_OPS.contains(&op) || !write::asks_for_batch_hash(&arguments) {
+        return arguments;
+    }
+    if let Some(key) = note_key(&arguments)
+        && let Some(hash) = read_hashes.get(&key)
+        && let Some(object) = arguments.as_object_mut()
+    {
+        object.insert("expected_content_hash".to_string(), json!(hash));
+    }
+    arguments
+}
+
+/// After a successful read of one of [`HASH_READ_OPS`], records the whole
+/// note's `content_hash` under the slug the result reports, which is the slug
+/// the item asked for: an exact read matches a slug exactly. `get_note` nests
+/// the slug and hash under `note`; the other three carry them at the top
+/// level.
+fn record_read_hash(read_hashes: &mut ReadHashes, op: &str, result: &Value) {
+    if !HASH_READ_OPS.contains(&op) {
+        return;
+    }
+    let note = result.get("note").unwrap_or(result);
+    let vault_id = result.get("vault_id").and_then(Value::as_str);
+    let slug = note.get("slug").and_then(Value::as_str);
+    let hash = note.get("content_hash").and_then(Value::as_str);
+    if let (Some(vault_id), Some(slug), Some(hash)) = (vault_id, slug, hash) {
+        read_hashes.insert((vault_id.to_string(), slug.to_string()), hash.to_string());
+    }
 }
 
 /// After a successful note write, records its resulting `(vault_id, slug) ->
@@ -604,7 +792,7 @@ fn plain_failure_code(jsonrpc_code: i64) -> &'static str {
 pub(super) fn batch_tool_schema() -> Value {
     json!({
         "name": "batch",
-        "description": "Execute an ordered list of note and attachment operations in one call — the same tools available standalone (create_note through delete_attachment, and every read tool except list_vaults, read_docs and search_docs). rename_tag and delete_tag are not allowed inside a batch; call them on their own. Vault-management tools (create_vault, edit_vault, enable_vault, disable_vault, disconnect_vault, sync_vault, retry_vault, publish_recovery_branch, refresh_vault, list_vaults) and the manual tools (read_docs, search_docs) are not allowed inside a batch; those and any unrecognized op are rejected before anything executes. Execution is in order and best-effort: each item reports its own ok/result/error, one item failing does not stop the rest, and there is no rollback or mid-batch visibility between items. All resulting Vault changes are committed together on the Vault's next Git sync turn, the same as any other burst of writes. expected_content_hash checks are skipped between items that share a vault_id and slug: create or edit a note earlier in this batch, then reference it again later in the same call without knowing the intermediate hash; a note not otherwise touched in this batch still validates its expected_content_hash normally. A batch may contain at most 50 read-shaped items and 20 write-shaped items. Each search_notes item counts against the per-minute tool-call quota as a standalone search would. Every failed item's error carries a string code to branch on. Unlike every other tool, batch takes no top-level vault_id and no batch-level commit_summary: each goes inside the arguments of the operations whose tool takes it.",
+        "description": "Execute an ordered list of note and attachment operations in one call — the same tools available standalone (create_note through delete_attachment, and every read tool except list_vaults, read_docs and search_docs). rename_tag and delete_tag are not allowed inside a batch; call them on their own. Vault-management tools (create_vault, edit_vault, enable_vault, disable_vault, disconnect_vault, sync_vault, retry_vault, publish_recovery_branch, refresh_vault, list_vaults) and the manual tools (read_docs, search_docs) are not allowed inside a batch; those and any unrecognized op are rejected before anything executes. Execution is in order and best-effort: each item reports its own ok/result/error, one item failing does not stop the rest, and there is no rollback or mid-batch visibility between items. All resulting Vault changes are committed together on the Vault's next Git sync turn, the same as any other burst of writes. expected_content_hash checks are skipped between items that share a vault_id and slug: create or edit a note earlier in this batch, then reference it again later in the same call without knowing the intermediate hash; a note not otherwise touched in this batch still validates its expected_content_hash normally. To edit a note you have not read yet in one call, read it earlier in the same batch with get_note, get_note_outline, get_note_section or get_frontmatter, then pass the literal \"from_batch\" as the write's expected_content_hash: the write is checked against the hash that read returned, and fails with write_conflict if the note changed in between. The write must name the note by the same vault_id and slug as the read. \"from_batch\" with no earlier item for that note, or outside a batch, fails with code batch_hash_unavailable and writes nothing. A real hash is always checked as given, whatever an earlier read returned. create_upload_link does not take \"from_batch\": it needs the real hash. A batch may contain at most 50 read-shaped items and 20 write-shaped items. Its reply holds about 8 MB in all: a read whose answer would not fit fails with code batch_reply_too_large, and a base64 get_attachment that would not fit fails with attachment_too_large_for_base64 before it is read; call those on their own. Each search_notes item counts against the per-minute tool-call quota as a standalone search would. Every failed item's error carries a string code to branch on. Unlike every other tool, batch takes no top-level vault_id and no batch-level commit_summary: each goes inside the arguments of the operations whose tool takes it.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -783,6 +971,66 @@ mod tests {
             chain.get(&("vault-a".to_string(), "new".to_string())),
             Some(&"fnv1a64:1".to_string())
         );
+    }
+
+    #[test]
+    fn hash_read_ops_are_read_ops() {
+        for op in HASH_READ_OPS {
+            assert!(READ_OPS.contains(op), "{op} must be a batchable read");
+        }
+    }
+
+    #[test]
+    fn apply_read_hash_fills_only_the_marker_on_a_note_that_was_read() {
+        let mut reads = ReadHashes::new();
+        reads.insert(
+            ("vault-a".to_string(), "note".to_string()),
+            "fnv1a64:read".to_string(),
+        );
+        let edit = |slug: &str, hash: &str| json!({"vault_id": "vault-a", "slug": slug, "expected_content_hash": hash});
+
+        let filled = apply_read_hash("edit_note", edit("note", "from_batch"), &reads);
+        assert_eq!(filled["expected_content_hash"], "fnv1a64:read");
+
+        // A real hash is the caller's claim about the version it planned on.
+        let kept = apply_read_hash("edit_note", edit("note", "fnv1a64:older"), &reads);
+        assert_eq!(kept["expected_content_hash"], "fnv1a64:older");
+
+        // No read of this note: the marker stays for the write to refuse.
+        let unread = apply_read_hash("edit_note", edit("other", "from_batch"), &reads);
+        assert_eq!(unread["expected_content_hash"], "from_batch");
+
+        // Not a hash-chained op.
+        let upload = apply_read_hash("create_upload_link", edit("note", "from_batch"), &reads);
+        assert_eq!(upload["expected_content_hash"], "from_batch");
+    }
+
+    #[test]
+    fn record_read_hash_reads_both_result_shapes() {
+        let mut reads = ReadHashes::new();
+        let key = |slug: &str| ("vault-a".to_string(), slug.to_string());
+
+        record_read_hash(
+            &mut reads,
+            "get_note",
+            &json!({"vault_id": "vault-a", "note": {"slug": "nested", "content_hash": "fnv1a64:n"}}),
+        );
+        assert_eq!(reads.get(&key("nested")), Some(&"fnv1a64:n".to_string()));
+
+        record_read_hash(
+            &mut reads,
+            "get_frontmatter",
+            &json!({"vault_id": "vault-a", "slug": "flat", "content_hash": "fnv1a64:f"}),
+        );
+        assert_eq!(reads.get(&key("flat")), Some(&"fnv1a64:f".to_string()));
+
+        // A read that returns no whole-note hash to spend records nothing.
+        record_read_hash(
+            &mut reads,
+            "get_note_links",
+            &json!({"vault_id": "vault-a", "slug": "links", "content_hash": "fnv1a64:l"}),
+        );
+        assert_eq!(reads.get(&key("links")), None);
     }
 
     #[test]

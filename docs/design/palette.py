@@ -12,7 +12,12 @@ that are easy to break by hand-editing a hex:
   3. At least 4.5:1 as small text on its own 12%-tinted surface, and for the
      two accents that double as chrome badge tokens, on the badge surface too.
 
-Run it after touching any accent:  python3 docs/design/palette.py
+The six highlight colours (#577) are surfaces, not text, and are held to
+the same lightness and chroma rules plus one of their own: body ink clears
+4.5:1 on each.
+
+Run it after touching any accent or highlight colour:
+python3 docs/design/palette.py
 Exits non-zero if a rule is broken. No dependencies.
 """
 
@@ -44,6 +49,17 @@ ACCENTS = (
     "warn-fg",
     "err-fg",
     "co-fail",
+)
+
+# Highlight surfaces (#577): body ink sits on them, so they are checked for
+# ink contrast, one shared lightness, and the chroma ceilings above.
+HIGHLIGHTS = (
+    "highlight-red",
+    "highlight-orange",
+    "highlight-yellow",
+    "highlight-green",
+    "highlight-blue",
+    "highlight-purple",
 )
 
 # Accents that also colour chrome, with the surfaces they sit on there.
@@ -137,6 +153,53 @@ def read_theme_blocks(text):
     return blocks
 
 
+def ceiling_for(off):
+    return next(c for limit, c in CHROMA_CEILING if off <= limit)
+
+
+def check_highlights(theme, block):
+    """The highlight surfaces of one theme: ink contrast, one lightness, and
+    the chroma ceilings. Returns the failures."""
+    failures = []
+    ink = re.search(r"--ink:\s*(#[0-9a-fA-F]{6})", block)
+    if not ink:
+        return [f"{theme}: --ink is missing"]
+    ink = ink.group(1)
+    print(f"\n{theme.upper()} highlights (ink {ink})")
+    print(f"  {'token':<18} {'hex':<9} {'L':>5} {'C':>6} {'H':>6} {'ink on it':>10}")
+    Ls = []
+    for token in HIGHLIGHTS:
+        m = re.search(rf"--{re.escape(token)}:\s*(#[0-9a-fA-F]{{6}})", block)
+        if not m:
+            failures.append(f"{theme}: --{token} is missing")
+            continue
+        hex_ = m.group(1)
+        L, C, H = oklch(hex_)
+        Ls.append(L)
+        c_ink = contrast(ink, hex_)
+        print(f"  {token:<18} {hex_:<9} {L:.3f} {C:.3f} {H:6.1f} {c_ink:9.2f}:1")
+        if c_ink < MIN_CONTRAST:
+            failures.append(
+                f"{theme}: body ink is {c_ink:.2f}:1 on --{token}, needs "
+                f"{MIN_CONTRAST}"
+            )
+        ceiling = ceiling_for(wedge_distance(H))
+        if C > ceiling + 0.002:
+            failures.append(
+                f"{theme}: --{token} carries chroma {C:.3f}, over its "
+                f"ceiling {ceiling:.3f}"
+            )
+    if Ls:
+        spread = max(Ls) - min(Ls)
+        print(f"  lightness spread {spread:.3f}")
+        if spread > MAX_L_SPREAD:
+            failures.append(
+                f"{theme}: highlight lightness spread {spread:.3f} exceeds "
+                f"{MAX_L_SPREAD}"
+            )
+    return failures
+
+
 def main():
     text = BASE_CSS.read_text()
     blocks = read_theme_blocks(text)
@@ -220,9 +283,12 @@ def main():
                     f"carries {chroma:.3f} — drain it or move the hue warmer"
                 )
 
+    for theme, block in blocks.items():
+        failures.extend(check_highlights(theme, block))
+
     # The auto block must be a byte-identical copy of dark, or a theme switch
     # silently disagrees with prefers-color-scheme.
-    for token in ACCENTS:
+    for token in ACCENTS + HIGHLIGHTS:
         found = re.findall(rf"--{re.escape(token)}:\s*(#[0-9a-fA-F]{{6}})", text)
         if len(found) != 3:
             failures.append(

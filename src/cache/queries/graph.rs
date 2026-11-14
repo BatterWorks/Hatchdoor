@@ -1,10 +1,11 @@
-//! Link, backlink, and wikilink-resolution queries over the cache.
+//! Link and backlink queries over the cache. Wikilink resolution lives in
+//! `VaultIndex::resolve_wikilink_match`, the one rule (#626).
 
-use rusqlite::{OptionalExtension, params};
+use rusqlite::params;
 
 use crate::cache::SqliteCache;
 use crate::search::LayerSelection;
-use crate::vault::{NoteLink, NoteLinks, normalize_link_target, normalize_title, slugify};
+use crate::vault::{NoteLink, NoteLinks};
 
 impl SqliteCache {
     pub fn note_links(
@@ -49,70 +50,6 @@ impl SqliteCache {
             outgoing,
             backlinks,
         }))
-    }
-
-    pub fn resolve_wikilink(&self, raw_target: &str) -> Result<Option<(String, String)>, String> {
-        // Strip heading (#) and block (^) anchors — they point within a note, not to a different note
-        let note_target = raw_target
-            .split('#')
-            .next()
-            .unwrap_or(raw_target)
-            .split('^')
-            .next()
-            .unwrap_or(raw_target);
-        let normalized_target = normalize_link_target(note_target);
-        let normalized_path = normalize_title(&normalized_target);
-        let conn = self.read()?;
-
-        let by_path = conn
-            .query_row(
-                r#"
-                SELECT slug, relative_path
-                FROM notes
-                WHERE normalized_relative_path = ?1
-                ORDER BY (layer IS NOT NULL), relative_path
-                LIMIT 1
-                "#,
-                params![normalized_path],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
-            )
-            .optional()
-            .map_err(|error| format!("failed to resolve wikilink by path: {error}"))?;
-        if by_path.is_some() {
-            return Ok(by_path);
-        }
-
-        let base = normalized_target
-            .rsplit('/')
-            .next()
-            .unwrap_or(&normalized_target);
-        let normalized_base = normalize_title(base);
-        let by_title = conn
-            .query_row(
-                r#"
-                SELECT slug, relative_path
-                FROM notes
-                WHERE normalized_title = ?1
-                ORDER BY (layer IS NOT NULL), relative_path
-                LIMIT 1
-                "#,
-                params![normalized_base],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
-            )
-            .optional()
-            .map_err(|error| format!("failed to resolve wikilink by title: {error}"))?;
-        if by_title.is_some() {
-            return Ok(by_title);
-        }
-
-        let slug = slugify(base);
-        conn.query_row(
-            "SELECT slug, relative_path FROM notes WHERE slug = ?1 LIMIT 1",
-            params![slug],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
-        )
-        .optional()
-        .map_err(|error| format!("failed to resolve wikilink by slug: {error}"))
     }
 
     fn note_exists(&self, slug: &str) -> Result<bool, String> {
@@ -170,55 +107,6 @@ mod tests {
             .replace_from_index_with_embedder(&index, embedder.as_ref())
             .expect("index");
         cache
-    }
-
-    #[test]
-    fn wikilink_resolves_to_the_default_surface_on_a_title_collision() {
-        // `sources/Melatonin` sorts before `wiki/Melatonin` by relative_path, so
-        // the pre-fix `ORDER BY relative_path` returned the clipping. The fix
-        // orders by layer first (default surface before demoted).
-        let cache = build_layered_cache(&[
-            ("sources/.hatchdoor-layer", "sources"),
-            ("sources/Melatonin.md", "# Melatonin\n\nraw clipping"),
-            ("wiki/Melatonin.md", "# Melatonin\n\ncompiled page"),
-        ]);
-
-        let resolved = cache
-            .resolve_wikilink("Melatonin")
-            .expect("resolve")
-            .expect("a note resolves");
-        assert_eq!(
-            resolved.1, "wiki/Melatonin",
-            "[[Melatonin]] must resolve to the default-surface page, not the demoted clipping"
-        );
-    }
-
-    #[test]
-    fn wikilink_by_path_prefers_the_default_surface() {
-        // Exercise the by-path branch: a bare stem that matches two notes'
-        // normalized_relative_path... which cannot happen across folders, so use
-        // an explicit same-basename path to confirm ordering is layer-first.
-        let cache = build_layered_cache(&[
-            ("sources/.hatchdoor-layer", "sources"),
-            ("sources/Melatonin.md", "# Melatonin\n\nraw clipping"),
-            ("wiki/Melatonin.md", "# Melatonin\n\ncompiled page"),
-        ]);
-        // A demoted-only title still resolves (reachability preserved).
-        let cache_single = build_layered_cache(&[
-            ("sources/.hatchdoor-layer", "sources"),
-            ("sources/Ashwagandha.md", "# Ashwagandha\n\nraw clipping"),
-        ]);
-        let resolved = cache_single
-            .resolve_wikilink("Ashwagandha")
-            .expect("resolve")
-            .expect("demoted-only note still resolves");
-        assert_eq!(resolved.1, "sources/Ashwagandha");
-        // And the collision case still prefers default.
-        let resolved = cache
-            .resolve_wikilink("Melatonin")
-            .expect("resolve")
-            .expect("resolves");
-        assert_eq!(resolved.1, "wiki/Melatonin");
     }
 
     /// A default page linking a demoted clipping, which links back.

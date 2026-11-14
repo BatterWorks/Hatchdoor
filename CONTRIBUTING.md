@@ -39,7 +39,32 @@ npm run build
 
 Run `npm ci` in `frontend/` first on a fresh checkout or after the lockfile
 changes. While you work, run the individual commands for the side you are
-touching, or a focused `cargo test <module>`.
+touching, or a focused `cargo test <module>`. Run `just check` itself once,
+on the reviewed change, before you hand it off.
+
+Its first line names the mode it runs in, which
+`scripts/check-mode.mjs` picks from what the branch changed since its merge
+base on `development`, committed or not:
+
+- **docs-only** when every changed path is documentation: anything under
+  `docs/` except the bundled manual, anything under `demo-vaults/`, and
+  Markdown files at the repository root. It runs the first three commands
+  above and nothing else, in seconds.
+- **manual** when the rest of the changes are text edits to existing pages of
+  the bundled manual, `docs/user-vault`. The binary compiles those pages in,
+  and Rust tests read their text, search ranking included. This mode
+  adds those modules' tests and the frontend's help-link test to the script
+  checks, and skips the lints, the other tests and the frontend build. With a
+  warm build cache the tests take under a minute. The module list is
+  `MANUAL_RUST_TESTS` in `scripts/check-mode.mjs`. Its tests fail when a file
+  that names the manual is missing from that list.
+- **full** for anything else, including adding, deleting or renaming a
+  manual page. A branch with no change at all also runs in full.
+
+After a pass, `just check` remembers the tree it passed on in
+`.dev/check-pass.json`. When it runs again on the same content, it says so
+and stops at once. Any edit, committed or not, runs it again, and a failed run
+is never remembered. Deleting the file only costs a rerun.
 
 The offline benchmark harness (the `eval` and `index_microbench` binaries and
 the candle-backed embedders they sweep) sits behind the non-default `eval`
@@ -80,6 +105,46 @@ before the fix, and new behavior with tests that cover it.
 Do not commit real vault content, private eval queries, tokens, generated cache
 databases, or local model caches.
 
+## Install smoke test
+
+`just smoke-install` follows the README Quick Start the way a new user does,
+with rootless Podman, in a throwaway folder under `/tmp` (or
+`HATCHDOOR_SMOKE_TMPDIR`). It builds the image
+from your checkout with Docker, as the release does, loads it into Podman and
+runs it there. It copies `docker-compose.yml` and `.env.example`, expects the
+first start to stop and save a web token, adds the token to `.env`, starts
+again, picks the English-only search model, adds a Vault holding one note,
+turns on agent access and checks that one MCP search finds that note. Each
+step prints its name. A failure names the step, keeps the folder with the
+container's log and exits non-zero; a pass removes the container, its network
+and the folder.
+
+```bash
+just smoke-install                       # build from this checkout
+just smoke-install localhost/my-image:tag # an image already in Podman's store
+```
+
+Run it at release, where the judgment checklist asks for it, and whenever you
+change the README Quick Start, the deploy guide, `docker-compose.yml`,
+`.env.example`, the refused first start or the setup API. It is not part of
+`just check`: a cold image build takes about 20 minutes, a rebuild after a
+code change 3 to 4 minutes, and the Quick Start itself about 10 seconds. Run
+nothing else heavy alongside it.
+
+What it needs:
+
+- Docker to build the image, Podman with a working `podman compose` to run
+  it, plus `curl`, `jq`, `openssl` and `python3`.
+- A copy of the English-only model, `nomic-embed-text-v1.5`, in `models/` at
+  the repository root, where `just dev-start` keeps it once you have picked
+  that model. `HATCHDOOR_SMOKE_MODELS` points at another folder holding it. The
+  run never downloads the model; without a copy it says so and stops.
+
+It uses its own container name, Compose project and a free port, so it runs
+beside `just dev-start` or a real install. It keeps the image it builds,
+tagged `localhost/hatchdoor-smoke:latest` in Docker and in Podman, so the next
+build starts warm, and removes the one that tag held before.
+
 ## Documentation freshness
 
 `docs/user-vault/` is the canonical source of the user documentation. Before
@@ -93,7 +158,8 @@ It reports which user-facing surfaces the branch changed and which notes claim
 to document each one. The surfaces cover MCP tools, the HTTP API, settings,
 Git-backed Vaults, vault lifecycle, search and indexing, layers, attachments,
 Markdown, note mutations, security, startup, the Web UI, and
-deployment; the authoritative list is the table in the script. It exits
+deployment; the authoritative list is the table in the script. Changes to test
+files count toward no surface, so a branch that changes only tests passes. Otherwise it exits
 non-zero, because it cannot tell you whether a note still reads true; only
 reading it can.
 
@@ -205,6 +271,12 @@ When changing `just proto-new` or `just proto-serve`, run:
 node --test scripts/proto.test.mjs
 ```
 
+When changing a live-acceptance helper (`just mcp-call`, `just dev-note`, `just dev-wait`, `just dev-stop-backend`, `just dev-restart-backend`, `scripts/dev-browser.mjs`) or the `justfile` recipes that stop and start the dev server, run:
+
+```bash
+node --test scripts/dev-*.test.mjs scripts/mcp-call.test.mjs scripts/proto.test.mjs
+```
+
 ## Review standards
 
 [`CODING_STANDARDS.md`](CODING_STANDARDS.md) holds the rules a reviewer applies to a finished diff: the judgement calls no check can make. Anything a machine can enforce belongs in `just check` instead.
@@ -234,7 +306,9 @@ Do not open a public issue for a vulnerability. Follow the process in
 ## The local `vault/` directory
 
 `vault/` is the default vault path (`VAULT_PATH` defaults to `./vault`) and is
-gitignored — it is not committed. Hatchdoor neither creates nor fills it: create the folder yourself before pointing a Vault at it, and it stays as empty as you leave it.
+gitignored, so it is not committed. Hatchdoor neither creates nor fills it: create the folder yourself before pointing a Vault at it, and it stays as empty as you leave it.
+The backends `just dev-start` and `just prod-check` run use `.dev/vaults`
+instead, the dev fixture folder (see `AGENTS.md`).
 Everything else vault-shaped is gitignored too: `demo-vaults/` (read-only demo
 content — one folder per vault, e.g. `demo-vaults/para/`), `data/` (generated
 cache), and `.fastembed_cache/` (downloaded model weights).

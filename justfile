@@ -18,6 +18,12 @@ target_warn_gb := "20"
 # pid/log files. See scripts/dev-vaults.sh for the fixture profiles.
 export HATCHDOOR_VAULT_REGISTRY_PATH := justfile_directory() + "/" + dev_dir + "/state/vaults.json"
 
+# The dev backend's Vault mount (VAULT_PATH): the fixture folder, whatever
+# .env says, so a dev instance mirrors a deployment where every Vault sits
+# under the mount (#751). Set on the backend's own command line, not exported,
+# so the test recipes keep the default.
+dev_vault_mount := justfile_directory() + "/" + dev_dir + "/vaults"
+
 # Export the resolved values so recipes behave consistently even when the
 # invoking shell does not set Cargo paths. TMPDIR stays off small tmpfs mounts.
 export CARGO_TARGET_DIR := cargo_target_dir
@@ -53,9 +59,7 @@ dev-start profile="": _prepare-cargo _kill-stale
         fi
     fi
 
-    echo "starting backend (cargo run)..."
-    setsid cargo run > {{dev_dir}}/backend.log 2>&1 &
-    echo $! > {{dev_dir}}/backend.pid
+    {{just_executable()}} _start-backend
 
     echo "starting frontend (npm run dev)..."
     cd frontend
@@ -67,7 +71,7 @@ dev-start profile="": _prepare-cargo _kill-stale
     echo
     echo "backend log:  {{dev_dir}}/backend.log   (http://127.0.0.1:{{backend_port}}, compiling takes a bit)"
     echo "frontend log: {{dev_dir}}/frontend.log  (http://0.0.0.0:{{frontend_port}})"
-    echo "'just dev-status' to check, 'just dev-stop' to stop"
+    echo "'just dev-wait' returns once both answer, 'just dev-status' to check, 'just dev-stop' to stop"
 
 # Rebuild the dev Vault fixtures under .dev/vaults and rewrite the registry.
 # Profiles: clean (one healthy Vault), messy (healthy + pathological content +
@@ -86,6 +90,47 @@ dev-vaults-reset:
 # npm -> sh -> node child chain, not just the top PID).
 dev-stop: _kill-stale _stop-browser-token
     @echo "stopped"
+
+# Fails naming the half that did not answer, at once when that half is not
+# running at all. The time limit is in seconds (scripts/dev-wait.mjs).
+#
+# Wait until the backend's health endpoint and the frontend both answer.
+dev-wait seconds="600":
+    @node scripts/dev-wait.mjs --backend-port {{backend_port}} --frontend-port {{frontend_port}} --dev-dir "{{dev_dir}}" "{{seconds}}"
+
+# For a check of what the app shows while the backend is away. The frontend
+# keeps running, and `just dev-status` reports the backend as not running.
+#
+# Stop the backend alone; `just dev-restart-backend` brings it back.
+dev-stop-backend: (_stop-tracked "backend" backend_port)
+    @echo "backend stopped"
+
+# Through the same process-group handling as `dev-stop`, never a bare
+# `cargo run`. Returns once the backend's health endpoint answers.
+#
+# Stop the backend, start it again, and wait for it. The frontend stays up.
+dev-restart-backend: _require-dev-vaults _prepare-cargo (_stop-tracked "backend" backend_port)
+    {{just_executable()}} _start-backend
+    node scripts/dev-wait.mjs --only backend --backend-port {{backend_port}} --dev-dir "{{dev_dir}}"
+
+# Returns once the note is indexed, printing its slug and its address on the
+# dev frontend. <vault> is a fixture's folder (healthy, readonly), name or id.
+# Refuses a path that is already there; read-only Vaults included. Add
+# `--timeout <seconds>` for a Vault still building its first index
+# (scripts/dev-note.mjs).
+#
+# Place a test note in a dev fixture Vault: <vault> <file or -> [path in the Vault].
+[positional-arguments]
+dev-note *args:
+    @node scripts/dev-note.mjs --backend-port {{backend_port}} --frontend-port {{frontend_port}} --dev-dir "{{justfile_directory()}}/{{dev_dir}}" --registry "$HATCHDOOR_VAULT_REGISTRY_PATH" "$@"
+
+# Does the whole handshake and never prints the token. `just mcp-call -`
+# reads one `<tool> <json arguments>` a line and makes them all in one
+# session (scripts/mcp-call.mjs). Talks to 127.0.0.1 only.
+#
+# Call one MCP tool on the local dev server and print its result as JSON.
+mcp-call $tool $arguments="{}":
+    @node scripts/mcp-call.mjs --port {{backend_port}} "${tool}" "${arguments}"
 
 # Serves the web token on 127.0.0.1, to the dev frontend's pages only, so it
 # never passes through a tool call or a transcript. Stops by itself after 15
@@ -152,26 +197,61 @@ _prepare-cargo:
 
 # Kill whatever dev-start is tracking, plus anything else bound to our dev
 # ports even if it predates this system (e.g. a server started by hand).
-_kill-stale:
+_kill-stale: (_stop-tracked "backend" backend_port) (_stop-tracked "frontend" frontend_port)
+
+# One half: the whole process group of the tracked pid (catches vite's
+# npm -> sh -> node child chain, and the binary under `cargo run`), then
+# whatever else holds the port. TERM first; KILL only for what is still
+# there after five seconds. The pid file goes, so `dev-status` tells the truth.
+_stop-tracked name port:
     #!/usr/bin/env bash
     set -uo pipefail
-    for name in backend frontend; do
-        pidfile="{{dev_dir}}/${name}.pid"
-        if [ -f "$pidfile" ]; then
-            pid=$(cat "$pidfile")
-            if kill -0 "$pid" 2>/dev/null; then
-                echo "stopping tracked ${name} (pid $pid)"
-                kill -s TERM -- "-$pid" 2>/dev/null || kill -s TERM "$pid" 2>/dev/null || true
-                sleep 1
-                kill -0 "$pid" 2>/dev/null && { kill -s KILL -- "-$pid" 2>/dev/null || kill -s KILL "$pid" 2>/dev/null || true; }
+    pidfile="{{dev_dir}}/{{name}}.pid"
+    if [ -f "$pidfile" ]; then
+        pid=$(cat "$pidfile")
+        alive() { kill -0 -- "-$pid" 2>/dev/null || kill -0 "$pid" 2>/dev/null; }
+        if alive; then
+            echo "stopping tracked {{name}} (pid $pid)"
+            kill -s TERM -- "-$pid" 2>/dev/null || kill -s TERM "$pid" 2>/dev/null || true
+            for _ in $(seq 1 25); do
+                alive || break
+                sleep 0.2
+            done
+            if alive; then
+                echo "{{name}} ignored TERM for five seconds, killing it"
+                kill -s KILL -- "-$pid" 2>/dev/null || kill -s KILL "$pid" 2>/dev/null || true
             fi
-            rm -f "$pidfile"
         fi
+        rm -f "$pidfile"
+    fi
+    fuser -k -TERM {{port}}/tcp >/dev/null 2>&1 || true
+    for _ in $(seq 1 25); do
+        fuser {{port}}/tcp >/dev/null 2>&1 || break
+        sleep 0.2
     done
-    fuser -k -TERM {{backend_port}}/tcp 2>/dev/null || true
-    fuser -k -TERM {{frontend_port}}/tcp 2>/dev/null || true
-    sleep 1
-    true
+    if fuser {{port}}/tcp >/dev/null 2>&1; then
+        echo "something still holds port {{port}} after five seconds, killing it"
+        fuser -k -KILL {{port}}/tcp >/dev/null 2>&1 || true
+    fi
+
+# Before anything is stopped: a backend with no registry to read cannot
+# come back.
+_require-dev-vaults:
+    #!/usr/bin/env bash
+    if [ ! -f "$HATCHDOOR_VAULT_REGISTRY_PATH" ]; then
+        echo "error: there are no dev Vault fixtures yet; 'just dev-start' makes them and starts both halves" >&2
+        exit 1
+    fi
+
+# The backend half of `dev-start`, in its own process group and tracked by
+# pid, so `_stop-tracked` can stop all of it.
+_start-backend: _prepare-cargo
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mkdir -p {{dev_dir}}
+    echo "starting backend (cargo run)..."
+    VAULT_PATH="{{dev_vault_mount}}" setsid cargo run > {{dev_dir}}/backend.log 2>&1 &
+    echo $! > {{dev_dir}}/backend.pid
 
 # Check what's running and how big the build cache has grown.
 dev-status:
@@ -203,10 +283,33 @@ dev-clean: _prepare-cargo
 # backend tests once, and the frontend. Skips the tests that load real model
 # weights. See CONTRIBUTING.md.
 #
+# A branch that changed only documentation runs the script checks alone; one
+# that also edited manual pages adds the tests that read the manual. A tree
+# that already passed is not checked again. The first line names the mode
+# (scripts/check-mode.mjs).
+#
 # The test lines drop HATCHDOOR_VAULT_REGISTRY_PATH, which this file exports
 # for the dev server: the tests must see the deployed default, not .dev/.
-check: _check-scripts _check-static && _check-frontend
-    env -u HATCHDOOR_VAULT_REGISTRY_PATH cargo test --all --features eval
+check: _prepare-cargo
+    #!/usr/bin/env bash
+    set -euo pipefail
+    status=0
+    plan=$(node scripts/check-mode.mjs start) || status=$?
+    if [ "$status" -eq 10 ]; then exit 0; fi
+    if [ "$status" -ne 0 ]; then exit "$status"; fi
+    read -r mode tree <<<"$plan"
+    {{just_executable()}} _check-scripts
+    if [ "$mode" = full ]; then
+        {{just_executable()}} _check-static
+        env -u HATCHDOOR_VAULT_REGISTRY_PATH cargo test --all --features eval
+        {{just_executable()}} _check-frontend
+    elif [ "$mode" = manual ]; then
+        mapfile -t rust < <(node scripts/check-mode.mjs manual-tests rust)
+        mapfile -t front < <(node scripts/check-mode.mjs manual-tests frontend)
+        env -u HATCHDOOR_VAULT_REGISTRY_PATH cargo test --features eval --lib -- "${rust[@]}"
+        (cd frontend && npx vitest run "${front[@]}")
+    fi
+    node scripts/check-mode.mjs record "$mode" "$tree"
 
 # Everything `check` covers, plus the backend tests in the exact configuration
 # a deployment ships and the tests that load real model weights (the first run
@@ -259,12 +362,30 @@ release-prepare version:
     node scripts/release-prepare.mjs '{{version}}'
 
 # Run only after the maintainer approved the release title and notes in this
-# session. Needs HATCHDOOR_RELEASE_HOOK; re-run it to resume after a failure.
+# session. Needs HATCHDOOR_RELEASE_HOOK, exported or set in .release.env;
+# re-run it to resume after a failure.
 # See ADR-36.
 #
 # Publish a release: merge, tag, build images, publish, deploy.
 release-publish version:
     node scripts/release-publish.mjs '{{version}}'
+
+# Takes minutes, so it runs at release and on demand, never in `check`.
+# Without an image it builds localhost/hatchdoor-smoke:latest from this
+# checkout. See scripts/smoke-install.sh and CONTRIBUTING.md.
+#
+# Build with Docker, then follow the README Quick Start in rootless Podman.
+smoke-install image="": _prepare-cargo
+    scripts/smoke-install.sh {{ if image == "" { "" } else { quote(image) } }}
+
+# Needs the dev server up (`just dev-start`, then `just dev-wait`). Restarts
+# the backend once per write posture and again at the end. Takes minutes, so
+# it runs at release and on demand, never in `check`. See
+# docs/maintenance/mcp-conformance-run.md and scripts/conformance.mjs.
+#
+# Run the MCP conformance suite against the dev server and write the evidence.
+conformance:
+    node scripts/conformance.mjs --port {{backend_port}}
 
 # Build the real frontend bundle and serve it from the backend on one port -
 # exactly what production runs. Foreground; Ctrl+C to stop. No hot reload.
@@ -274,4 +395,4 @@ prod-check: _prepare-cargo
     echo "building frontend..."
     (cd frontend && npm run build)
     echo "starting backend in foreground (serves frontend/dist) - Ctrl+C to stop"
-    cargo run
+    VAULT_PATH="{{dev_vault_mount}}" cargo run

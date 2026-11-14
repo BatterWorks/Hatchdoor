@@ -139,6 +139,23 @@ To check that the connection worked, open **Settings** → **Agent access (MCP)*
 
 Continue to [[Search and change notes with your agent]] when that read-only test works. If the agent cannot connect, [[How to troubleshoot common problems#An agent can't connect over MCP]] matches the error it reports to its cause.
 
+## Optional: add a Hatchdoor skill
+
+When an agent connects, Hatchdoor tells it to read [[How to work in a Vault as an agent]] before its first change to a note. If yours skips it, or you want the reminder to load whenever a task mentions your notes, give it a skill: a small instruction file that agents such as Claude Code, Codex and Hermes load on their own when a task matches its description.
+
+```markdown
+---
+name: hatchdoor
+description: Work in my notes through Hatchdoor. Use whenever a task searches, reads or changes notes with the Hatchdoor MCP tools.
+---
+
+Before your first write to a Vault in a session, read Hatchdoor's agent guide on the instance you are connected to: call read_docs with page guides/how-to-work-in-a-vault-as-an-agent, then follow it.
+
+That manual matches the Hatchdoor version you are talking to. When it and what you remember about Hatchdoor disagree, the manual wins. For any other question about how Hatchdoor works, try search_docs and read_docs before your memory.
+```
+
+Save it as `SKILL.md` in a folder named `hatchdoor` inside your agent's skills folder. The skill holds no habits of its own, only the pointer, so it stays right when you upgrade Hatchdoor.
+
 ---
 
 Previous: [[Connect your first Vault]]

@@ -3,11 +3,13 @@ use std::fs;
 use std::io::Read;
 use std::path::Path;
 
-use crate::vault::LayerMap;
 use crate::vault::types::{NoteEntry, VaultIndex};
+use crate::vault::{BoundedReadError, LayerMap, open_without_blocking};
 
 use super::assets::{asset_reference_rewrite_plan, referenced_assets};
-use super::fs_ops::{MutationJournal, atomic_write_bytes};
+use super::canvas::{SkippedCanvas, canvas_rewrite_plan, split_rewritten};
+use super::fs_ops::{MutationJournal, atomic_create_bytes_with_before_commit, atomic_write_bytes};
+use super::intent::IntentLog;
 use super::paths::{
     create_parent_dir_inside_root, ensure_existing_path_inside_root,
     ensure_movable_attachment_path, ensure_uploadable_attachment_path,
@@ -18,23 +20,24 @@ use super::paths::{
 use super::rewrites::refuse_unrewritable;
 use super::types::{AttachmentInfo, AttachmentOutcome, MutationPhase, WriteError};
 
+/// The existing attachments `content`, the text of the note `entry` names,
+/// references. The caller reads the note, so it decides the bound (#636).
 pub fn list_note_attachments(
     vault_root: &Path,
     layers: &LayerMap,
     entry: &NoteEntry,
+    content: &str,
 ) -> Result<Vec<AttachmentInfo>, WriteError> {
-    let content = fs::read_to_string(&entry.path).map_err(|error| {
-        WriteError::Io(format!(
-            "failed to read note '{}' for attachments: {error}",
-            entry.relative_path
-        ))
-    })?;
     let note_dir = entry.path.parent().unwrap_or(vault_root);
     let mut attachments = Vec::new();
     let mut seen = HashSet::new();
-    for relative_asset in referenced_assets(&content) {
+    for relative_asset in referenced_assets(content) {
         let path = note_dir.join(relative_asset);
-        if !path.exists() || !path.is_file() {
+        // The report below opens only a regular file (#736), so a reference
+        // to a symbolic link, a FIFO or a folder is passed over, not refused.
+        // One swapped for such a thing between here and the report fails the
+        // listing as a conflict, which a retry answers.
+        if !fs::symlink_metadata(&path).is_ok_and(|metadata| metadata.is_file()) {
             continue;
         }
         ensure_existing_path_inside_root(vault_root, &path)?;
@@ -55,6 +58,28 @@ pub fn import_attachment_bytes(
     max_bytes: u64,
     overwrite: bool,
 ) -> Result<AttachmentOutcome, WriteError> {
+    import_attachment_bytes_with_hook(
+        vault_root,
+        target_relative_path,
+        bytes,
+        max_bytes,
+        overwrite,
+        || {},
+    )
+}
+
+/// The import, with a hook that runs after the existence check and before
+/// the commit, where a test stands in for Obsidian or Syncthing creating the
+/// file. Without `overwrite` it fires once the bytes are prepared beside the
+/// target, the narrowest form of that window.
+fn import_attachment_bytes_with_hook(
+    vault_root: &Path,
+    target_relative_path: &str,
+    bytes: &[u8],
+    max_bytes: u64,
+    overwrite: bool,
+    before_commit: impl FnOnce(),
+) -> Result<AttachmentOutcome, WriteError> {
     let target_path = resolve_new_attachment_path(vault_root, target_relative_path)?;
     ensure_uploadable_attachment_path(&target_path)?;
     create_parent_dir_inside_root(vault_root, &target_path, "attachment")?;
@@ -72,7 +97,20 @@ pub fn import_attachment_bytes(
     // behind after the response reports an error.
     let layers = LayerMap::collect(vault_root).map_err(WriteError::Io)?;
 
-    atomic_write_bytes(&target_path, bytes)?;
+    if overwrite {
+        before_commit();
+        atomic_write_bytes(&target_path, bytes)?;
+    } else {
+        // The check above is a fast answer only. A file created at this
+        // name since then, by anything outside Hatchdoor, is refused at the
+        // commit itself rather than replaced, as `create_note` does (#630).
+        atomic_create_bytes_with_before_commit(&target_path, bytes, before_commit).map_err(
+            |error| match error {
+                WriteError::Conflict(_) => already_exists(target_relative_path),
+                other => other,
+            },
+        )?;
+    }
 
     // No caller-supplied index here (imports do not rebuild one), so use the
     // marker snapshot collected before the write to report the new asset's layer.
@@ -106,12 +144,16 @@ fn ensure_import_target_free(
     overwrite: bool,
 ) -> Result<(), WriteError> {
     if target_path.exists() && !overwrite {
-        return Err(WriteError::Conflict(format!(
-            "Attachment already exists: {}",
-            normalize_attachment_relative_path(target_relative_path)?
-        )));
+        return Err(already_exists(target_relative_path));
     }
     Ok(())
+}
+
+fn already_exists(target_relative_path: &str) -> WriteError {
+    match normalize_attachment_relative_path(target_relative_path) {
+        Ok(normalized) => WriteError::Conflict(format!("Attachment already exists: {normalized}")),
+        Err(error) => error,
+    }
 }
 
 pub fn move_attachment(
@@ -119,12 +161,14 @@ pub fn move_attachment(
     index: &VaultIndex,
     source_relative_path: &str,
     target_relative_path: &str,
+    intent_log: Option<&IntentLog>,
 ) -> Result<AttachmentOutcome, WriteError> {
     move_attachment_with_hook(
         vault_root,
         index,
         source_relative_path,
         target_relative_path,
+        intent_log,
         |_| Ok(()),
     )
 }
@@ -134,6 +178,7 @@ fn move_attachment_with_hook(
     index: &VaultIndex,
     source_relative_path: &str,
     target_relative_path: &str,
+    intent_log: Option<&IntentLog>,
     after_phase: impl FnMut(MutationPhase) -> Result<(), WriteError>,
 ) -> Result<AttachmentOutcome, WriteError> {
     let source_path = resolve_existing_attachment_path(vault_root, source_relative_path)?;
@@ -144,6 +189,7 @@ fn move_attachment_with_hook(
         &source_path,
         &target_path,
         None,
+        intent_log,
         after_phase,
     )
 }
@@ -153,19 +199,27 @@ pub fn rename_attachment(
     index: &VaultIndex,
     source_relative_path: &str,
     new_filename: &str,
+    intent_log: Option<&IntentLog>,
 ) -> Result<AttachmentOutcome, WriteError> {
     let source_path = resolve_existing_attachment_path(vault_root, source_relative_path)?;
     let filename = normalize_staged_filename(new_filename)?;
     let target_path = source_path.parent().unwrap_or(vault_root).join(filename);
-    move_attachment_by_paths_with_hook(vault_root, index, &source_path, &target_path, None, |_| {
-        Ok(())
-    })
+    move_attachment_by_paths_with_hook(
+        vault_root,
+        index,
+        &source_path,
+        &target_path,
+        None,
+        intent_log,
+        |_| Ok(()),
+    )
 }
 
 pub fn delete_attachment(
     vault_root: &Path,
     index: &VaultIndex,
     source_relative_path: &str,
+    intent_log: Option<&IntentLog>,
 ) -> Result<AttachmentOutcome, WriteError> {
     let source_path = resolve_existing_attachment_path(vault_root, source_relative_path)?;
     // Checked before the trash path is derived from it, so a refusal never
@@ -181,6 +235,7 @@ pub fn delete_attachment(
         &source_path,
         &trash_path,
         Some(trash_relative),
+        intent_log,
         |_| Ok(()),
     )
 }
@@ -191,6 +246,7 @@ fn move_attachment_by_paths_with_hook(
     source_path: &Path,
     target_path: &Path,
     trashed_path: Option<String>,
+    intent_log: Option<&IntentLog>,
     mut after_phase: impl FnMut(MutationPhase) -> Result<(), WriteError>,
 ) -> Result<AttachmentOutcome, WriteError> {
     if target_path.exists() {
@@ -207,7 +263,7 @@ fn move_attachment_by_paths_with_hook(
     ensure_movable_attachment_path(vault_root, source_path)?;
     ensure_movable_attachment_path(vault_root, target_path)?;
     let mut unrewritable = Vec::new();
-    let rewrites = asset_reference_rewrite_plan(
+    let mut rewrites = asset_reference_rewrite_plan(
         vault_root,
         index,
         "",
@@ -217,8 +273,23 @@ fn move_attachment_by_paths_with_hook(
         &mut unrewritable,
     );
     refuse_unrewritable(unrewritable)?;
+    // A move or rename repairs the canvases that name the attachment. A
+    // delete, the one caller with a trash path, leaves them as written
+    // (ADR-53).
+    let mut cleanup_warning = None;
+    if trashed_path.is_none() {
+        let plan = canvas_rewrite_plan(vault_root, index, &[(source_path, target_path)]);
+        if !plan.skipped.is_empty() {
+            let warnings = plan.skipped.iter().map(SkippedCanvas::warning);
+            cleanup_warning = Some(warnings.collect::<Vec<_>>().join(". "));
+        }
+        rewrites.extend(plan.rewrites);
+    }
     create_parent_dir_inside_root(vault_root, target_path, "attachment")?;
-    let mut journal = MutationJournal::new(vault_root);
+    let mut journal = MutationJournal::new(vault_root, intent_log);
+    if let Err(error) = journal.begin("move attachment", &[(source_path, target_path)], &rewrites) {
+        return Err(journal.rollback(error));
+    }
     if let Err(error) = journal.move_file(MutationPhase::Asset, source_path, target_path) {
         return Err(journal.rollback(error));
     }
@@ -234,19 +305,21 @@ fn move_attachment_by_paths_with_hook(
     if had_rewrites && let Err(error) = after_phase(MutationPhase::Rewrite) {
         return Err(journal.rollback(error));
     }
-    let rewritten_notes = rewritten.len();
+    let (mut affected_paths, rewritten_canvases) = split_rewritten(rewritten);
+    let rewritten_notes = affected_paths.len();
+    affected_paths.extend(rewritten_canvases);
     let attachment = match attachment_info(vault_root, target_path, &index.layers) {
         Ok(attachment) => attachment,
         Err(error) => return Err(journal.rollback(error)),
     };
-    let mut affected_paths = rewritten;
+    journal.finish();
     affected_paths.push(source_path.to_path_buf());
     affected_paths.push(target_path.to_path_buf());
     Ok(AttachmentOutcome {
         attachment,
         rewritten_notes,
         trashed_path,
-        cleanup_warning: None,
+        cleanup_warning,
         affected_paths,
     })
 }
@@ -264,6 +337,7 @@ pub(super) fn move_attachment_with_failure(
         index,
         source_relative_path,
         target_relative_path,
+        None,
         after_phase,
     )
 }
@@ -276,7 +350,17 @@ fn attachment_info(
     let relative_path = vault_relative_file_path(vault_root, path)?.ok_or_else(|| {
         WriteError::InvalidInput("attachment path cannot escape the vault".to_string())
     })?;
-    let (size_bytes, content_hash) = size_and_hash(path)?;
+    let (size_bytes, content_hash) = size_and_hash(path).map_err(|error| match error {
+        // The caller found a regular file here, so something swapped it
+        // since: a move or rename rolls back, as on any failure after it.
+        BoundedReadError::NotRegular => WriteError::Conflict(format!(
+            "attachment '{relative_path}' changed while it was read: it is no longer a regular file"
+        )),
+        other => WriteError::Io(format!(
+            "failed to read attachment '{}': {other}",
+            path.display()
+        )),
+    })?;
     // An asset's layer is its containing folder's layer — the same longest-prefix
     // resolution the index uses for notes. Reported, never filtered on: an
     // embedded image in a demoted note must stay fetchable.
@@ -296,23 +380,17 @@ fn attachment_info(
 /// recordings would otherwise pull all of them into memory at once. The hash is
 /// the same value the whole-buffer version produced: FNV-1a folds byte by byte,
 /// so where the chunk boundaries fall makes no difference.
-fn size_and_hash(path: &Path) -> Result<(u64, String), WriteError> {
+fn size_and_hash(path: &Path) -> Result<(u64, String), BoundedReadError> {
     const CHUNK_BYTES: usize = 64 * 1024;
     const FNV_OFFSET: u64 = 0xcbf29ce484222325;
     const FNV_PRIME: u64 = 0x100000001b3;
 
-    let read_error = |error: std::io::Error| {
-        WriteError::Io(format!(
-            "failed to read attachment '{}': {error}",
-            path.display()
-        ))
-    };
-    let mut file = fs::File::open(path).map_err(read_error)?;
+    let mut file = open_regular_attachment(path)?;
     let mut buffer = vec![0u8; CHUNK_BYTES];
     let mut size: u64 = 0;
     let mut hash = FNV_OFFSET;
     loop {
-        let read = file.read(&mut buffer).map_err(read_error)?;
+        let read = file.read(&mut buffer)?;
         if read == 0 {
             break;
         }
@@ -325,10 +403,54 @@ fn size_and_hash(path: &Path) -> Result<(u64, String), WriteError> {
     Ok((size, format!("fnv1a64:{hash:016x}")))
 }
 
+/// Opens the attachment at `path` without following a final symbolic link
+/// and without waiting for a FIFO's writer, and refuses anything that is not
+/// a regular file before a byte is read (#736). A move or rename reports the
+/// attachment after its rewrites and before its journal finishes, so a sync
+/// tool that swaps the file for a FIFO there would otherwise hold the Vault's
+/// mutation guard until a writer appeared, and a device behind a swapped-in
+/// link would be read for ever. Attachments have no size bound, so once the
+/// handle is known to be a regular file the non-blocking flag is cleared: a
+/// network filesystem that honours it would otherwise fail a long read with
+/// `EAGAIN` part way through.
+fn open_regular_attachment(path: &Path) -> Result<fs::File, BoundedReadError> {
+    use std::os::fd::AsRawFd;
+
+    let file = open_without_blocking(path)?;
+    if !file.metadata()?.file_type().is_file() {
+        return Err(BoundedReadError::NotRegular);
+    }
+    // SAFETY: `file` owns an open descriptor for the length of both calls.
+    let flags = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETFL) };
+    if flags < 0
+        || unsafe { libc::fcntl(file.as_raw_fd(), libc::F_SETFL, flags & !libc::O_NONBLOCK) } < 0
+    {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    Ok(file)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn the_attachment_report_refuses_a_fifo_and_a_symbolic_link_without_blocking() {
+        let vault = tempdir().expect("vault");
+        let fifo = vault.path().join("pipe.png");
+        crate::vault::make_fifo(&fifo);
+        let link = vault.path().join("link.png");
+        std::os::unix::fs::symlink("/dev/zero", &link).expect("link");
+
+        for path in [&fifo, &link] {
+            let error = size_and_hash(path).expect_err("not a regular file");
+            assert!(
+                matches!(error, BoundedReadError::NotRegular),
+                "expected a refusal, got {error:?}"
+            );
+        }
+    }
 
     #[test]
     fn import_attachment_rejects_a_malformed_marker_before_writing() {
@@ -346,5 +468,56 @@ mod tests {
             !vault.path().join(target).exists(),
             "a failed import must not leave an attachment on disk"
         );
+    }
+
+    /// #630: the import checked the name was free, then committed with a
+    /// plain rename, so a file Obsidian or Syncthing created in between was
+    /// silently replaced.
+    #[test]
+    fn an_import_refuses_a_file_created_after_its_existence_check() {
+        let vault = tempdir().expect("vault");
+        let target = vault.path().join("image.png");
+
+        let error = import_attachment_bytes_with_hook(
+            vault.path(),
+            "image.png",
+            b"imported",
+            1024,
+            false,
+            || fs::write(&target, b"synced meanwhile").expect("racing file"),
+        )
+        .expect_err("a file that appeared after the check must not be replaced");
+
+        assert!(
+            matches!(&error, WriteError::Conflict(message) if message == "Attachment already exists: image.png"),
+            "got {error:?}"
+        );
+        assert_eq!(fs::read(&target).unwrap(), b"synced meanwhile");
+        let leftovers: Vec<_> = fs::read_dir(vault.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().starts_with('.'))
+            .collect();
+        assert!(leftovers.is_empty(), "no sidecar may remain: {leftovers:?}");
+    }
+
+    #[test]
+    fn an_overwriting_import_onto_a_folder_is_refused_without_a_sidecar() {
+        let vault = tempdir().expect("vault");
+        fs::create_dir(vault.path().join("trap.png")).expect("folder");
+
+        let error = import_attachment_bytes(vault.path(), "trap.png", b"image", 1024, true)
+            .expect_err("a folder is not an attachment to replace");
+
+        assert!(
+            matches!(error, WriteError::InvalidInput(_)),
+            "got {error:?}"
+        );
+        let names: Vec<_> = fs::read_dir(vault.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name())
+            .collect();
+        assert_eq!(names, vec![std::ffi::OsString::from("trap.png")]);
     }
 }

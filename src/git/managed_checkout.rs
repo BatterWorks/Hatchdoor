@@ -79,7 +79,15 @@ pub enum ManagedCheckoutError {
     /// `CloneFailed` so a caller can wait for a credential change or manual
     /// retry instead of retrying blindly on a schedule.
     AuthenticationFailed,
+    /// The remote has no branch by the configured name. Found only after the
+    /// clone fetched, so it is reported as a configuration problem rather
+    /// than a transient remote failure, which would download the whole
+    /// repository again on every backoff (#638).
+    BranchNotFound,
     ValidationFailed,
+    /// The checkout could not be moved into, or back out of, the Vault's
+    /// `retired-checkouts/` folder (#639). The string says why.
+    SetAsideFailed(String),
     /// The checkout could not be installed at its final name. The string says
     /// why, because the first report of this reached an operator as a bare
     /// "install failed" with the errno thrown away, and the cause was a
@@ -103,6 +111,12 @@ impl std::fmt::Display for ManagedCheckoutError {
                 "managed checkout could not be installed: {reason}"
             );
         }
+        if let Self::SetAsideFailed(reason) = self {
+            return write!(
+                formatter,
+                "managed checkout could not be set aside: {reason}"
+            );
+        }
         let message = match self {
             Self::StateDirectoryUnavailable => "managed checkout state directory is unavailable",
             Self::OwnershipUnavailable => "managed checkout is already owned by another process",
@@ -110,8 +124,11 @@ impl std::fmt::Display for ManagedCheckoutError {
             Self::DestinationInvalid => "managed checkout destination is invalid",
             Self::CloneFailed => "managed checkout clone failed",
             Self::AuthenticationFailed => "managed checkout authentication failed",
+            Self::BranchNotFound => "managed checkout branch was not found on the remote",
             Self::ValidationFailed => "managed checkout validation failed",
-            Self::AtomicInstallFailed(_) => unreachable!("handled above"),
+            Self::AtomicInstallFailed(_) | Self::SetAsideFailed(_) => {
+                unreachable!("handled above")
+            }
         };
         formatter.write_str(message)
     }
@@ -201,6 +218,135 @@ pub fn reuse_existing_checkout(
     }
 }
 
+/// The checkout this Vault has on disk, validated against what its receipt
+/// says it was cloned from rather than against the Vault's current
+/// definition. Used to set a checkout aside when that definition's identity
+/// changes (#639): the definition may already name another remote, and an
+/// older change may have left the two apart.
+///
+/// `Ok(None)` means there is no checkout on disk. A checkout that is there
+/// but does not validate against its receipt is `ValidationFailed`.
+pub fn reuse_recorded_checkout(
+    lease: &ManagedCheckoutLease,
+    state_directory: &Path,
+    vault_id: VaultId,
+) -> Result<Option<(ManagedCheckout, String)>, ManagedCheckoutError> {
+    let destination = lease.vault_directory.join("repository");
+    match fs::symlink_metadata(&destination) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+            return Err(ManagedCheckoutError::DestinationInvalid);
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err(ManagedCheckoutError::DestinationInvalid),
+    }
+    let receipt = read_receipt(&lease.vault_directory)?;
+    let request = ManagedCheckoutRequest {
+        state_directory: state_directory.to_path_buf(),
+        vault_id,
+        repository_url: receipt.repository_url.clone(),
+        branch: Some(receipt.resolved_branch.clone()),
+        vault_subdirectory: receipt.vault_subdirectory.clone(),
+        credentials: None,
+    };
+    let checkout = reuse_checkout(&destination, &lease.vault_directory, &request)?;
+    Ok(Some((checkout, receipt.repository_url)))
+}
+
+/// The folder, under the Vault's own state directory, that holds checkouts
+/// set aside by an identity change. Nothing ever deletes from it.
+const RETIRED_DIRECTORY: &str = "retired-checkouts";
+
+/// Move this Vault's checkout and its receipt into a new, timestamped folder
+/// under `retired-checkouts/`, so the next Git turn clones afresh (#639).
+/// Returns that folder, or `None` when there was no checkout to move.
+///
+/// Moves, never copies or deletes: every file the checkout held, committed
+/// or not, is still there afterwards. The caller holds the Vault's lease, so
+/// no Git turn can be using the checkout meanwhile.
+pub fn set_aside_checkout(
+    lease: &ManagedCheckoutLease,
+) -> Result<Option<PathBuf>, ManagedCheckoutError> {
+    let set_aside_failed = |stage: &str, error: std::io::Error| {
+        ManagedCheckoutError::SetAsideFailed(format!("{stage}: {error}"))
+    };
+    let repository = lease.vault_directory.join("repository");
+    match fs::symlink_metadata(&repository) {
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(set_aside_failed("inspect", error)),
+    }
+    let retired = ensure_directory_inside(
+        &lease.vault_directory,
+        &lease.vault_directory.join(RETIRED_DIRECTORY),
+    )?;
+    let stamp = chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
+    let mut archive = None;
+    for attempt in 1..=100 {
+        let name = if attempt == 1 {
+            stamp.clone()
+        } else {
+            format!("{stamp}-{attempt}")
+        };
+        let candidate = retired.join(name);
+        match fs::create_dir(&candidate) {
+            Ok(()) => {
+                archive = Some(candidate);
+                break;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(set_aside_failed("create the archive folder", error)),
+        }
+    }
+    let archive = archive.ok_or_else(|| {
+        ManagedCheckoutError::SetAsideFailed("no free archive folder name".to_string())
+    })?;
+    fs::rename(&repository, archive.join("repository"))
+        .map_err(|error| set_aside_failed("move the checkout", error))?;
+    // The receipt describes the checkout just moved, so it goes with it. A
+    // receipt left behind is harmless: with no checkout beside it, the next
+    // turn clones and writes a new one. So a failure here is logged rather
+    // than reported, once the checkout itself has moved.
+    match fs::rename(
+        lease.vault_directory.join(RECEIPT_FILE),
+        archive.join(RECEIPT_FILE),
+    ) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            tracing::warn!(%error, "could not move a set-aside checkout's receipt with it");
+        }
+    }
+    Ok(Some(archive))
+}
+
+/// Put a checkout [`set_aside_checkout`] moved back where it was, for an
+/// identity change that was then not saved (#639). Refuses rather than
+/// overwrite a checkout that appeared meanwhile; the archive then stays as
+/// it is, which loses nothing.
+pub fn restore_set_aside_checkout(
+    lease: &ManagedCheckoutLease,
+    archive: &Path,
+) -> Result<(), ManagedCheckoutError> {
+    let repository = lease.vault_directory.join("repository");
+    if fs::symlink_metadata(&repository).is_ok() {
+        return Err(ManagedCheckoutError::SetAsideFailed(
+            "a checkout already exists where the old one would go back".to_string(),
+        ));
+    }
+    fs::rename(archive.join("repository"), &repository).map_err(|error| {
+        ManagedCheckoutError::SetAsideFailed(format!("move the checkout back: {error}"))
+    })?;
+    if let Err(error) = fs::rename(
+        archive.join(RECEIPT_FILE),
+        lease.vault_directory.join(RECEIPT_FILE),
+    ) {
+        tracing::warn!(%error, "could not move a restored checkout's receipt back with it");
+    }
+    let _ = fs::remove_dir(archive);
+    Ok(())
+}
+
 fn acquire_new_checkout(
     destination: &Path,
     vault_directory: &Path,
@@ -286,27 +432,42 @@ fn clone_repository(
         clone.branch(branch);
     }
     let mut fetch_options = git2::FetchOptions::new();
-    if let Some(credentials) = &request.credentials {
-        let credentials = credentials.clone();
-        let mut callbacks = git2::RemoteCallbacks::new();
-        callbacks.credentials(move |_url, _username_from_url, _allowed| {
-            git2::Cred::userpass_plaintext(&credentials.username, &credentials.token)
-        });
-        fetch_options.remote_callbacks(callbacks);
-    }
+    let mut callbacks = git2::RemoteCallbacks::new();
+    let offers = request.credentials.as_ref().map(|credentials| {
+        super::offer_credentials_once(
+            &mut callbacks,
+            &request.repository_url,
+            credentials.username.clone(),
+            credentials.token.clone(),
+        )
+    });
+    fetch_options.remote_callbacks(callbacks);
     clone.fetch_options(fetch_options);
     clone
         .clone(&request.repository_url, temporary)
-        .map_err(classify_remote_error)?;
+        .map_err(|error| classify_clone_error(&error, offers.as_ref(), request.branch.is_some()))?;
     Ok(())
 }
 
-/// Distinguish a credential rejection from any other remote failure, so a
-/// caller can wait for a credential change or manual retry rather than
-/// backing off and retrying blindly.
-fn classify_remote_error(error: git2::Error) -> ManagedCheckoutError {
-    if error.code() == git2::ErrorCode::Auth {
+/// Distinguish a refused sign-in and a missing branch from any other remote
+/// failure, so a caller waits for a configuration change instead of backing
+/// off and retrying blindly.
+///
+/// A clone asked for a branch the remote does not have fails looking up
+/// `refs/remotes/origin/<branch>` once the fetch is done: `NotFound` in the
+/// reference class. Nothing else a clone does produces that pair.
+fn classify_clone_error(
+    error: &git2::Error,
+    offers: Option<&super::CredentialOffers>,
+    branch_requested: bool,
+) -> ManagedCheckoutError {
+    if super::sign_in_rejected(error, offers) {
         ManagedCheckoutError::AuthenticationFailed
+    } else if branch_requested
+        && error.code() == git2::ErrorCode::NotFound
+        && error.class() == git2::ErrorClass::Reference
+    {
+        ManagedCheckoutError::BranchNotFound
     } else {
         ManagedCheckoutError::CloneFailed
     }
@@ -1124,27 +1285,114 @@ mod tests {
         assert!(moved.join("note.md").is_file());
     }
 
-    #[test]
-    fn remote_errors_are_classified_as_authentication_or_generic_clone_failure() {
-        let auth_error = git2::Error::new(
-            git2::ErrorCode::Auth,
-            git2::ErrorClass::Http,
-            "authentication required",
-        );
-        assert_eq!(
-            classify_remote_error(auth_error),
-            ManagedCheckoutError::AuthenticationFailed
-        );
+    /// Clone `url` into a fresh temporary directory with a fake token, the
+    /// way a managed Vault's first turn does.
+    fn clone_with_token(url: &str, branch: Option<&str>) -> Result<(), ManagedCheckoutError> {
+        let root = tempdir().expect("temporary clone");
+        let request = ManagedCheckoutRequest {
+            state_directory: root.path().to_path_buf(),
+            vault_id: VaultId::generate().expect("Vault ID"),
+            repository_url: url.to_string(),
+            branch: branch.map(str::to_owned),
+            vault_subdirectory: None,
+            credentials: Some(ManagedHttpsCredentials {
+                username: "hatchdoor".into(),
+                token: "fake-token".into(),
+            }),
+        };
+        clone_repository(&request, &root.path().join("clone"))
+    }
 
-        let network_error = git2::Error::new(
-            git2::ErrorCode::GenericError,
-            git2::ErrorClass::Net,
-            "could not resolve host",
+    #[test]
+    fn a_rejected_token_is_an_authentication_failure_offered_once() {
+        let server =
+            super::super::test_http::Server::start(|_| super::super::test_http::unauthorized());
+
+        let error = clone_with_token(&format!("{}/notes.git", server.base), None)
+            .expect_err("a server refusing every request cannot be cloned");
+
+        assert_eq!(error, ManagedCheckoutError::AuthenticationFailed);
+        let with_token = server
+            .requests()
+            .iter()
+            .filter(|request| request.authorization.is_some())
+            .count();
+        assert_eq!(with_token, 1, "{:?}", server.requests());
+    }
+
+    #[test]
+    fn a_403_after_the_token_went_out_is_an_authentication_failure() {
+        let server = super::super::test_http::Server::start(|request| {
+            if request.authorization.is_some() {
+                super::super::test_http::respond("403 Forbidden", &[], b"")
+            } else {
+                super::super::test_http::unauthorized()
+            }
+        });
+
+        let error = clone_with_token(&format!("{}/notes.git", server.base), None)
+            .expect_err("a forbidden clone fails");
+
+        assert_eq!(error, ManagedCheckoutError::AuthenticationFailed);
+    }
+
+    #[test]
+    fn a_redirect_to_another_host_never_receives_the_token() {
+        let elsewhere =
+            super::super::test_http::Server::start(|_| super::super::test_http::unauthorized());
+        let target = format!(
+            "{}/notes.git/info/refs?service=git-upload-pack",
+            elsewhere.base
         );
-        assert_eq!(
-            classify_remote_error(network_error),
-            ManagedCheckoutError::CloneFailed
+        let configured = super::super::test_http::Server::start(move |_| {
+            super::super::test_http::respond("302 Found", &[("Location", target.as_str())], b"")
+        });
+
+        let error = clone_with_token(&format!("{}/notes.git", configured.base), None)
+            .expect_err("the redirect target refuses every request");
+
+        assert_eq!(error, ManagedCheckoutError::AuthenticationFailed);
+        assert!(
+            !elsewhere.requests().is_empty(),
+            "the redirect was followed"
         );
+        assert!(
+            elsewhere
+                .requests()
+                .iter()
+                .all(|request| request.authorization.is_none()),
+            "{:?}",
+            elsewhere.requests()
+        );
+    }
+
+    #[test]
+    fn a_token_the_remote_accepts_clones_with_one_offer() {
+        let root = tempdir().expect("temporary remote");
+        remote_with_default_branch(root.path(), "trunk");
+        let server = super::super::test_http::Server::start(super::super::test_http::git_backend(
+            root.path().to_path_buf(),
+            super::super::test_http::basic("hatchdoor", "fake-token"),
+        ));
+
+        clone_with_token(&format!("{}/remote.git", server.base), None)
+            .expect("a clone with an accepted token");
+    }
+
+    #[test]
+    fn a_branch_the_remote_lacks_is_reported_as_such() {
+        let root = tempdir().expect("temporary state");
+        let remote = remote_with_default_branch(root.path(), "trunk");
+        let vault_id = VaultId::generate().expect("Vault ID");
+        let state_directory = root.path().join("state");
+        fs::create_dir(&state_directory).expect("state directory");
+        let mut request = request(state_directory.clone(), vault_id, &remote);
+        request.branch = Some("mian".into());
+        let lease = ManagedCheckoutLease::acquire(state_directory, vault_id).expect("lease");
+
+        let error = acquire_or_reuse(&lease, &request).expect_err("no such branch");
+
+        assert_eq!(error, ManagedCheckoutError::BranchNotFound);
     }
 
     #[test]

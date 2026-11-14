@@ -4,24 +4,38 @@ tags: [type/explanation, topic/search]
 
 # How indexing and search work
 
-Your Markdown files are the real copy of your notes. To search them quickly, Hatchdoor reads them into one SQLite file, the index, and everything it searches, lists and links comes from there. This page explains what the index is, how it keeps up with your notes, and how the two search modes differ.
+Your Markdown files are the real copy of your notes. To search and list them quickly, Hatchdoor reads them into one SQLite file, the index. Reading a note still reads its file directly; links are read from the files and kept until Hatchdoor notices a change. This page explains what the index is, how it keeps up with your notes, and how the two search modes differ.
 
 ## The index is disposable, on purpose
 
 The index is built from the Vault's Markdown and holds nothing that is not in your files. Delete it and Hatchdoor rebuilds it from the files on disk, with nothing lost. That is why [[Understand where your data lives]] says to back up the Vault folder and not the cache folder.
 
+Hatchdoor checks the cache for physical damage when it opens it. Damage found then, or during a later cache operation, moves the cache and any journal files to `.corrupt-...` files beside it and rebuilds every active Vault from Markdown. Search and indexed listings may be unavailable until their Vault's index is rebuilt. The note files are not changed. If recovery fails, the Vault's error says why and Hatchdoor keeps retrying.
+
+## Which files are notes
+
+A note is a file whose name ends in `.md`, in any case: `Report.md`, `Report.MD` and `Report.Md` are all notes, to the reads and the write tools alike. Everything else is an attachment or ignored. A name that differs from an existing note only in the case of its extension names that note: creating `Report.MD` next to `Report.md` is refused as a conflict, and overwriting it replaces `Report.md`. If a folder already holds both, Hatchdoor lists the `.md` one and logs the other.
+
+Some folders are never content. Hatchdoor ignores `.git/`, `.obsidian/`, `.trash/` and `.hatchdoor-trash/`, and the files `.DS_Store`, `*.tmp` and `*.sync-conflict-*`, before it applies a Vault's own `exclude_patterns`. A pattern starting with `!` brings one back, as in a `.gitignore` file: `!.git/` lists a Markdown file kept inside the repository folder. Patterns match case as written, except a note's `.md` extension: `*.excalidraw.md` also leaves out `Drawing.excalidraw.MD`.
+
+Odd files cost only themselves:
+
+- A folder Hatchdoor may not open, such as a `lost+found` owned by another user, is skipped and logged. The rest of the Vault still reads, writes and indexes. Only a Vault folder that cannot be opened at all takes the Vault offline. Any other read error, such as a network share failing for a moment, still fails that indexing pass, which is retried, so notes do not drop out of search while the share recovers.
+- A file or folder whose name is not valid UTF-8 has no name Hatchdoor can address, so it is left out and logged. The write tools refuse such names too.
+- A note whose bytes are not valid UTF-8, such as a Latin-1 export from an older tool, stays listed in the tree, search, the graph and the statistics. Search and `find_text` read it with the bad bytes replaced. Opening it, reading its frontmatter, outline or sections, or downloading it is refused with `note_unreadable`, which retrying does not change, and editing it with `invalid_write_input`. Re-save it as UTF-8 to read or edit it.
+
 ## What happens when a note changes
 
 A file watcher notices every file created, edited or deleted under the Vault: Markdown, attachments and `.hatchdoor-layer` markers. A marker counts because changing one moves notes between layers without touching their content. Hatchdoor waits about half a second after a change, so a burst of saves becomes one reindex pass. It never waits more than five seconds, so a long editing session cannot hold the index back.
 
-A change made outside Hatchdoor, in Obsidian or any other program, normally shows within seconds. Some folders send Hatchdoor no change events at all, and a Windows folder used through Docker Desktop is the common case. So once a minute Hatchdoor also compares each Vault's folder with what it saw the time before, by file names, sizes and modification times, and reindexes when something was added, changed or removed. On those folders an outside change shows within about a minute. There is nothing to turn on and no setting for it.
+A change made outside Hatchdoor, in Obsidian or any other program, normally shows within seconds. Some folders send Hatchdoor no change events at all, and a Windows folder used through Docker Desktop is the common case. So once a minute Hatchdoor also compares each Vault's folder with what it saw the time before, by file names, sizes and modification times, and reindexes when something was added, changed or removed. On those folders an outside change shows within about a minute. A folder inside the Vault that Hatchdoor has no permission to open, such as a root-owned `lost+found`, is left out of the comparison and does not hold up the rest, as the index leaves it out too. There is nothing to turn on and no setting for it.
 
 A save made through Hatchdoor, from the browser or an agent, does not wait for the watcher. The save asks for the reindex itself and marks the Vault's search `stale` until it lands, so the change is picked up even where the watcher sees nothing. If the operating system reports that it dropped file events, the next pass rescans the whole Vault.
 
 > [!note]
 > Reindexing covers only what changed. Each note carries a content hash, and Hatchdoor reuses unchanged notes and unchanged chunks without embedding them again. A full rebuild happens only when something makes the whole cache invalid at once, such as switching embedding models or changing `HATCHDOOR_EMBED_LAYERS`. Every vector in the cache has to come from the same model, and a partial rebuild would leave vectors that cannot be compared with each other.
 >
-> An index pass cut short by a restart, a crash or a shutdown does not start over either. Hatchdoor saves the chunks it has embedded as it goes, and the next pass embeds only what is left, so the progress percentage picks up where the last one stopped. Saved chunks never answer a search. A Vault becomes searchable only once every chunk has its vector, and until then a Vault that was searchable before keeps answering from its previous index, marked `stale`.
+> An index pass cut short by a restart, a crash or a shutdown does not start over either. Hatchdoor saves the chunks it has embedded as it goes, and the next pass embeds only what is left, so the progress percentage picks up where the last one stopped. That is also why pausing a Vault, changing its settings or stopping Hatchdoor in the middle of a pass takes seconds: the pass stops at the next chunk instead of running to the end. Saved chunks never answer a search. A Vault becomes searchable only once every chunk has its vector, and until then a Vault that was searchable before keeps answering from its previous index, marked `stale`.
 
 ## Vaults take turns indexing
 
@@ -36,7 +50,11 @@ While a Vault waits, its `index_turn` is `waiting` and the sidebar shows **waiti
 Hatchdoor has two search modes, **Semantic** (the default) and **Keyword**, and you choose between them. It never blends the two into one ranking.
 
 - **Semantic** embeds your query with the model that embedded your notes, then finds the closest vectors. It matches by meaning, so a query can find a note that never uses the query's words.
-- **Keyword** runs against SQLite's FTS5 full-text index, the BM25-style engine most databases use for exact-text search. It matches the words that are present, which is what you want for a hostname, filename, tag, ID, or any other exact string.
+- **Keyword** runs against SQLite's FTS5 full-text index, which ranks notes by the query words they contain. It matches any query word, not necessarily the whole string. Use `find_text` over MCP when you need every occurrence of one exact string.
+
+Chinese, Japanese, Korean and Thai are written without spaces between words, so the keyword index cannot tell where one word ends. It stores every pair of neighbouring characters in those scripts instead, and searches for a word as its pairs in order. `本文` therefore finds `漢字が混ざった本文です`, and a single character such as `本` finds every note it appears in. The index does not know the language's words, so a query can also match where its characters meet across two words. A query word in these scripts uses its first 24 characters, which is enough to pin a phrase down. Text is compared in its composed Unicode form, so a Korean note saved with decomposed characters is found by a query typed normally.
+
+Keyword search uses the first 8,192 bytes of the query, cut between characters, and at most 64 distinct terms, ignoring case for duplicates. Repeating a word does not give it more weight. Its SQLite work has a 750 ms deadline shared across candidate windows, so an expensive or abandoned query cannot keep a reader slot indefinitely. A timed-out search reports `search_unavailable` with a message asking for fewer terms. These limits apply to the browser, HTTP and MCP alike; Semantic search is unchanged.
 
 > [!warning]
 > Hatchdoor never fuses the two modes at query time. It was tested: combining them with Reciprocal Rank Fusion added a second query and measurable latency, and the results were unpredictable and often worse. On the evaluation set, fusion sometimes pushed the correct top result below a distractor that shared its words. Semantic search alone scored best. If you see "hybrid" used loosely elsewhere, it does not mean fused retrieval in Hatchdoor's search.

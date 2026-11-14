@@ -65,18 +65,21 @@ Hatchdoor can see Vaults in, and every Vault is one you added.
 
 ## Leftover settings
 
-Every start on an existing registry removes the retired Git-lane keys
-(`HATCHDOOR_GIT_SYNC_ENABLED`, `_HTTPS_TOKEN`, `_HTTPS_USERNAME`, `_REMOTE`,
-`_BRANCH`, `_DEBOUNCE_SECONDS`) from stored settings again, so a plaintext Git
-token never survives there. A failed removal is logged and retried on the next
-start. `HATCHDOOR_EXCLUDE` and the two author keys are left alone; the author
-keys are still the commit identity of a Vault without its own.
+Every start removes the retired keys (`HATCHDOOR_EXCLUDE`,
+`HATCHDOOR_GIT_SYNC_ENABLED`, `_HTTPS_TOKEN`, `_HTTPS_USERNAME`, `_REMOTE`,
+`_BRANCH`, `_DEBOUNCE_SECONDS`) from stored settings, and logs a warning naming
+the ones it found, so a plaintext Git token never survives there and a value
+nothing reads cannot stop a start. A failed removal is logged and retried on
+the next start. The two author keys are left alone: they are still the commit
+identity of a Vault without its own. Settings refuses to save a retired key.
 
 Per-Vault values set in the environment have no effect: each Vault keeps its
 own settings in the registry. Hatchdoor logs a warning at startup naming any
 that are still set. Remove them from `.env`, and change a Vault's settings in
 Settings or with the `edit_vault` MCP tool. `VAULT_PATH` is exempt, because
-Docker Compose sets it on every deployment as the container's Vault mount.
+Docker Compose sets it on every deployment as the container's Vault mount. So
+are `HATCHDOOR_GIT_AUTHOR_NAME` and `HATCHDOOR_GIT_AUTHOR_EMAIL`, which still
+sign the commits of a Vault without its own commit identity: keep them.
 
 The development-only `HATCHDOOR_VAULT_SOURCE` and `HATCHDOOR_VAULT_GIT_*`
 startup-source variables were never part of a released deployment contract.

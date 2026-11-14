@@ -27,7 +27,7 @@ import { SettingsModal } from "./SettingsModal";
 import { UnsavedDrafts, type RestoreCreateDraft } from "./UnsavedDrafts";
 import { VaultSettingsDetail, VaultSettingsIndex } from "./VaultSettingsIndex";
 
-type SettingKind = "switch" | "number" | "text" | "secret" | "mode";
+type SettingKind = "switch" | "number" | "text" | "secret" | "mode" | "choice";
 type Setting = {
   key: string;
   value: string | null;
@@ -86,29 +86,37 @@ const SECTIONS = [
     manual: CONTEXTUAL_HELP.notesSettings,
   },
   {
-    id: "agents",
+    id: "layout",
     number: "02",
+    title: "Layout",
+    blurb:
+      "Which lists sit above the Vault tree and how wide notes run, for everyone who uses this server.",
+    manual: CONTEXTUAL_HELP.notesSettings,
+  },
+  {
+    id: "agents",
+    number: "03",
     title: "Agent access (MCP)",
     blurb: "Whether AI assistants can reach this vault, and what they may do.",
     manual: CONTEXTUAL_HELP.agentSettings,
   },
   {
     id: "uploads",
-    number: "03",
+    number: "04",
     title: "Uploads",
     blurb: "How large a file may be attached to a note.",
     manual: CONTEXTUAL_HELP.uploadSettings,
   },
   {
     id: "updates",
-    number: "04",
+    number: "05",
     title: "Updates",
     blurb: "Whether Hatchdoor tells you when a newer version is out.",
     manual: CONTEXTUAL_HELP.upgrade,
   },
   {
     id: "usage",
-    number: "05",
+    number: "06",
     title: "Usage report",
     blurb:
       "Whether this server tells Hatchdoor's maintainer how it is set up. This is telemetry, and it is off unless you turn it on.",
@@ -131,6 +139,9 @@ const COPY: Record<
     note?: string;
     /** The manual page that explains this setting on its own (#423). */
     manual?: ContextualHelp;
+    /** A `choice` setting's options, in order, by the value the server
+     * stores (#698). */
+    choices?: { value: string; label: string }[];
   }
 > = {
   HATCHDOOR_ARCHIVE_PREFIX: {
@@ -154,6 +165,26 @@ const COPY: Record<
     section: "notes",
     label: "Public demo mode",
     help: "Read-only public browsing with every write surface disabled. Set for this deployment; there is nothing to change from here.",
+  },
+  HATCHDOOR_SIDEBAR_CHANGED_ON_DISK: {
+    section: "layout",
+    label: "Show Changed on disk",
+    help: "The notes most recently changed on disk, listed above the Vault tree and on Home. Off removes the list for everyone. Hatchdoor keeps noticing changes, so turning it back on shows them all.",
+  },
+  HATCHDOOR_SIDEBAR_RECENTLY_VIEWED: {
+    section: "layout",
+    label: "Show Recently viewed",
+    help: "The notes last opened in each browser, listed above the Vault tree and on Home. Off removes the list for everyone. Each browser keeps its list, so turning it back on shows it as it was.",
+  },
+  HATCHDOOR_NOTE_WIDTH: {
+    section: "layout",
+    label: "Note width",
+    help: "How wide a note's text may run in the Reading view and the editor, for everyone who uses this server. Default keeps lines at a comfortable reading length. Wide allows about a quarter more. Full uses the whole pane. On a screen narrower than the limit, all three look the same.",
+    choices: [
+      { value: "default", label: "Default" },
+      { value: "wide", label: "Wide" },
+      { value: "full", label: "Full" },
+    ],
   },
   HATCHDOOR_MCP_ENABLED: {
     section: "agents",
@@ -179,7 +210,7 @@ const COPY: Record<
   HATCHDOOR_MCP_ALLOWED_ORIGINS: {
     section: "agents",
     label: "Websites allowed to connect",
-    help: "Assistants running inside a browser must come from one of these addresses. Separated by commas.",
+    help: "Assistants running inside a browser must come from one of these addresses. With no web token set, pages from these addresses may also change notes. Separated by commas.",
   },
   HATCHDOOR_PUBLIC_URL: {
     section: "agents",
@@ -291,6 +322,12 @@ function plaqueValue(setting: Setting): string {
   if (setting.kind === "secret") return setting.configured ? "set" : "not set";
   const value = setting.value ?? "";
   if (setting.kind === "switch") return value === "true" ? "On" : "Off";
+  if (setting.kind === "choice") {
+    return (
+      COPY[setting.key]?.choices?.find((choice) => choice.value === value)
+        ?.label ?? value
+    );
+  }
   if (setting.key.includes("BYTES")) return `${toMb(value)} MB`;
   return value || "empty";
 }
@@ -542,10 +579,9 @@ export function SettingsPage({
       const response = await generateMcpTokenCandidate();
       const payload = (await response.json()) as { value?: string };
       if (!response.ok || !payload.value) throw new Error();
-      setRevealed((old) => ({
-        ...old,
-        HATCHDOOR_MCP_BEARER_TOKEN: payload.value!,
-      }));
+      // A candidate lives in the drafts alone, never among the revealed
+      // values: revealed means "this is the saved password", and a candidate
+      // shown that way survived Discard as if it were in use (#645).
       edit("HATCHDOOR_MCP_BEARER_TOKEN", payload.value);
       setSaved("A new password is ready. It is not in use until you save.");
     } catch {
@@ -612,6 +648,27 @@ export function SettingsPage({
       );
     }
 
+    if (setting.kind === "choice") {
+      return (
+        <div
+          className="settings-segmented"
+          role="group"
+          aria-label={copy.label}
+        >
+          {(copy.choices ?? []).map((choice) => (
+            <button
+              key={choice.value}
+              type="button"
+              aria-pressed={value === choice.value}
+              onClick={() => edit(setting.key, choice.value)}
+            >
+              {choice.label}
+            </button>
+          ))}
+        </div>
+      );
+    }
+
     if (setting.kind === "number") {
       // Drafts for a BYTES setting are already in megabytes (what the box
       // shows and what the user types); only the value read straight off the
@@ -655,7 +712,10 @@ export function SettingsPage({
             readOnly={masked && !replacing[setting.key]}
             onChange={(event) => edit(setting.key, event.target.value)}
           />
-          {isMcp && setting.configured && shown === undefined ? (
+          {isMcp &&
+          setting.configured &&
+          shown === undefined &&
+          draft === undefined ? (
             <button
               type="button"
               className="settings-mini"
@@ -664,7 +724,7 @@ export function SettingsPage({
               Show
             </button>
           ) : null}
-          {shown !== undefined ? (
+          {shown !== undefined && draft === undefined ? (
             <button
               type="button"
               className="settings-mini"
@@ -811,6 +871,9 @@ export function SettingsPage({
 
         {selectedVaultId ? (
           <VaultSettingsDetail
+            // One component per Vault, so nothing typed or announced on one
+            // Vault's page carries over to the next (#645).
+            key={selectedVaultId}
             vaultId={selectedVaultId}
             serverIdentity={{
               name:

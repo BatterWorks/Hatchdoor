@@ -1,15 +1,14 @@
-use rusqlite::OptionalExtension;
+use rusqlite::{OptionalExtension, params};
 use tracing::{info, warn};
 
 use super::SqliteCache;
-use super::migrate::{PREVIOUS_SCHEMA_VERSION, migrate_from_previous_schema};
-use crate::embed::{Embedder, PENDING_IDENTITY};
+use super::migrate::{can_migrate_from, migrate_to_current};
+use crate::embed::{Embedder, PENDING_IDENTITY, identity_without_revision};
 
 // Bump this when the schema structure or data-population logic changes. A
 // cache on any other version is wiped and rebuilt from Markdown on startup,
-// except one on `PREVIOUS_SCHEMA_VERSION` while a migration from it exists
-// (ADR-50).
-pub(super) const SCHEMA_VERSION: &str = "12";
+// except one on a version `migrate.rs` has a step from (ADR-50).
+pub(super) const SCHEMA_VERSION: &str = "14";
 
 impl SqliteCache {
     pub fn ensure_schema(&self, embedding_dim: usize) -> Result<(), String> {
@@ -24,12 +23,12 @@ impl SqliteCache {
             }
             // Left as it is: the migration runs only after the model check,
             // which needs the loaded embedder (`reset_if_embedder_changed`).
-            SchemaState::Previous => {
+            SchemaState::Behind(version) => {
                 info!(
-                    old = PREVIOUS_SCHEMA_VERSION,
+                    old = %version,
                     new = SCHEMA_VERSION,
-                    "SQLite cache is one schema version behind; migrating it once the \
-                     embedding model is loaded"
+                    "SQLite cache is behind the current schema version; migrating it once \
+                     the embedding model is loaded"
                 );
                 Ok(())
             }
@@ -82,20 +81,7 @@ impl SqliteCache {
                     .to_string(),
             );
         }
-        let stored = match self.get_metadata("embedder_id")? {
-            Some(identity) => Some(identity),
-            None => {
-                let conn = self.connection()?;
-                conn.query_row(
-                    "SELECT value FROM vault_snapshot_metadata WHERE key = 'embedder_id' LIMIT 1",
-                    [],
-                    |row| row.get::<_, String>(0),
-                )
-                .optional()
-                .map_err(|error| format!("read Vault snapshot embedder identity: {error}"))?
-            }
-        };
-        if let Some(stored) = stored
+        if let Some(stored) = self.stored_embedder_identity()?
             && stored != current
         {
             warn!(
@@ -108,35 +94,115 @@ impl SqliteCache {
             create_schema(&conn, embedder.embedding_dim())?;
             return Ok(());
         }
-        self.migrate_if_previous_schema(embedder.embedding_dim())
+        self.migrate_if_behind(embedder.embedding_dim())
     }
 
     /// Run the model check, and so any pending migration, as soon as a model
     /// has loaded and before it serves a search. Index turns run the same
     /// check, but a search arriving before the first one would otherwise
-    /// query a cache still on the previous schema. Holds the model epoch, as
+    /// query a cache still on an older schema. Holds the model epoch, as
     /// every snapshot builder does.
-    pub fn prepare_for_embedder(&self, embedder: &dyn Embedder) -> Result<(), String> {
+    ///
+    /// `files` says whether this start fetched or replaced any model file.
+    /// It decides whether an index recorded before #643, under the model's
+    /// identity without its revision marker, is kept (#693).
+    pub fn prepare_for_embedder(
+        &self,
+        embedder: &dyn Embedder,
+        files: ModelFiles,
+    ) -> Result<(), String> {
         let _epoch = self
             .snapshot_model_epoch
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        self.adopt_revision_marker(embedder, files)?;
         self.reset_if_embedder_changed(embedder)
     }
 
-    /// Bring a cache written by the previous schema version up to date,
+    /// The embedder identity the cache was built with: the shared stamp, or
+    /// a published Vault's when the shared one is missing.
+    fn stored_embedder_identity(&self) -> Result<Option<String>, String> {
+        if let Some(identity) = self.get_metadata("embedder_id")? {
+            return Ok(Some(identity));
+        }
+        self.connection()?
+            .query_row(
+                "SELECT value FROM vault_snapshot_metadata WHERE key = 'embedder_id' LIMIT 1",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|error| format!("read Vault snapshot embedder identity: {error}"))
+    }
+
+    /// Keep an index built before #643, whose stored identity is the current
+    /// one without its revision marker, when this start found the pinned
+    /// model files already in place: its vectors came from those same files.
+    /// Every place the cache records the identity is rewritten in one
+    /// transaction, so the model check that follows finds it current. When a
+    /// file was fetched or replaced, nothing proves the old vectors came from
+    /// the pinned files, and the model check wipes as before (#693).
+    fn adopt_revision_marker(
+        &self,
+        embedder: &dyn Embedder,
+        files: ModelFiles,
+    ) -> Result<(), String> {
+        let current = embedder.identity();
+        let Some(unmarked) = identity_without_revision(&current) else {
+            return Ok(());
+        };
+        let Some(stored) = self.stored_embedder_identity()? else {
+            return Ok(());
+        };
+        if stored != unmarked {
+            return Ok(());
+        }
+        if files == ModelFiles::Fetched {
+            warn!(
+                old = %stored,
+                new = %current,
+                "embedder identity gained its revision marker, but model files were fetched \
+                 at this start; rebuilding the SQLite cache from scratch"
+            );
+            return Ok(());
+        }
+        let mut conn = self.connection()?;
+        let tx = conn
+            .transaction()
+            .map_err(|error| format!("start embedder identity update: {error}"))?;
+        for statement in [
+            "UPDATE metadata SET value = ?1 WHERE key = 'embedder_id' AND value = ?2",
+            "UPDATE vault_snapshot_metadata SET value = ?1 \
+             WHERE key = 'embedder_id' AND value = ?2",
+            "UPDATE vault_embedding_progress SET embedder_id = ?1 WHERE embedder_id = ?2",
+        ] {
+            tx.execute(statement, params![current, stored])
+                .map_err(|error| format!("update embedder identity: {error}"))?;
+        }
+        tx.commit()
+            .map_err(|error| format!("commit embedder identity update: {error}"))?;
+        info!(
+            old = %stored,
+            new = %current,
+            "embedder identity gained its revision marker and the model files were already \
+             the pinned revision; kept the SQLite cache and its vectors"
+        );
+        Ok(())
+    }
+
+    /// Bring a cache written by an earlier schema version up to date,
     /// keeping its vectors (ADR-50). Runs only after the model check, so a
     /// migration never carries vectors from one model to another. Any failure
     /// wipes and rebuilds, and the log names the check that failed.
-    fn migrate_if_previous_schema(&self, embedding_dim: usize) -> Result<(), String> {
+    fn migrate_if_behind(&self, embedding_dim: usize) -> Result<(), String> {
         let mut conn = self.connection()?;
-        if !matches!(existing_schema_version(&conn)?, SchemaState::Previous) {
+        let SchemaState::Behind(version) = existing_schema_version(&conn)? else {
             return Ok(());
-        }
-        match migrate_from_previous_schema(&mut conn, embedding_dim) {
+        };
+        match migrate_to_current(&mut conn, &version) {
             Ok(()) => {
                 info!(
-                    old = PREVIOUS_SCHEMA_VERSION,
+                    old = %version,
                     new = SCHEMA_VERSION,
                     "migrated the SQLite cache and kept its vectors"
                 );
@@ -144,7 +210,7 @@ impl SqliteCache {
             }
             Err(failure) => {
                 warn!(
-                    old = PREVIOUS_SCHEMA_VERSION,
+                    old = %version,
                     new = SCHEMA_VERSION,
                     failure = %failure,
                     "SQLite cache migration failed; wiping cache for full rebuild"
@@ -156,14 +222,26 @@ impl SqliteCache {
     }
 }
 
+/// Whether the model files a start loaded were all in place before it, or
+/// some had to be fetched or replaced (#693).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ModelFiles {
+    /// Every file already matched its shipped digest and nothing moved.
+    AlreadyPinned,
+    /// At least one file was downloaded, or the cache was pointed at the
+    /// pinned revision, at this start.
+    Fetched,
+}
+
 /// The state of an existing cache database, as read at startup.
 enum SchemaState {
     /// No cache objects yet — a first-time build.
     Fresh,
     /// Fully initialised and on the current schema version.
     Current,
-    /// Fully initialised and one version behind, which migrates (ADR-50).
-    Previous,
+    /// Fully initialised and on an earlier version `migrate.rs` has a step
+    /// from, which migrates (ADR-50).
+    Behind(String),
     /// Fully initialised but on an older/newer schema version → rebuild.
     VersionMismatch(String),
     /// Half-initialised (objects but no metadata, or metadata but no
@@ -209,7 +287,7 @@ fn existing_schema_version(conn: &rusqlite::Connection) -> Result<SchemaState, S
 
     match version {
         Some(version) if version == SCHEMA_VERSION => Ok(SchemaState::Current),
-        Some(version) if version == PREVIOUS_SCHEMA_VERSION => Ok(SchemaState::Previous),
+        Some(version) if can_migrate_from(&version) => Ok(SchemaState::Behind(version)),
         Some(version) => Ok(SchemaState::VersionMismatch(version)),
         None => Ok(SchemaState::Corrupt(
             "metadata table exists but schema_version row is missing".to_string(),
@@ -228,6 +306,7 @@ fn wipe_schema(conn: &rusqlite::Connection) -> Result<(), String> {
         DROP TRIGGER IF EXISTS vault_chunk_fts_ad;
         DROP TRIGGER IF EXISTS vault_chunk_fts_ai;
         DROP TABLE IF EXISTS vault_chunk_fts;
+        DROP VIEW IF EXISTS vault_chunk_keyword_source;
         DROP TABLE IF EXISTS vault_chunks;
         DROP TABLE IF EXISTS vault_headings;
         DROP TABLE IF EXISTS vault_tags;
@@ -254,6 +333,47 @@ fn wipe_schema(conn: &rusqlite::Connection) -> Result<(), String> {
         "#,
     )
     .map_err(|e| format!("failed to wipe stale SQLite cache: {e}"))
+}
+
+/// The keyword index over `vault_chunks` and the triggers that keep it in
+/// step (#634). It reads `keyword_text` where a chunk has one, through the
+/// `vault_chunk_keyword_source` view, so text with no CJK, kana, Hangul or
+/// Thai is not stored twice. The tokenizer keeps Thai vowel and tone marks
+/// inside a token; only Thai text contains them.
+pub(super) fn vault_chunk_keyword_index_sql() -> String {
+    format!(
+        r#"
+        CREATE VIEW IF NOT EXISTS vault_chunk_keyword_source AS
+            SELECT id, vault_id, COALESCE(keyword_text, content) AS keyword_text
+            FROM vault_chunks;
+
+        CREATE VIRTUAL TABLE IF NOT EXISTS vault_chunk_fts USING fts5(
+            vault_id UNINDEXED,
+            keyword_text,
+            content='vault_chunk_keyword_source',
+            content_rowid='id',
+            tokenize='unicode61 remove_diacritics 2 tokenchars ''{thai_marks}'''
+        );
+
+        CREATE TRIGGER IF NOT EXISTS vault_chunk_fts_ai AFTER INSERT ON vault_chunks BEGIN
+            INSERT INTO vault_chunk_fts(rowid, vault_id, keyword_text)
+                VALUES (new.id, new.vault_id, COALESCE(new.keyword_text, new.content));
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS vault_chunk_fts_ad AFTER DELETE ON vault_chunks BEGIN
+            INSERT INTO vault_chunk_fts(vault_chunk_fts, rowid, vault_id, keyword_text)
+                VALUES ('delete', old.id, old.vault_id, COALESCE(old.keyword_text, old.content));
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS vault_chunk_fts_au AFTER UPDATE ON vault_chunks BEGIN
+            INSERT INTO vault_chunk_fts(vault_chunk_fts, rowid, vault_id, keyword_text)
+                VALUES ('delete', old.id, old.vault_id, COALESCE(old.keyword_text, old.content));
+            INSERT INTO vault_chunk_fts(rowid, vault_id, keyword_text)
+                VALUES (new.id, new.vault_id, COALESCE(new.keyword_text, new.content));
+        END;
+        "#,
+        thai_marks = super::keyword::THAI_MARKS,
+    )
 }
 
 /// The per-Vault vector tables. `vault_key` is an INTEGER metadata column, so
@@ -299,9 +419,7 @@ fn create_schema(conn: &rusqlite::Connection, embedding_dim: usize) -> Result<()
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             slug TEXT NOT NULL UNIQUE,
             title TEXT NOT NULL,
-            normalized_title TEXT NOT NULL,
             relative_path TEXT NOT NULL UNIQUE,
-            normalized_relative_path TEXT NOT NULL,
             absolute_path TEXT NOT NULL,
             content TEXT NOT NULL,
             content_hash TEXT NOT NULL,
@@ -333,10 +451,6 @@ fn create_schema(conn: &rusqlite::Connection, embedding_dim: usize) -> Result<()
             PRIMARY KEY (note_slug, tag)
         );
 
-        CREATE INDEX IF NOT EXISTS idx_notes_normalized_title
-            ON notes(normalized_title);
-        CREATE INDEX IF NOT EXISTS idx_notes_normalized_relative_path
-            ON notes(normalized_relative_path);
         CREATE INDEX IF NOT EXISTS idx_note_links_target_slug
             ON note_links(target_slug);
         CREATE INDEX IF NOT EXISTS idx_tags_tag
@@ -418,9 +532,7 @@ fn create_schema(conn: &rusqlite::Connection, embedding_dim: usize) -> Result<()
             vault_id TEXT NOT NULL REFERENCES vault_snapshots(vault_id) ON DELETE CASCADE,
             slug TEXT NOT NULL,
             title TEXT NOT NULL,
-            normalized_title TEXT NOT NULL,
             relative_path TEXT NOT NULL,
-            normalized_relative_path TEXT NOT NULL,
             absolute_path TEXT NOT NULL,
             content TEXT NOT NULL,
             content_hash TEXT NOT NULL,
@@ -463,10 +575,6 @@ fn create_schema(conn: &rusqlite::Connection, embedding_dim: usize) -> Result<()
                 REFERENCES vault_notes(vault_id, slug) ON DELETE CASCADE ON UPDATE CASCADE
         );
 
-        CREATE INDEX IF NOT EXISTS idx_vault_notes_normalized_title
-            ON vault_notes(vault_id, normalized_title);
-        CREATE INDEX IF NOT EXISTS idx_vault_notes_normalized_relative_path
-            ON vault_notes(vault_id, normalized_relative_path);
         CREATE INDEX IF NOT EXISTS idx_vault_note_links_target
             ON vault_note_links(vault_id, target_slug);
         CREATE INDEX IF NOT EXISTS idx_vault_tags_tag
@@ -484,6 +592,9 @@ fn create_schema(conn: &rusqlite::Connection, embedding_dim: usize) -> Result<()
             content_hash TEXT NOT NULL,
             tags TEXT,
             aliases TEXT,
+            -- What the keyword index reads in place of `content`, or NULL
+            -- when that is `content` itself (`keyword::keyword_index_text`).
+            keyword_text TEXT,
             FOREIGN KEY (vault_id, note_slug)
                 REFERENCES vault_notes(vault_id, slug) ON DELETE CASCADE ON UPDATE CASCADE
         );
@@ -493,30 +604,7 @@ fn create_schema(conn: &rusqlite::Connection, embedding_dim: usize) -> Result<()
         CREATE INDEX IF NOT EXISTS idx_vault_chunks_content_hash
             ON vault_chunks(vault_id, content_hash);
 
-        CREATE VIRTUAL TABLE IF NOT EXISTS vault_chunk_fts USING fts5(
-            vault_id UNINDEXED,
-            content,
-            content='vault_chunks',
-            content_rowid='id',
-            tokenize='unicode61 remove_diacritics 2'
-        );
-
-        CREATE TRIGGER IF NOT EXISTS vault_chunk_fts_ai AFTER INSERT ON vault_chunks BEGIN
-            INSERT INTO vault_chunk_fts(rowid, vault_id, content)
-                VALUES (new.id, new.vault_id, new.content);
-        END;
-
-        CREATE TRIGGER IF NOT EXISTS vault_chunk_fts_ad AFTER DELETE ON vault_chunks BEGIN
-            INSERT INTO vault_chunk_fts(vault_chunk_fts, rowid, vault_id, content)
-                VALUES ('delete', old.id, old.vault_id, old.content);
-        END;
-
-        CREATE TRIGGER IF NOT EXISTS vault_chunk_fts_au AFTER UPDATE ON vault_chunks BEGIN
-            INSERT INTO vault_chunk_fts(vault_chunk_fts, rowid, vault_id, content)
-                VALUES ('delete', old.id, old.vault_id, old.content);
-            INSERT INTO vault_chunk_fts(rowid, vault_id, content)
-                VALUES (new.id, new.vault_id, new.content);
-        END;
+        {keyword_index}
 
         -- The integer each Vault's vectors are filed under. Kept apart from
         -- `vault_snapshots`, whose row every publication deletes and
@@ -555,6 +643,7 @@ fn create_schema(conn: &rusqlite::Connection, embedding_dim: usize) -> Result<()
         "#,
         dim = embedding_dim,
         vector_tables = vault_vector_tables_sql(embedding_dim),
+        keyword_index = vault_chunk_keyword_index_sql(),
         version = SCHEMA_VERSION
     );
     conn.execute_batch(&sql)
@@ -699,8 +788,8 @@ mod tests {
         let cache = SqliteCache::in_memory(384).expect("open");
         let conn = cache.connection().expect("conn");
         conn.execute(
-            "INSERT INTO notes(slug, title, normalized_title, relative_path, normalized_relative_path, absolute_path, content, content_hash, mtime_ns, size_bytes, indexed_at) \
-             VALUES ('n1','N1','n1','n1.md','n1.md','/tmp/n1.md','','h',0,0,0)",
+            "INSERT INTO notes(slug, title, relative_path, absolute_path, content, content_hash, mtime_ns, size_bytes, indexed_at) \
+             VALUES ('n1','N1','n1.md','/tmp/n1.md','','h',0,0,0)",
             [],
         ).expect("insert note");
         conn.execute(

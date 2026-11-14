@@ -298,6 +298,7 @@ describe("App write mode", () => {
           body: JSON.stringify({
             content: "# Home\nUpdated",
             expected_content_hash: "hash-1",
+            expected_relative_path: "Home",
           }),
         }),
       );
@@ -516,6 +517,7 @@ describe("App write mode", () => {
           body: JSON.stringify({
             content: "# Home\nMine",
             expected_content_hash: "hash-1",
+            expected_relative_path: "Home",
           }),
         }),
       );
@@ -524,10 +526,10 @@ describe("App write mode", () => {
 
   it("warns and offers reload for a stale recovered draft", async () => {
     window.localStorage.setItem(
-      noteDraftKey(VAULT_ID, "home"),
+      noteDraftKey(VAULT_ID, "Home"),
       JSON.stringify({
         vaultId: VAULT_ID,
-        slug: "home",
+        relativePath: "Home",
         content: "# Home\nStale draft",
         baseContentHash: "old-hash",
         savedAt: Date.now(),
@@ -864,8 +866,12 @@ describe("App write mode", () => {
     );
 
     await screen.findByRole("heading", { level: 2, name: "Home" });
+    // Wait on the label, then look the button up by role once (#679). Each
+    // role query over the note page costs up to 150 ms idle and several times
+    // that under load, so `findByRole` fit too few attempts in its wait.
+    await screen.findByLabelText("New note in Projects");
     fireEvent.click(
-      await screen.findByRole("button", { name: "New note in Projects" }),
+      screen.getByRole("button", { name: "New note in Projects" }),
     );
 
     expect(screen.getByLabelText("Folder")).toHaveValue("Projects");

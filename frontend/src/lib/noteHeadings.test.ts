@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
 
 import {
-  duplicateTitleHeadingLine,
   assignHeadingId,
+  blockAnchorId,
+  duplicateTitleHeadingLine,
   extractMarkdownHeadings,
+  fragmentAnchor,
   slugifyHeading,
 } from "./noteHeadings";
 
@@ -50,6 +52,50 @@ describe("noteHeadings", () => {
 
     expect(headings).toEqual([
       { level: 2, text: "Plan Home", id: "plan-home", sourceLine: 1 },
+    ]);
+  });
+
+  it("drops a highlight's signs from the outline text, not from its anchor (#782)", () => {
+    const [heading] = extractMarkdownHeadings(
+      "## Heading with ==a phrase== here",
+    );
+
+    expect(heading.text).toBe("Heading with a phrase here");
+    expect(heading.id).toBe("heading-with-a-phrase-here");
+  });
+
+  it("drops a colour emoji opening a highlight, and only those six (#782)", () => {
+    const [coloured, other] = extractMarkdownHeadings(
+      "## Heading with ==🔵a blue phrase== and ==plain==\n## ==⚫not a colour==",
+    );
+
+    expect(coloured.text).toBe("Heading with a blue phrase and plain");
+    expect(coloured.id).toBe("heading-with-a-blue-phrase-and-plain");
+    expect(other.text).toBe("⚫not a colour");
+  });
+
+  it("keeps == written inside a code span, math or a bare URL (#782)", () => {
+    const headings = extractMarkdownHeadings(
+      [
+        "## Compare `==x==` here",
+        "## Identity $a==b==c$",
+        "## See https://x.io/?a==b==c",
+      ].join("\n"),
+    );
+
+    expect(headings.map((heading) => heading.text)).toEqual([
+      "Compare ==x== here",
+      "Identity $a==b==c$",
+      "See https://x.io/?a==b==c",
+    ]);
+  });
+
+  it("keeps a heading that is only a coloured highlight's signs (#782)", () => {
+    const headings = extractMarkdownHeadings("## ==🔵==\n## !!");
+
+    expect(headings.map(({ text, id }) => [text, id])).toEqual([
+      ["==🔵==", "section"],
+      ["!!", "section-2"],
     ]);
   });
 });
@@ -104,5 +150,24 @@ describe("duplicateTitleHeadingLine (#530)", () => {
       duplicateTitleHeadingLine(body, headings, undefined),
     ).toBeUndefined();
     expect(duplicateTitleHeadingLine("", [], "RackGate")).toBeUndefined();
+  });
+});
+
+describe("fragmentAnchor (#578)", () => {
+  it("names a block by its id, caret kept", () => {
+    expect(fragmentAnchor("^abc123")).toBe("^abc123");
+    expect(fragmentAnchor(" ^a-1 ")).toBe("^a-1");
+    expect(blockAnchorId("abc123")).toBe("^abc123");
+    // Nothing that could end a Markdown destination survives.
+    expect(fragmentAnchor("^a b)c")).toBe("^abc");
+  });
+
+  it("names a heading by its slug, as before", () => {
+    expect(fragmentAnchor("First Run")).toBe("first-run");
+    expect(fragmentAnchor("first-run")).toBe("first-run");
+  });
+
+  it("keeps a block and a heading of the same name apart", () => {
+    expect(fragmentAnchor("^notes")).not.toBe(fragmentAnchor("Notes"));
   });
 });

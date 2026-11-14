@@ -1,3 +1,4 @@
+use std::cell::Cell;
 use std::ffi::CString;
 use std::fs::{self, FileTimes};
 use std::io::Write;
@@ -8,7 +9,10 @@ use std::time::SystemTime;
 use crate::cache::parse::content_hash;
 use crate::rename_flags::{RenameFlag, rename_flagged_at};
 use crate::vault::types::NoteEntry;
+use crate::vault::{BoundedReadError, MAX_NOTE_BYTES, read_open_bounded};
 
+use super::canvas::is_canvas_path;
+use super::intent::{IntentLog, IntentRecord};
 use super::types::{MutationPhase, TextRewrite, WriteError};
 
 enum Compensation {
@@ -27,16 +31,93 @@ enum Compensation {
     },
 }
 
+/// The steps of one multi-note write, so a failure part-way can undo them.
+///
+/// The undo lives in memory and lasts as long as the process. What outlives
+/// it is the plan, which [`MutationJournal::begin`] writes to the Vault's
+/// [`IntentLog`] before the first step and which [`MutationJournal::finish`]
+/// and [`MutationJournal::rollback`] remove, so a process that dies part-way
+/// leaves the record a later activation finishes (#631, ADR-51).
 pub(super) struct MutationJournal {
     vault_root: PathBuf,
+    /// The Vault's intent log, once [`MutationJournal::begin`] has written
+    /// this journal's plan to it. Only a journal that wrote the record
+    /// removes it, so a write refused because an earlier record is still
+    /// waiting leaves that record alone.
+    recorded: Option<IntentLog>,
+    intent_log: Option<IntentLog>,
     completed: Vec<Compensation>,
+    /// Step boundaries passed, for the tests that stop the write at each.
+    #[cfg(test)]
+    steps: usize,
+}
+
+#[cfg(test)]
+thread_local! {
+    /// The step boundary at which the tests' simulated crash happens: the
+    /// journal panics there, which unwinds past every rollback and leaves
+    /// the record behind exactly as a dead process would.
+    static CRASH_AFTER_STEPS: Cell<Option<usize>> = const { Cell::new(None) };
+}
+
+/// Make this thread's next journals panic once they have passed `steps` step
+/// boundaries: 0 is just after the record is written, and each completed
+/// move or rewrite is one more.
+#[cfg(test)]
+pub(super) fn crash_after_steps(steps: Option<usize>) {
+    CRASH_AFTER_STEPS.set(steps);
 }
 
 impl MutationJournal {
-    pub(super) fn new(vault_root: &Path) -> Self {
+    /// `intent_log` is `None` only for a caller with no state folder, which
+    /// is a test: every Vault the runtime activates has one.
+    pub(super) fn new(vault_root: &Path, intent_log: Option<&IntentLog>) -> Self {
         Self {
             vault_root: vault_root.to_path_buf(),
+            recorded: None,
+            intent_log: intent_log.cloned(),
             completed: Vec::new(),
+            #[cfg(test)]
+            steps: 0,
+        }
+    }
+
+    /// Record the whole plan durably before its first step. A plan that
+    /// cannot be recorded is refused, and nothing has changed yet.
+    pub(super) fn begin(
+        &mut self,
+        operation: &str,
+        moves: &[(&Path, &Path)],
+        rewrites: &[TextRewrite],
+    ) -> Result<(), WriteError> {
+        if let Some(intent_log) = self.intent_log.take() {
+            intent_log.record(&IntentRecord::new(
+                &self.vault_root,
+                operation,
+                moves,
+                rewrites,
+            )?)?;
+            self.recorded = Some(intent_log);
+        }
+        self.step_boundary();
+        Ok(())
+    }
+
+    /// The operation finished: its record goes.
+    pub(super) fn finish(self) {
+        if let Some(intent_log) = &self.recorded {
+            intent_log.clear();
+        }
+    }
+
+    fn step_boundary(&mut self) {
+        #[cfg(test)]
+        {
+            let passed = self.steps;
+            self.steps += 1;
+            if CRASH_AFTER_STEPS.get() == Some(passed) {
+                panic!("simulated crash after {passed} steps");
+            }
         }
     }
 
@@ -97,6 +178,7 @@ impl MutationJournal {
                 source: source.to_path_buf(),
                 destination: destination.to_path_buf(),
             });
+            self.step_boundary();
         }
         result.map_err(MoveError::into_write_error)
     }
@@ -132,21 +214,35 @@ impl MutationJournal {
     ) -> Result<Vec<PathBuf>, WriteError> {
         let mut rewritten = Vec::with_capacity(rewrites.len());
         for rewrite in rewrites {
-            let original = fs::read_to_string(&rewrite.path).map_err(|error| {
-                WriteError::Io(format!(
-                    "failed to retain original note '{}' before rewrite: {error}",
-                    rewrite.path.display()
+            // Vault-relative, because this message reaches an MCP client
+            // verbatim and the absolute host path is nobody's business there.
+            let changed_since_plan = || {
+                let kind = if is_canvas_path(&rewrite.path) {
+                    "Canvas"
+                } else {
+                    "Note"
+                };
+                WriteError::Conflict(format!(
+                    "{kind} '{}' changed after this change was planned; nothing was rewritten in it",
+                    bounded_vault_path(&self.vault_root, &rewrite.path)
                 ))
-            })?;
+            };
+            // The plan read this file as UTF-8 text under the bound, so one
+            // that is now over it, not text, or not a file at all has changed
+            // since, and is refused unread rather than read whole (#672).
+            let original = match read_note_bounded(&rewrite.path) {
+                Ok(original) => original,
+                Err(BoundedReadError::Io(error)) => {
+                    return Err(WriteError::Io(format!(
+                        "failed to retain original note '{}' before rewrite: {error}",
+                        rewrite.path.display()
+                    )));
+                }
+                Err(_) => return Err(changed_since_plan()),
+            };
             let original_modified = captured_modified_time(&rewrite.path);
             if content_hash(&original) != rewrite.original_hash {
-                // Vault-relative, because this message reaches an MCP client
-                // verbatim and the absolute host path is nobody's business
-                // there.
-                return Err(WriteError::Conflict(format!(
-                    "Note '{}' changed after this change was planned; nothing was rewritten in it",
-                    bounded_vault_path(&self.vault_root, &rewrite.path)
-                )));
+                return Err(changed_since_plan());
             }
             before_commit(&rewrite.path);
             let result = atomic_write_if_unchanged_keeping_modified(
@@ -156,8 +252,7 @@ impl MutationJournal {
                 original_modified,
             );
             let committed_despite_error = result.is_err()
-                && fs::read_to_string(&rewrite.path)
-                    .is_ok_and(|current| current == rewrite.content);
+                && read_note_bounded(&rewrite.path).is_ok_and(|current| current == rewrite.content);
             if result.is_ok() || committed_despite_error {
                 rewritten.push(rewrite.path.clone());
                 self.completed.push(Compensation::RestoreRewrite {
@@ -166,6 +261,7 @@ impl MutationJournal {
                     applied_hash: content_hash(&rewrite.content),
                     original_modified,
                 });
+                self.step_boundary();
             }
             result?;
         }
@@ -185,7 +281,23 @@ impl MutationJournal {
         self.rollback_with_observer(cause, observer)
     }
 
+    /// Undo every completed step, then remove the record: the caller is
+    /// told the outcome, so a later activation must not finish what this
+    /// one reported as failed, even when the undo was incomplete and the
+    /// failure says so.
     fn rollback_with_observer(
+        &mut self,
+        cause: WriteError,
+        observer: impl FnMut(&'static str),
+    ) -> WriteError {
+        let error = self.undo_completed(cause, observer);
+        if let Some(intent_log) = self.recorded.take() {
+            intent_log.clear();
+        }
+        error
+    }
+
+    fn undo_completed(
         &mut self,
         cause: WriteError,
         mut observer: impl FnMut(&'static str),
@@ -290,7 +402,9 @@ fn annotate_rollback_succeeded(error: WriteError) -> WriteError {
         WriteError::InvalidInput(message) => WriteError::InvalidInput(annotate(message)),
         WriteError::Io(message) => WriteError::Io(annotate(message)),
         // Raised while planning, before anything exists to roll back.
-        refused @ WriteError::LinkRewriteUnsupported(_) => refused,
+        refused @ (WriteError::LinkRewriteUnsupported(_) | WriteError::HeadingNotFound(_)) => {
+            refused
+        }
     }
 }
 
@@ -306,17 +420,88 @@ fn ensure_path_content_hash(path: &Path, label: &str, expected: &str) -> Result<
         ));
     }
     ensure_safe_destination(path)?;
-    let mut content = String::new();
-    open_existing_file_no_follow(path)
-        .and_then(|mut file| std::io::Read::read_to_string(&mut file, &mut content))
-        .map_err(|error| WriteError::Io(format!("failed to read note '{}': {error}", label)))?;
-    let actual = content_hash(&content);
+    let actual = content_hash(&read_existing_note(path, label)?);
     if actual != expected {
         return Err(WriteError::Conflict(format!(
             "note changed since it was read: expected {expected}, found {actual}"
         )));
     }
     Ok(())
+}
+
+/// The text of the note at `path`, opened without following a symbolic link
+/// in any component and read under `MAX_NOTE_BYTES` (#670). A note over the
+/// bound is refused unread: Hatchdoor reads no note that large, so it cannot
+/// edit one either.
+pub(super) fn read_existing_note(path: &Path, label: &str) -> Result<String, WriteError> {
+    read_note_bounded(path).map_err(|error| match error {
+        BoundedReadError::TooLarge { limit } => WriteError::InvalidInput(format!(
+            "note '{label}' is larger than {} MiB, the most Hatchdoor reads or edits",
+            limit / (1024 * 1024)
+        )),
+        BoundedReadError::NotRegular => {
+            WriteError::InvalidInput(format!("note '{label}' is not a regular file"))
+        }
+        // Editing it would mean rewriting bytes that are not text, and
+        // retrying cannot change that, so it is refused like any other
+        // unusable input.
+        BoundedReadError::NotUtf8 => WriteError::InvalidInput(format!(
+            "note '{label}' is not valid UTF-8 text; re-save it as UTF-8 to edit it"
+        )),
+        BoundedReadError::Io(error) => {
+            WriteError::Io(format!("failed to read note '{label}': {error}"))
+        }
+    })
+}
+
+/// The text of the note at `path`, opened without following a symbolic link
+/// in any component and without waiting on a FIFO, and read under
+/// `MAX_NOTE_BYTES`. Every read the write layer makes of a note's bytes goes
+/// through here or [`read_file_at_no_follow`] (#672), so a note that grows
+/// huge or turns into a pipe mid-write is refused, never read whole or
+/// waited on while the Vault's mutation guard is held.
+pub(super) fn read_note_bounded(path: &Path) -> Result<String, BoundedReadError> {
+    read_open_text(open_existing_file_no_follow(path).map_err(open_error)?)
+}
+
+/// A final symbolic link refused by `O_NOFOLLOW` is no note, as
+/// `note_file.rs`'s own open names it, not an I/O failure to retry.
+fn open_error(error: std::io::Error) -> BoundedReadError {
+    match error.raw_os_error() {
+        Some(libc::ELOOP) => BoundedReadError::NotRegular,
+        _ => BoundedReadError::Io(error),
+    }
+}
+
+fn read_open_text(file: fs::File) -> Result<String, BoundedReadError> {
+    String::from_utf8(read_open_bounded(file, MAX_NOTE_BYTES)?)
+        .map_err(|_| BoundedReadError::NotUtf8)
+}
+
+/// What a compare-before-replace reports when the file it would compare
+/// could not be read under the bound. The expected hash came from a bounded
+/// UTF-8 read, so a file now over the bound or not text has changed since:
+/// a conflict. One that is not a file at all is refused like any non-file
+/// destination. A plain I/O failure is worded by `io_error`.
+fn unreadable_prior(
+    error: BoundedReadError,
+    path: &Path,
+    expected: &str,
+    io_error: impl FnOnce(std::io::Error) -> WriteError,
+) -> WriteError {
+    match error {
+        BoundedReadError::TooLarge { .. } | BoundedReadError::NotUtf8 => {
+            WriteError::Conflict(format!(
+                "note changed since it was read: expected {}, and it is now {error}",
+                expected.trim()
+            ))
+        }
+        BoundedReadError::NotRegular => WriteError::InvalidInput(format!(
+            "refusing to replace non-file destination '{}'",
+            bounded_write_name(path)
+        )),
+        BoundedReadError::Io(error) => io_error(error),
+    }
 }
 
 pub(super) fn atomic_write(path: &Path, content: &str) -> Result<(), WriteError> {
@@ -346,6 +531,17 @@ pub(super) fn atomic_create(path: &Path, content: &str) -> Result<(), WriteError
     )
 }
 
+/// [`atomic_create`] for bytes, with a hook that runs once they are prepared
+/// and before the name is taken: the window in which something outside
+/// Hatchdoor can create the file the caller found free.
+pub(super) fn atomic_create_bytes_with_before_commit(
+    path: &Path,
+    bytes: &[u8],
+    before_commit: impl FnOnce(),
+) -> Result<(), WriteError> {
+    atomic_write_inner(path, bytes, Commit::CreateNew, None, before_commit, || {})
+}
+
 pub(super) fn atomic_write_bytes(path: &Path, bytes: &[u8]) -> Result<(), WriteError> {
     atomic_write_inner(path, bytes, Commit::Replace, None, || {}, || {})
 }
@@ -368,7 +564,7 @@ fn atomic_write_bytes_if_unchanged(
 /// A conditional write that leaves the note carrying `modified` rather than
 /// the time of the write. `None` means the original time could not be read,
 /// and the note takes a fresh one as any other write would.
-fn atomic_write_if_unchanged_keeping_modified(
+pub(super) fn atomic_write_if_unchanged_keeping_modified(
     path: &Path,
     content: &str,
     expected_content_hash: &str,
@@ -386,7 +582,7 @@ fn atomic_write_if_unchanged_keeping_modified(
 
 /// Read the modification time a bookkeeping rewrite should keep. A failure
 /// only costs the note its old timestamp, so it is logged, not raised.
-fn captured_modified_time(path: &Path) -> Option<SystemTime> {
+pub(super) fn captured_modified_time(path: &Path) -> Option<SystemTime> {
     match fs::symlink_metadata(path).and_then(|metadata| metadata.modified()) {
         Ok(modified) => Some(modified),
         Err(error) => {
@@ -490,13 +686,40 @@ fn atomic_write_inner(
     after_exchange: impl FnOnce(),
 ) -> Result<(), WriteError> {
     let (parent, filename) = open_parent_dir_no_follow(path)?;
-    let (tmp_name, mut file) = create_unique_temporary_file(&parent, &filename)?;
+    // The file being replaced, when there is one, so the new file can take
+    // over its mode and owner. A rename swaps in a whole new inode, which
+    // otherwise keeps whatever this process created it with (#630).
+    let replaced = metadata_at_no_follow(&parent, &filename)
+        .ok()
+        .filter(|metadata| metadata.st_mode & libc::S_IFMT == libc::S_IFREG);
+    let (tmp_name, mut file) = create_unique_temporary_file(
+        &parent,
+        &filename,
+        // A new file asks for 0666 and lets the umask, or the folder's
+        // default ACL, decide, like any other program creating one. A
+        // replacement starts private and is given the old file's mode
+        // below, so its bytes are never readable more widely than the
+        // note's were.
+        if replaced.is_some() { 0o600 } else { 0o666 },
+    )?;
+    // From here every early return removes the sidecar, so a refused or
+    // failed write leaves nothing behind for Git to pick up (#630).
+    let sidecar = PendingSidecar {
+        parent: &parent,
+        name: tmp_name,
+        armed: Cell::new(true),
+    };
+    let tmp_name = &sidecar.name;
 
     // Write and fsync the temp file so its bytes are durable BEFORE the rename.
     // Without the fsync, a crash just after the rename can leave the note file's
     // name pointing at data the OS never flushed (an empty or truncated file).
     file.write_all(bytes)
         .and_then(|()| {
+            if let Some(replaced) = &replaced {
+                let kept = keep_mode_and_owner(&file, path, replaced);
+                keep_access_list(&file, path, replaced, kept, &parent, &filename);
+            }
             // Stamped after the last byte is written, since any later write
             // would refresh it, and before the fsync makes it durable.
             if let Some(modified) = preserved_modified {
@@ -505,7 +728,6 @@ fn atomic_write_inner(
             file.sync_all()
         })
         .map_err(|error| {
-            let _ = unlink_at(&parent, &tmp_name);
             WriteError::Io(format!(
                 "failed to write temporary file for '{}': {error}",
                 path.display()
@@ -520,7 +742,7 @@ fn atomic_write_inner(
             // our private name, where we verify its identity. A concurrent atomic
             // save therefore becomes detectable and is swapped back, rather than
             // being silently overwritten in a check-then-rename gap.
-            if let Err(error) = rename_exchange(&parent, &tmp_name, &parent, &filename) {
+            if let Err(error) = rename_exchange(&parent, tmp_name, &parent, &filename) {
                 if !exchange_unavailable(commit_directory(path), &error) {
                     return Err(WriteError::from(error));
                 }
@@ -528,19 +750,21 @@ fn atomic_write_inner(
                 // directory at the commit point. On this path that point is the
                 // instant before the rename rather than just after an exchange,
                 // so it is handed over to fire there.
-                let committed = commit_checked_without_exchange(
+                commit_checked_without_exchange(
                     &parent,
-                    &tmp_name,
+                    tmp_name,
                     &filename,
                     path,
                     expected,
                     after_exchange,
-                );
-                if committed.is_ok() {
-                    let _ = parent.sync_all();
-                }
-                return committed;
+                )?;
+                sidecar.disarm();
+                let _ = parent.sync_all();
+                return Ok(());
             }
+            // The sidecar's name now holds the displaced note, which the
+            // checks below either remove or deliberately keep for recovery.
+            sidecar.disarm();
             after_exchange();
             // The exchange is the commit point. From here the destination already
             // holds the new bytes, so every failure below turns on whether the
@@ -550,39 +774,41 @@ fn atomic_write_inner(
             // A recovery message reaches an API client unsanitized, so it names
             // the note and the sidecar without their directories.
             let note = bounded_write_name(path);
-            let sidecar = tmp_name.to_string_lossy().into_owned();
-            let prior = match read_file_at_no_follow(&parent, &tmp_name) {
+            let sidecar_name = tmp_name.to_string_lossy().into_owned();
+            let prior = match read_file_at_no_follow(&parent, tmp_name) {
                 Ok(prior) => prior,
                 Err(read_error) => {
                     return Err(
-                        match rename_exchange(&parent, &tmp_name, &parent, &filename) {
+                        match rename_exchange(&parent, tmp_name, &parent, &filename) {
                             Ok(()) => {
-                                let _ = unlink_at(&parent, &tmp_name);
-                                WriteError::Io(format!(
-                                    "failed to inspect replaced note '{}': {read_error}",
-                                    path.display()
-                                ))
+                                let _ = unlink_at(&parent, tmp_name);
+                                unreadable_prior(read_error, path, expected, |error| {
+                                    WriteError::Io(format!(
+                                        "failed to inspect replaced note '{}': {error}",
+                                        path.display()
+                                    ))
+                                })
                             }
                             Err(undo_error) => WriteError::recovery_required(format!(
                                 "note '{note}' was replaced, its prior content could not be read \
                              back ({read_error}), and the replacement could not be undone \
                              ({undo_error}). The new content is committed and was never \
                              checked against the expected hash; the prior content is in \
-                             '{sidecar}' beside it if that file still exists."
+                             '{sidecar_name}' beside it if that file still exists."
                             )),
                         },
                     );
                 }
             };
             if content_hash(&prior) != expected.trim() {
-                if let Err(undo_error) = rename_exchange(&parent, &tmp_name, &parent, &filename) {
+                if let Err(undo_error) = rename_exchange(&parent, tmp_name, &parent, &filename) {
                     return Err(WriteError::recovery_required(format!(
                         "note '{note}' changed since it was read, and the replacement could not be \
                      undone ({undo_error}). The new content is committed over that change, \
-                     whose content is in '{sidecar}' beside it if that file still exists."
+                     whose content is in '{sidecar_name}' beside it if that file still exists."
                     )));
                 }
-                let _ = unlink_at(&parent, &tmp_name);
+                let _ = unlink_at(&parent, tmp_name);
                 return Err(WriteError::Conflict(format!(
                     "note changed since it was read: expected {}, found {}",
                     expected.trim(),
@@ -592,22 +818,18 @@ fn atomic_write_inner(
             // Committed and verified. A sidecar that will not unlink is
             // dot-prefixed litter the Vault already excludes as noise, and
             // failing here would report a correct write as a failure.
-            let _ = unlink_at(&parent, &tmp_name);
+            let _ = unlink_at(&parent, tmp_name);
         }
         Commit::Replace => {
             ensure_safe_destination_at(&parent, &filename, path)?;
-            rename_at(&parent, &tmp_name, &parent, &filename)?;
+            rename_at(&parent, tmp_name, &parent, &filename)?;
+            sidecar.disarm();
         }
         Commit::CreateNew => {
-            if let Err(error) = rename_flagged_at(
-                &parent,
-                &tmp_name,
-                &parent,
-                &filename,
-                RenameFlag::NoReplace,
-            ) {
+            if let Err(error) =
+                rename_flagged_at(&parent, tmp_name, &parent, &filename, RenameFlag::NoReplace)
+            {
                 if error.kind() == std::io::ErrorKind::AlreadyExists {
-                    let _ = unlink_at(&parent, &tmp_name);
                     return Err(WriteError::Conflict(format!(
                         "'{}' already exists",
                         bounded_write_name(path)
@@ -618,7 +840,6 @@ fn atomic_write_inner(
                     RenameFlag::NoReplace,
                     &error,
                 ) {
-                    let _ = unlink_at(&parent, &tmp_name);
                     return Err(WriteError::Io(format!(
                         "failed to create '{}': {error}",
                         path.display()
@@ -629,8 +850,9 @@ fn atomic_write_inner(
                 // as the only guard: the same race every write on such a
                 // filesystem accepts (ADR-26).
                 ensure_safe_destination_at(&parent, &filename, path)?;
-                rename_at(&parent, &tmp_name, &parent, &filename)?;
+                rename_at(&parent, tmp_name, &parent, &filename)?;
             }
+            sidecar.disarm();
         }
     }
 
@@ -652,6 +874,9 @@ fn atomic_write_inner(
 /// and the rename has its save overwritten instead of detected. That race is
 /// the price of writing at all on such a filesystem, and the Vault reports it
 /// once when its runtime is established rather than per write (ADR-26).
+///
+/// On failure nothing was committed, and the caller's [`PendingSidecar`]
+/// removes the prepared bytes.
 fn commit_checked_without_exchange(
     parent: &fs::File,
     tmp_name: &CString,
@@ -660,36 +885,381 @@ fn commit_checked_without_exchange(
     expected: &str,
     in_commit_window: impl FnOnce(),
 ) -> Result<(), WriteError> {
-    let committed = (|| {
-        // The destination's shape is checked before it is read, not after.
-        // The exchange path learns what it displaced by reading it back and
-        // can undo the swap if it dislikes the answer. Here the read is the
-        // check, so it must not be the first thing to touch the destination:
-        // opening a FIFO blocks until someone writes to it, and a blocked
-        // write is worse than a refused one.
-        ensure_safe_destination_at(parent, filename, path)?;
-        let prior = read_file_at_no_follow(parent, filename).map_err(|error| {
+    // The destination's shape is checked before it is read, not after.
+    // The exchange path learns what it displaced by reading it back and
+    // can undo the swap if it dislikes the answer. Here the read is the
+    // check, so it must not be the first thing to touch the destination:
+    // opening a FIFO blocks until someone writes to it, and a blocked
+    // write is worse than a refused one.
+    ensure_safe_destination_at(parent, filename, path)?;
+    let prior = read_file_at_no_follow(parent, filename).map_err(|error| {
+        unreadable_prior(error, path, expected, |error| {
             WriteError::Io(format!(
                 "failed to read note '{}' before replacing it: {error}",
                 path.display()
             ))
-        })?;
-        if content_hash(&prior) != expected.trim() {
-            return Err(WriteError::Conflict(format!(
-                "note changed since it was read: expected {}, found {}",
-                expected.trim(),
-                content_hash(&prior)
-            )));
-        }
-        in_commit_window();
-        rename_at(parent, tmp_name, parent, filename)
-    })();
-    if committed.is_err() {
-        // Nothing was committed, so the prepared bytes are litter rather than
-        // anything a recovery would want.
-        let _ = unlink_at(parent, tmp_name);
+        })
+    })?;
+    if content_hash(&prior) != expected.trim() {
+        return Err(WriteError::Conflict(format!(
+            "note changed since it was read: expected {}, found {}",
+            expected.trim(),
+            content_hash(&prior)
+        )));
     }
-    committed
+    in_commit_window();
+    rename_at(parent, tmp_name, parent, filename)
+}
+
+/// A prepared temporary file that has not yet taken the destination's name.
+/// Dropping it while still armed unlinks it, so every early return between
+/// its creation and the commit cleans up after itself rather than each one
+/// having to remember to (#630).
+struct PendingSidecar<'a> {
+    parent: &'a fs::File,
+    name: CString,
+    armed: Cell<bool>,
+}
+
+impl PendingSidecar<'_> {
+    /// The name no longer holds the prepared bytes, either because they were
+    /// committed or because an exchange put the displaced note there, which
+    /// its caller handles explicitly.
+    fn disarm(&self) {
+        self.armed.set(false);
+    }
+}
+
+impl Drop for PendingSidecar<'_> {
+    fn drop(&mut self) {
+        if self.armed.get() {
+            let _ = unlink_at(self.parent, &self.name);
+        }
+    }
+}
+
+/// Which of the replaced file's owner and group the prepared file ended up
+/// with.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Kept {
+    owner: bool,
+    group: bool,
+}
+
+/// Give the prepared file the mode and owner of the file it replaces. The
+/// owner is changed only where this process may, which in practice means as
+/// root; anywhere else the file keeps the old group when this process belongs
+/// to it, and the mode is still carried over. Neither failure stops the
+/// write: the content is what the caller asked for, and before #630 every
+/// write lost both.
+///
+/// Set-ID and sticky bits are not carried over. The bytes are the caller's,
+/// so a setuid file replaced as root would otherwise run the caller's
+/// content with its owner's rights.
+fn keep_mode_and_owner(file: &fs::File, path: &Path, replaced: &libc::stat) -> Kept {
+    let fd = file.as_raw_fd();
+    // What the prepared file was actually created with: a setgid folder
+    // gives it the folder's group rather than this process's.
+    let kept = |file_stat: &libc::stat| Kept {
+        owner: file_stat.st_uid == replaced.st_uid,
+        group: file_stat.st_gid == replaced.st_gid,
+    };
+    let created = fstat_fd(fd).map_or(
+        Kept {
+            owner: true,
+            group: true,
+        },
+        |created| kept(&created),
+    );
+    if (!created.owner || !created.group)
+        && unsafe { libc::fchown(fd, replaced.st_uid, replaced.st_gid) } != 0
+    {
+        let owner_error = std::io::Error::last_os_error();
+        // Keeping the group alone needs only membership in it.
+        let kept_group =
+            created.group || unsafe { libc::fchown(fd, libc::uid_t::MAX, replaced.st_gid) } == 0;
+        tracing::debug!(
+            path = %path.display(),
+            error = %owner_error,
+            kept_group,
+            "could not keep a note's owner; it now belongs to Hatchdoor's user"
+        );
+    }
+    if unsafe { libc::fchmod(fd, replaced.st_mode & 0o777) } != 0 {
+        tracing::warn!(
+            path = %path.display(),
+            error = %std::io::Error::last_os_error(),
+            "could not keep a note's permissions; it now carries Hatchdoor's defaults"
+        );
+    }
+    fstat_fd(fd).map_or(created, |result| kept(&result))
+}
+
+fn fstat_fd(fd: libc::c_int) -> Option<libc::stat> {
+    let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+    (unsafe { libc::fstat(fd, stat.as_mut_ptr()) } == 0).then(|| unsafe { stat.assume_init() })
+}
+
+/// Where the owner or group could not be kept, they keep their access
+/// through ACL entries naming them instead (#661): a note owned by the user
+/// who granted Hatchdoor access with `setfacl` would otherwise come back
+/// owned by Hatchdoor, leaving that user only "other" rights. The replaced
+/// file's own access ACL is carried over too, which is what keeps those
+/// entries through every later write, once the note already belongs to
+/// Hatchdoor. A filesystem without ACLs keeps only the mode.
+fn keep_access_list(
+    file: &fs::File,
+    path: &Path,
+    replaced: &libc::stat,
+    kept: Kept,
+    parent: &fs::File,
+    filename: &CString,
+) {
+    let old_acl = read_access_acl_at(parent, filename, replaced);
+    let Some(acl) = carried_access_acl(replaced, old_acl.as_deref(), kept) else {
+        return;
+    };
+    let value = encode_acl(&acl);
+    let result = unsafe {
+        libc::fsetxattr(
+            file.as_raw_fd(),
+            ACL_ACCESS_XATTR.as_ptr(),
+            value.as_ptr().cast(),
+            value.len(),
+            0,
+        )
+    };
+    if result != 0 {
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() == Some(libc::EOPNOTSUPP) {
+            tracing::debug!(
+                path = %path.display(),
+                "the filesystem has no ACLs, so a note's former owner keeps only its mode"
+            );
+        } else {
+            tracing::warn!(
+                path = %path.display(),
+                error = %error,
+                "could not keep a note's access list; its former owner may have lost access"
+            );
+        }
+    }
+}
+
+/// The extended attribute holding a file's access ACL on Linux.
+const ACL_ACCESS_XATTR: &std::ffi::CStr = c"system.posix_acl_access";
+
+// Linux's ACL extended-attribute layout, from `linux/posix_acl_xattr.h` and
+// `linux/posix_acl.h`: a little-endian version word, then one
+// `{tag: u16, perm: u16, id: u32}` per entry.
+const ACL_XATTR_VERSION: u32 = 2;
+const ACL_USER_OBJ: u16 = 0x01;
+const ACL_USER: u16 = 0x02;
+const ACL_GROUP_OBJ: u16 = 0x04;
+const ACL_GROUP: u16 = 0x08;
+const ACL_MASK: u16 = 0x10;
+const ACL_OTHER: u16 = 0x20;
+const ACL_UNDEFINED_ID: u32 = u32::MAX;
+
+/// The id the kernel reports for a user or group this process's user
+/// namespace cannot see (the default `overflowuid` and `overflowgid`), as
+/// in rootless Podman for a note owned by another host user. Naming it in
+/// an ACL would grant access to whoever 65534 maps to, not to the owner.
+const OVERFLOW_ID: u32 = 65534;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct AclEntry {
+    tag: u16,
+    perm: u16,
+    id: u32,
+}
+
+/// The entries the mask limits.
+fn masked(entry: &AclEntry) -> bool {
+    matches!(entry.tag, ACL_USER | ACL_GROUP_OBJ | ACL_GROUP)
+}
+
+/// The replaced file's access ACL, or `None` when it has none beyond its
+/// mode, cannot be found, is no longer the file `replaced` describes, or
+/// lives on a filesystem without ACLs.
+///
+/// Reading an ACL needs no read permission on the file, so the file is
+/// opened only as a path and its ACL read through `/proc/self/fd`, which
+/// every Linux system and container has.
+fn read_access_acl_at(
+    parent: &fs::File,
+    filename: &CString,
+    replaced: &libc::stat,
+) -> Option<Vec<AclEntry>> {
+    let fd = unsafe {
+        libc::openat(
+            parent.as_raw_fd(),
+            filename.as_ptr(),
+            libc::O_PATH | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+        )
+    };
+    let file = file_from_fd(fd).ok()?;
+    let current = fstat_fd(file.as_raw_fd())?;
+    if (current.st_dev, current.st_ino) != (replaced.st_dev, replaced.st_ino) {
+        return None;
+    }
+    let proc_path = CString::new(format!("/proc/self/fd/{}", file.as_raw_fd())).ok()?;
+    let mut buffer = Vec::new();
+    // The size can change between asking and reading; ERANGE asks again.
+    for _ in 0..4 {
+        let size = unsafe {
+            libc::getxattr(
+                proc_path.as_ptr(),
+                ACL_ACCESS_XATTR.as_ptr(),
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        buffer.resize(usize::try_from(size).ok()?, 0);
+        let length = unsafe {
+            libc::getxattr(
+                proc_path.as_ptr(),
+                ACL_ACCESS_XATTR.as_ptr(),
+                buffer.as_mut_ptr().cast(),
+                buffer.len(),
+            )
+        };
+        if let Ok(length) = usize::try_from(length) {
+            return decode_acl(&buffer[..length]);
+        }
+        if std::io::Error::last_os_error().raw_os_error() != Some(libc::ERANGE) {
+            return None;
+        }
+    }
+    None
+}
+
+fn decode_acl(bytes: &[u8]) -> Option<Vec<AclEntry>> {
+    let (version, entries) = bytes.split_first_chunk::<4>()?;
+    if u32::from_le_bytes(*version) != ACL_XATTR_VERSION || entries.len() % 8 != 0 {
+        return None;
+    }
+    Some(
+        entries
+            .chunks_exact(8)
+            .map(|entry| AclEntry {
+                tag: u16::from_le_bytes([entry[0], entry[1]]),
+                perm: u16::from_le_bytes([entry[2], entry[3]]),
+                id: u32::from_le_bytes([entry[4], entry[5], entry[6], entry[7]]),
+            })
+            .collect(),
+    )
+}
+
+fn encode_acl(entries: &[AclEntry]) -> Vec<u8> {
+    let mut bytes = ACL_XATTR_VERSION.to_le_bytes().to_vec();
+    for entry in entries {
+        bytes.extend_from_slice(&entry.tag.to_le_bytes());
+        bytes.extend_from_slice(&entry.perm.to_le_bytes());
+        bytes.extend_from_slice(&entry.id.to_le_bytes());
+    }
+    bytes
+}
+
+/// The access ACL the replacement needs, or `None` when the rename alone
+/// already gives everyone the access they had: the owner and group were
+/// kept and the old file had no ACL to carry over.
+///
+/// Built from the old file's ACL, or from its mode when it had none. Every
+/// entry the old mask limited keeps exactly what the mask let it have, so
+/// recomputing the mask grants nobody more than before. A former owner the
+/// replacement could not keep is named with the old owner's rights, and a
+/// former group with the old group's when it had any; an entry already
+/// naming them is replaced. An id this process cannot see is never named.
+fn carried_access_acl(
+    replaced: &libc::stat,
+    old: Option<&[AclEntry]>,
+    kept: Kept,
+) -> Option<Vec<AclEntry>> {
+    if kept.owner && kept.group && old.is_none() {
+        return None;
+    }
+    let mode = replaced.st_mode;
+    let bits = |shift: u32| ((mode >> shift) & 0o7) as u16;
+    let base = [
+        AclEntry {
+            tag: ACL_USER_OBJ,
+            perm: bits(6),
+            id: ACL_UNDEFINED_ID,
+        },
+        AclEntry {
+            tag: ACL_GROUP_OBJ,
+            perm: bits(3),
+            id: ACL_UNDEFINED_ID,
+        },
+        AclEntry {
+            tag: ACL_OTHER,
+            perm: bits(0),
+            id: ACL_UNDEFINED_ID,
+        },
+    ];
+    let old = old.unwrap_or(&base);
+    let old_mask = old
+        .iter()
+        .find(|entry| entry.tag == ACL_MASK)
+        .map_or(0o7, |entry| entry.perm);
+    let perm_of = |tag: u16| {
+        old.iter()
+            .find(|entry| entry.tag == tag)
+            .map_or(0, |entry| entry.perm)
+    };
+    let owner_perm = perm_of(ACL_USER_OBJ);
+    let group_perm = perm_of(ACL_GROUP_OBJ) & old_mask;
+    let visible = |id: u32| id != ACL_UNDEFINED_ID && id != OVERFLOW_ID;
+
+    let mut acl: Vec<AclEntry> = old
+        .iter()
+        .filter(|entry| entry.tag != ACL_MASK)
+        .filter(|entry| !matches!(entry.tag, ACL_USER | ACL_GROUP) || visible(entry.id))
+        .filter(|entry| !(entry.tag == ACL_USER && !kept.owner && entry.id == replaced.st_uid))
+        .filter(|entry| !(entry.tag == ACL_GROUP && !kept.group && entry.id == replaced.st_gid))
+        .map(|entry| {
+            if masked(entry) {
+                AclEntry {
+                    perm: entry.perm & old_mask,
+                    ..*entry
+                }
+            } else {
+                *entry
+            }
+        })
+        .collect();
+    if !kept.owner && visible(replaced.st_uid) {
+        acl.push(AclEntry {
+            tag: ACL_USER,
+            perm: owner_perm,
+            id: replaced.st_uid,
+        });
+    }
+    if !kept.group && group_perm != 0 && visible(replaced.st_gid) {
+        acl.push(AclEntry {
+            tag: ACL_GROUP,
+            perm: group_perm,
+            id: replaced.st_gid,
+        });
+    }
+    if acl
+        .iter()
+        .any(|entry| entry.tag == ACL_USER || entry.tag == ACL_GROUP)
+    {
+        let mask = acl
+            .iter()
+            .filter(|entry| masked(entry))
+            .fold(0, |mask, entry| mask | entry.perm);
+        acl.push(AclEntry {
+            tag: ACL_MASK,
+            perm: mask,
+            id: ACL_UNDEFINED_ID,
+        });
+    }
+    // The kernel refuses an ACL out of this order.
+    acl.sort_by_key(|entry| (entry.tag, entry.id));
+    Some(acl)
 }
 
 fn ensure_safe_destination(path: &Path) -> Result<(), WriteError> {
@@ -702,17 +1272,20 @@ fn ensure_safe_destination_at(
     filename: &CString,
     path: &Path,
 ) -> Result<(), WriteError> {
+    // Invalid input rather than a conflict: a conflict tells the caller to
+    // read again and retry, and a retry meets the same symlink or folder
+    // every time (#630).
     match metadata_at_no_follow(parent, filename) {
         Ok(metadata) if metadata.st_mode & libc::S_IFMT == libc::S_IFLNK => {
-            Err(WriteError::Conflict(format!(
+            Err(WriteError::InvalidInput(format!(
                 "refusing to replace symlink destination '{}'",
-                path.display()
+                bounded_write_name(path)
             )))
         }
         Ok(metadata) if metadata.st_mode & libc::S_IFMT != libc::S_IFREG => {
-            Err(WriteError::Conflict(format!(
+            Err(WriteError::InvalidInput(format!(
                 "refusing to replace non-file destination '{}'",
-                path.display()
+                bounded_write_name(path)
             )))
         }
         Ok(_) => Ok(()),
@@ -738,6 +1311,7 @@ fn temporary_sidecar_prefix(filename: &str) -> String {
 fn create_unique_temporary_file(
     parent: &fs::File,
     filename: &CString,
+    mode: libc::mode_t,
 ) -> Result<(CString, fs::File), WriteError> {
     let filename = filename.to_str().map_err(|_| {
         WriteError::InvalidInput("write destination filename must be UTF-8".to_string())
@@ -753,7 +1327,7 @@ fn create_unique_temporary_file(
         let suffix: String = random.iter().map(|byte| format!("{byte:02x}")).collect();
         let tmp = CString::new(format!("{}{suffix}", temporary_sidecar_prefix(filename)))
             .expect("generated name has no NUL");
-        match create_file_at_no_follow(parent, &tmp) {
+        match create_file_at_no_follow(parent, &tmp, mode) {
             Ok(file) => return Ok((tmp, file)),
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
             Err(error) => {
@@ -1101,8 +1675,13 @@ fn open_parent_dir_no_follow_io(path: &Path) -> Result<(fs::File, CString), std:
         ));
     }
 
+    // Each directory on the way is opened as a bare path handle, which needs
+    // only permission to pass through it, not to list it. A Vault under a
+    // home folder at 0711 owned by someone else otherwise failed every write
+    // while reporting itself writable (#630). Only the parent the write
+    // happens in is opened for reading, since its handle is synced.
     let root = CString::new("/").expect("literal has no NUL");
-    let mut current = open_dir_at(libc::AT_FDCWD, &root)?;
+    let mut current = open_path_dir_at(libc::AT_FDCWD, &root)?;
     for component in parent.components() {
         use std::path::Component;
         match component {
@@ -1111,7 +1690,7 @@ fn open_parent_dir_no_follow_io(path: &Path) -> Result<(fs::File, CString), std:
                 let part = CString::new(part.as_encoded_bytes()).map_err(|_| {
                     std::io::Error::new(std::io::ErrorKind::InvalidInput, "path component has NUL")
                 })?;
-                current = open_dir_at(current.as_raw_fd(), &part)?;
+                current = open_path_dir_at(current.as_raw_fd(), &part)?;
             }
             _ => {
                 return Err(std::io::Error::new(
@@ -1121,38 +1700,62 @@ fn open_parent_dir_no_follow_io(path: &Path) -> Result<(fs::File, CString), std:
             }
         }
     }
-    Ok((current, filename))
+    let itself = CString::new(".").expect("literal has no NUL");
+    Ok((open_dir_at(current.as_raw_fd(), &itself)?, filename))
 }
 
 fn open_dir_at(dirfd: libc::c_int, name: &CString) -> Result<fs::File, std::io::Error> {
+    open_dir_with(dirfd, name, libc::O_RDONLY)
+}
+
+/// A handle that can only be walked through, never read: enough to resolve
+/// the next name relative to it.
+fn open_path_dir_at(dirfd: libc::c_int, name: &CString) -> Result<fs::File, std::io::Error> {
+    open_dir_with(dirfd, name, libc::O_PATH)
+}
+
+fn open_dir_with(
+    dirfd: libc::c_int,
+    name: &CString,
+    access: libc::c_int,
+) -> Result<fs::File, std::io::Error> {
     let fd = unsafe {
         libc::openat(
             dirfd,
             name.as_ptr(),
-            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+            access | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
         )
     };
     file_from_fd(fd)
 }
 
-fn create_file_at_no_follow(parent: &fs::File, name: &CString) -> Result<fs::File, std::io::Error> {
+/// Create `name` exclusively, with `mode` as the permissions requested of
+/// the kernel, before the umask or a default ACL narrows them.
+fn create_file_at_no_follow(
+    parent: &fs::File,
+    name: &CString,
+    mode: libc::mode_t,
+) -> Result<fs::File, std::io::Error> {
     let fd = unsafe {
         libc::openat(
             parent.as_raw_fd(),
             name.as_ptr(),
             libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_CLOEXEC | libc::O_NOFOLLOW,
-            0o600,
+            libc::c_uint::from(mode),
         )
     };
     file_from_fd(fd)
 }
 
+/// Opens `name` for reading. `O_NONBLOCK` keeps a FIFO swapped in for a
+/// note from holding the open, and with it the Vault's mutation guard, until
+/// a writer appears (#672); a regular file ignores the flag.
 fn open_file_at_no_follow(parent: &fs::File, name: &CString) -> Result<fs::File, std::io::Error> {
     let fd = unsafe {
         libc::openat(
             parent.as_raw_fd(),
             name.as_ptr(),
-            libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+            libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_NOCTTY,
         )
     };
     file_from_fd(fd)
@@ -1183,10 +1786,10 @@ fn metadata_at_no_follow(parent: &fs::File, name: &CString) -> Result<libc::stat
     }
 }
 
-fn read_file_at_no_follow(parent: &fs::File, name: &CString) -> Result<String, std::io::Error> {
-    let mut content = String::new();
-    std::io::Read::read_to_string(&mut open_file_at_no_follow(parent, name)?, &mut content)?;
-    Ok(content)
+/// The text of `name` under `parent`, through the read model's bounded
+/// reader: never more than `MAX_NOTE_BYTES`, never a FIFO or device (#672).
+fn read_file_at_no_follow(parent: &fs::File, name: &CString) -> Result<String, BoundedReadError> {
+    read_open_text(open_file_at_no_follow(parent, name).map_err(open_error)?)
 }
 
 /// Assert the entry is an ordinary file: not a symlink, directory, device
@@ -1207,7 +1810,7 @@ fn assert_regular_file_at(parent: &fs::File, name: &CString) -> Result<(), std::
 /// hash the content as Markdown. Anything that only needs the file to be a
 /// file must call [`assert_regular_file_at`] instead: an attachment is
 /// arbitrary bytes and need not decode as UTF-8 (#220).
-fn read_regular_file_at(parent: &fs::File, name: &CString) -> Result<String, std::io::Error> {
+fn read_regular_file_at(parent: &fs::File, name: &CString) -> Result<String, BoundedReadError> {
     assert_regular_file_at(parent, name)?;
     read_file_at_no_follow(parent, name)
 }
@@ -1284,6 +1887,398 @@ mod tests {
         let name = CString::new(path.as_os_str().as_bytes()).expect("fifo path");
         let result = unsafe { libc::mkfifo(name.as_ptr(), 0o600) };
         assert_eq!(result, 0, "mkfifo: {}", std::io::Error::last_os_error());
+    }
+
+    /// Every write sidecar left in `directory`, for any destination.
+    fn sidecars_in(directory: &Path) -> Vec<String> {
+        fs::read_dir(directory)
+            .expect("read directory")
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.starts_with('.') && name.contains(".hatchdoor-tmp-"))
+            .collect()
+    }
+
+    /// #630: the sidecar was written before the destination was checked, and
+    /// a refusal left it behind, where Git committed it. A retry, which the
+    /// old `Conflict` invited, left another.
+    #[cfg(unix)]
+    #[test]
+    fn a_refused_replace_leaves_no_sidecar_and_is_not_retryable() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempdir().expect("tempdir");
+        let outside = tempdir().expect("outside");
+        let target = outside.path().join("target.md");
+        fs::write(&target, "outside").expect("outside file");
+        symlink(&target, dir.path().join("Link.md")).expect("symlink");
+        fs::create_dir(dir.path().join("Folder.md")).expect("folder");
+
+        for name in ["Link.md", "Folder.md"] {
+            let error = atomic_write(&dir.path().join(name), "LEAKED")
+                .expect_err("a non-file destination must be refused");
+            assert!(
+                matches!(&error, WriteError::InvalidInput(message) if !message.contains(&*dir.path().to_string_lossy())),
+                "{name}: a refusal a retry cannot fix is invalid input, named without the host path: {error:?}"
+            );
+        }
+        assert_eq!(sidecars_in(dir.path()), Vec::<String>::new());
+        assert_eq!(fs::read_to_string(&target).unwrap(), "outside");
+    }
+
+    /// A rename gives the note a new inode, which kept the 0600 the sidecar
+    /// was created with until #630.
+    #[cfg(unix)]
+    #[test]
+    fn a_replaced_note_keeps_its_mode_and_a_new_one_follows_the_umask() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempdir().expect("tempdir");
+        let mode = |path: &Path| fs::metadata(path).unwrap().permissions().mode() & 0o7777;
+
+        let shared = dir.path().join("Shared.md");
+        fs::write(&shared, "original").expect("note");
+        fs::set_permissions(&shared, fs::Permissions::from_mode(0o664)).expect("chmod");
+        atomic_write(&shared, "replaced").expect("replace");
+        assert_eq!(mode(&shared), 0o664, "a plain replace keeps the mode");
+        atomic_write_if_unchanged(&shared, "edited", &content_hash("replaced"))
+            .expect("conditional write");
+        assert_eq!(mode(&shared), 0o664, "a conditional write keeps the mode");
+
+        // What any other program creating a file here gets, umask and all.
+        let reference = dir.path().join("reference");
+        fs::File::create(&reference).expect("reference file");
+        let created = dir.path().join("Created.md");
+        atomic_create(&created, "new").expect("create");
+        assert_eq!(mode(&created), mode(&reference));
+        let written = dir.path().join("Written.md");
+        atomic_write(&written, "new").expect("write a new note");
+        assert_eq!(mode(&written), mode(&reference));
+    }
+
+    /// A setuid file replaced with a caller's bytes must not run them with
+    /// its owner's rights.
+    #[cfg(unix)]
+    #[test]
+    fn a_replaced_file_does_not_keep_set_id_bits() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempdir().expect("tempdir");
+        let tool = dir.path().join("tool.png");
+        fs::write(&tool, "original").expect("file");
+        fs::set_permissions(&tool, fs::Permissions::from_mode(0o6755)).expect("chmod");
+
+        atomic_write(&tool, "caller bytes").expect("replace");
+
+        assert_eq!(
+            fs::metadata(&tool).unwrap().permissions().mode() & 0o7777,
+            0o755
+        );
+    }
+
+    /// Without the right to change the owner, a note still keeps a group
+    /// this process belongs to, so a folder shared through a group stays
+    /// writable by it.
+    #[cfg(unix)]
+    #[test]
+    fn a_replaced_note_keeps_a_group_the_process_belongs_to() {
+        use std::os::unix::fs::MetadataExt;
+
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        let primary = unsafe { libc::getegid() };
+        let mut groups = vec![0 as libc::gid_t; 64];
+        let count = unsafe { libc::getgroups(64, groups.as_mut_ptr()) };
+        let Some(other) = groups[..count.max(0) as usize]
+            .iter()
+            .copied()
+            .find(|group| *group != primary)
+        else {
+            return; // No second group to keep.
+        };
+        let dir = tempdir().expect("tempdir");
+        let note = dir.path().join("Shared.md");
+        fs::write(&note, "original").expect("note");
+        std::os::unix::fs::chown(&note, None, Some(other)).expect("chgrp");
+
+        atomic_write(&note, "edited").expect("write");
+
+        assert_eq!(fs::metadata(&note).unwrap().gid(), other);
+    }
+
+    /// The walk to the note's folder needs only permission to pass through
+    /// the folders above it, as any other program writing there does. Root
+    /// passes through everything, so there is nothing to show as root.
+    #[cfg(unix)]
+    #[test]
+    fn a_write_reaches_a_folder_under_one_it_may_not_list() {
+        use std::os::unix::fs::PermissionsExt;
+
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        let dir = tempdir().expect("tempdir");
+        let home = dir.path().join("home");
+        let vault = home.join("vault");
+        fs::create_dir_all(&vault).expect("vault");
+        fs::set_permissions(&home, fs::Permissions::from_mode(0o311)).expect("seal home");
+
+        let outcome = atomic_write(&vault.join("Note.md"), "written");
+        fs::set_permissions(&home, fs::Permissions::from_mode(0o755)).expect("reopen home");
+
+        outcome.expect("a write under a folder that can be passed through");
+        assert_eq!(
+            fs::read_to_string(vault.join("Note.md")).unwrap(),
+            "written"
+        );
+    }
+
+    /// Run as root, the write can hand the note back to its owner. As
+    /// anyone else it cannot, and there is nothing to check.
+    #[cfg(unix)]
+    #[test]
+    fn a_replaced_note_keeps_its_owner_where_the_process_may_set_it() {
+        use std::os::unix::fs::MetadataExt;
+
+        if unsafe { libc::geteuid() } != 0 {
+            return;
+        }
+        let dir = tempdir().expect("tempdir");
+        let note = dir.path().join("Owned.md");
+        fs::write(&note, "original").expect("note");
+        std::os::unix::fs::chown(&note, Some(1000), Some(1000)).expect("chown");
+
+        atomic_write_if_unchanged(&note, "edited", &content_hash("original")).expect("write");
+
+        let metadata = fs::metadata(&note).unwrap();
+        assert_eq!((metadata.uid(), metadata.gid()), (1000, 1000));
+    }
+
+    fn stat_of(uid: u32, gid: u32, mode: libc::mode_t) -> libc::stat {
+        let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+        stat.st_uid = uid;
+        stat.st_gid = gid;
+        stat.st_mode = libc::S_IFREG | mode;
+        stat
+    }
+
+    fn acl_entry(tag: u16, perm: u16, id: u32) -> AclEntry {
+        AclEntry { tag, perm, id }
+    }
+
+    const KEPT: Kept = Kept {
+        owner: true,
+        group: true,
+    };
+    const LOST: Kept = Kept {
+        owner: false,
+        group: false,
+    };
+
+    /// #661: a note owned by uid 1000, replaced by Hatchdoor's uid 65532,
+    /// names 1000 and its group with the rights the owner bits and group
+    /// bits gave them, so they keep that access.
+    #[test]
+    fn a_former_owner_and_group_are_named_with_their_old_rights() {
+        let u = ACL_UNDEFINED_ID;
+        assert_eq!(
+            carried_access_acl(&stat_of(1000, 1000, 0o644), None, LOST),
+            Some(vec![
+                acl_entry(ACL_USER_OBJ, 6, u),
+                acl_entry(ACL_USER, 6, 1000),
+                acl_entry(ACL_GROUP_OBJ, 4, u),
+                acl_entry(ACL_GROUP, 4, 1000),
+                acl_entry(ACL_MASK, 6, u),
+                acl_entry(ACL_OTHER, 4, u),
+            ])
+        );
+        // A group with no rights needs no entry naming it.
+        assert_eq!(
+            carried_access_acl(&stat_of(1000, 1000, 0o600), None, LOST),
+            Some(vec![
+                acl_entry(ACL_USER_OBJ, 6, u),
+                acl_entry(ACL_USER, 6, 1000),
+                acl_entry(ACL_GROUP_OBJ, 0, u),
+                acl_entry(ACL_MASK, 6, u),
+                acl_entry(ACL_OTHER, 0, u),
+            ])
+        );
+    }
+
+    /// In a user namespace, as under rootless Podman, a note owned by a host
+    /// user the container cannot see reports 65534, and an ACL entry naming
+    /// one reads back as 65534 or as no id at all. Naming 65534 would grant
+    /// whoever it maps to, and a second unnamed entry makes the kernel
+    /// refuse the whole list.
+    #[test]
+    fn an_id_the_process_cannot_see_is_never_named() {
+        let u = ACL_UNDEFINED_ID;
+        let old = vec![
+            acl_entry(ACL_USER_OBJ, 6, u),
+            acl_entry(ACL_USER, 6, 2000),
+            acl_entry(ACL_USER, 6, OVERFLOW_ID),
+            acl_entry(ACL_USER, 4, u),
+            acl_entry(ACL_GROUP_OBJ, 4, u),
+            acl_entry(ACL_MASK, 6, u),
+            acl_entry(ACL_OTHER, 0, u),
+        ];
+        assert_eq!(
+            carried_access_acl(&stat_of(OVERFLOW_ID, OVERFLOW_ID, 0o640), Some(&old), LOST),
+            Some(vec![
+                acl_entry(ACL_USER_OBJ, 6, u),
+                acl_entry(ACL_USER, 6, 2000),
+                acl_entry(ACL_GROUP_OBJ, 4, u),
+                acl_entry(ACL_MASK, 6, u),
+                acl_entry(ACL_OTHER, 0, u),
+            ])
+        );
+    }
+
+    /// Kept as root or as the note's own owner, a note with no ACL gets none
+    /// written, as after #630.
+    #[test]
+    fn a_kept_owner_with_no_old_acl_needs_no_acl() {
+        assert_eq!(
+            carried_access_acl(&stat_of(1000, 1000, 0o644), None, KEPT),
+            None
+        );
+    }
+
+    /// Once the note belongs to Hatchdoor, the next write keeps its owner and
+    /// must carry the old ACL over, or the former owner's entry is lost.
+    #[test]
+    fn an_old_acl_is_carried_over_when_the_owner_was_kept() {
+        let u = ACL_UNDEFINED_ID;
+        let old = vec![
+            acl_entry(ACL_USER_OBJ, 6, u),
+            acl_entry(ACL_USER, 6, 1000),
+            acl_entry(ACL_GROUP_OBJ, 4, u),
+            acl_entry(ACL_MASK, 6, u),
+            acl_entry(ACL_OTHER, 4, u),
+        ];
+        assert_eq!(
+            carried_access_acl(&stat_of(65532, 65532, 0o664), Some(&old), KEPT),
+            Some(old)
+        );
+    }
+
+    /// An entry the old mask limited keeps only what it had in effect, the
+    /// former owner's existing entry is replaced rather than duplicated, and
+    /// the kept group gets no named entry.
+    #[test]
+    fn carried_entries_keep_their_effective_rights_only() {
+        let u = ACL_UNDEFINED_ID;
+        let old = vec![
+            acl_entry(ACL_USER_OBJ, 6, u),
+            acl_entry(ACL_USER, 7, 1000),
+            acl_entry(ACL_USER, 7, 2000),
+            acl_entry(ACL_GROUP_OBJ, 6, u),
+            acl_entry(ACL_MASK, 4, u),
+            acl_entry(ACL_OTHER, 0, u),
+        ];
+        assert_eq!(
+            carried_access_acl(
+                &stat_of(1000, 1000, 0o640),
+                Some(&old),
+                Kept {
+                    owner: false,
+                    group: true
+                }
+            ),
+            Some(vec![
+                acl_entry(ACL_USER_OBJ, 6, u),
+                acl_entry(ACL_USER, 6, 1000),
+                acl_entry(ACL_USER, 4, 2000),
+                acl_entry(ACL_GROUP_OBJ, 4, u),
+                acl_entry(ACL_MASK, 6, u),
+                acl_entry(ACL_OTHER, 0, u),
+            ])
+        );
+    }
+
+    #[test]
+    fn an_acl_survives_encoding_and_a_foreign_version_is_refused() {
+        let acl = vec![
+            acl_entry(ACL_USER_OBJ, 6, ACL_UNDEFINED_ID),
+            acl_entry(ACL_USER, 6, 1000),
+        ];
+        assert_eq!(decode_acl(&encode_acl(&acl)), Some(acl));
+        let mut foreign = encode_acl(&[]);
+        foreign[0] = 1;
+        assert_eq!(decode_acl(&foreign), None);
+        assert_eq!(decode_acl(&[2, 0, 0]), None);
+    }
+
+    /// On a filesystem with ACLs, an entry on a note survives a replace.
+    /// Without them there is nothing to check: the write itself is covered
+    /// by every other test.
+    #[test]
+    fn a_replaced_note_keeps_its_access_acl() {
+        use std::os::unix::ffi::OsStrExt;
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempdir().expect("tempdir");
+        let note = dir.path().join("Shared.md");
+        fs::write(&note, "original").expect("note");
+        let name = CString::new(note.as_os_str().as_bytes()).unwrap();
+        let u = ACL_UNDEFINED_ID;
+        let acl = vec![
+            acl_entry(ACL_USER_OBJ, 6, u),
+            acl_entry(ACL_USER, 6, 4242),
+            acl_entry(ACL_GROUP_OBJ, 4, u),
+            acl_entry(ACL_MASK, 6, u),
+            acl_entry(ACL_OTHER, 4, u),
+        ];
+        let value = encode_acl(&acl);
+        let set = unsafe {
+            libc::setxattr(
+                name.as_ptr(),
+                ACL_ACCESS_XATTR.as_ptr(),
+                value.as_ptr().cast(),
+                value.len(),
+                0,
+            )
+        };
+        if set != 0 {
+            return; // No ACLs here.
+        }
+
+        atomic_write_if_unchanged(&note, "edited", &content_hash("original")).expect("write");
+        assert_eq!(fs::read_to_string(&note).unwrap(), "edited");
+        let (parent, filename) = open_parent_dir_no_follow(&note).unwrap();
+        let replaced = metadata_at_no_follow(&parent, &filename).unwrap();
+        assert_eq!(read_access_acl_at(&parent, &filename, &replaced), Some(acl));
+
+        // Reading the list needs no read permission on the note, as when
+        // Hatchdoor may replace an attachment it may not read.
+        fs::set_permissions(&note, fs::Permissions::from_mode(0o200)).expect("chmod");
+        let unreadable_acl = vec![
+            acl_entry(ACL_USER_OBJ, 2, u),
+            acl_entry(ACL_USER, 6, 4242),
+            acl_entry(ACL_GROUP_OBJ, 0, u),
+            acl_entry(ACL_MASK, 6, u),
+            acl_entry(ACL_OTHER, 0, u),
+        ];
+        let set = unsafe {
+            libc::setxattr(
+                name.as_ptr(),
+                ACL_ACCESS_XATTR.as_ptr(),
+                encode_acl(&unreadable_acl).as_ptr().cast(),
+                encode_acl(&unreadable_acl).len(),
+                0,
+            )
+        };
+        assert_eq!(set, 0, "{}", std::io::Error::last_os_error());
+        atomic_write(&note, "replaced unread").expect("replace");
+
+        let replaced = metadata_at_no_follow(&parent, &filename).unwrap();
+        assert_eq!(
+            read_access_acl_at(&parent, &filename, &replaced),
+            Some(unreadable_acl)
+        );
+        fs::set_permissions(&note, fs::Permissions::from_mode(0o600)).expect("chmod");
+        assert_eq!(fs::read_to_string(&note).unwrap(), "replaced unread");
     }
 
     #[test]
@@ -1445,25 +2440,24 @@ mod tests {
     fn atomic_write_restores_the_note_and_clears_its_sidecar_when_the_undo_succeeds() {
         use std::os::unix::fs::PermissionsExt;
 
+        // Root reads through the mode bits, so the read-back would succeed
+        // and this window would never open.
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+
         let dir = tempdir().expect("tempdir");
         let note = dir.path().join("Note.md");
         fs::write(&note, "original").expect("original note");
         let expected = content_hash("original");
 
-        let outcome =
-            atomic_write_if_unchanged_with_after_exchange(&note, "agent edit", &expected, || {
-                // Unreadable rather than absent, so the read fails with the
-                // displaced file still there for the undo to swap back.
-                let sidecar = find_write_sidecar(&note);
-                fs::set_permissions(&sidecar, fs::Permissions::from_mode(0o000))
-                    .expect("seal sidecar");
-            });
-
-        // Root ignores the mode bits, so the read succeeds and this window
-        // never opens. Nothing to assert about a path that did not run.
-        if outcome.is_ok() {
-            panic!("PROBE: took the root escape hatch");
-        }
+        atomic_write_if_unchanged_with_after_exchange(&note, "agent edit", &expected, || {
+            // Unreadable rather than absent, so the read fails with the
+            // displaced file still there for the undo to swap back.
+            let sidecar = find_write_sidecar(&note);
+            fs::set_permissions(&sidecar, fs::Permissions::from_mode(0o000)).expect("seal sidecar");
+        })
+        .expect_err("a write whose displaced note cannot be read back must fail");
         // The restored file is the sealed one, so it comes back with the mode
         // the test set. Reopen it before reading its contents.
         fs::set_permissions(&note, fs::Permissions::from_mode(0o644)).expect("reopen note");
@@ -1706,7 +2700,7 @@ mod tests {
         let dst_dir = root.join("dst");
         fs::create_dir(&dst_dir).expect("dst dir");
 
-        let mut journal = MutationJournal::new(root);
+        let mut journal = MutationJournal::new(root, None);
         journal
             .move_file(MutationPhase::Asset, &binary, &dst_dir.join("photo.jpg"))
             .expect("binary asset move");
@@ -1758,7 +2752,7 @@ mod tests {
             },
         ];
 
-        let mut journal = MutationJournal::new(root);
+        let mut journal = MutationJournal::new(root, None);
         journal
             .move_file(
                 MutationPhase::Asset,
@@ -1796,7 +2790,7 @@ mod tests {
         let destination = root.join("taken.png");
         fs::write(&destination, "the user's own file").unwrap();
 
-        let mut journal = MutationJournal::new(root);
+        let mut journal = MutationJournal::new(root, None);
         let cause = journal
             .move_file(MutationPhase::Asset, &source, &destination)
             .expect_err("an occupied destination refuses the move");
@@ -1821,7 +2815,7 @@ mod tests {
         fs::write(&source, "original").unwrap();
         let expected = content_hash("original");
 
-        let mut journal = MutationJournal::new(root);
+        let mut journal = MutationJournal::new(root, None);
         // Something lands inside the directory gate standing at the source
         // name, so the gate will not clear once the move has committed.
         let result =
@@ -1857,7 +2851,7 @@ mod tests {
                 content: "rewritten second\n".to_string(),
             },
         ];
-        let mut journal = MutationJournal::new(root);
+        let mut journal = MutationJournal::new(root, None);
 
         let cause = journal
             .apply_rewrites(rewrites)
@@ -1886,7 +2880,7 @@ mod tests {
         fs::write(&note_source, "note").expect("note");
         fs::write(&asset_source, "asset").expect("asset");
         fs::write(&backlink, "original backlink").expect("backlink");
-        let mut journal = MutationJournal::new(root);
+        let mut journal = MutationJournal::new(root, None);
         journal
             .move_note(&note_source, &note_destination, &content_hash("note"))
             .expect("move note");
@@ -1951,7 +2945,7 @@ mod tests {
                 content: "rewritten second\n".to_string(),
             },
         ];
-        let mut journal = MutationJournal::new(root);
+        let mut journal = MutationJournal::new(root, None);
 
         let cause = journal
             .apply_rewrites_with_before_commit(rewrites, |path| {
@@ -1979,6 +2973,104 @@ mod tests {
         );
     }
 
+    /// A note swapped for a FIFO after the pre-edit check is refused at the
+    /// commit's read-back instead of blocking the write on a writer that
+    /// never comes (#672). The write runs on its own thread so a regression
+    /// fails the test rather than hanging it.
+    #[cfg(unix)]
+    #[test]
+    fn a_note_swapped_for_a_fifo_before_commit_is_refused_promptly() {
+        use std::os::unix::fs::FileTypeExt;
+
+        let dir = tempdir().expect("tempdir");
+        let note = dir.path().join("Note.md");
+        fs::write(&note, "original\n").expect("note");
+        let expected = content_hash("original\n");
+
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let path = note.clone();
+        std::thread::spawn(move || {
+            let result = atomic_write_if_unchanged_with_before_exchange(
+                &path,
+                "edited\n",
+                &expected,
+                || {
+                    fs::remove_file(&path).expect("remove note");
+                    make_fifo(&path);
+                },
+            );
+            let _ = sender.send(result);
+        });
+        let result = receiver
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("the write must not block on the FIFO");
+
+        let Err(WriteError::InvalidInput(message)) = result else {
+            panic!("expected a non-file refusal, got {result:?}");
+        };
+        assert!(message.contains("non-file destination"), "{message}");
+        assert!(
+            fs::symlink_metadata(&note)
+                .expect("fifo")
+                .file_type()
+                .is_fifo(),
+            "the FIFO is put back where it was"
+        );
+        assert!(sidecars_in(dir.path()).is_empty());
+    }
+
+    /// A symbolic link where a note was is no note: the bounded read names
+    /// it not a regular file, as the read model's own reader does, rather
+    /// than an I/O failure a caller would retry (#672).
+    #[cfg(unix)]
+    #[test]
+    fn a_bounded_note_read_names_a_symbolic_link_not_a_regular_file() {
+        let dir = tempdir().expect("tempdir");
+        let target = dir.path().join("Target.md");
+        fs::write(&target, "text\n").expect("target");
+        let link = dir.path().join("Link.md");
+        std::os::unix::fs::symlink(&target, &link).expect("symlink");
+
+        assert!(matches!(
+            read_note_bounded(&link),
+            Err(BoundedReadError::NotRegular)
+        ));
+    }
+
+    /// A planned rewrite target that grew past `MAX_NOTE_BYTES` after the
+    /// plan read it conflicts at apply time, unread, and nothing is written
+    /// to it (#672). The file is sparse, so the test costs no disk.
+    #[test]
+    fn a_rewrite_target_that_grew_past_the_bound_since_the_plan_conflicts() {
+        let dir = tempdir().expect("tempdir");
+        let target = dir.path().join("Backlink.md");
+        fs::write(&target, "[[Old]]\n").expect("backlink");
+        let rewrite = TextRewrite {
+            path: target.clone(),
+            original_hash: content_hash("[[Old]]\n"),
+            content: "[[New]]\n".to_string(),
+        };
+        crate::vault::grow_past_note_bound(&target);
+        let mut journal = MutationJournal::new(dir.path(), None);
+
+        let error = journal
+            .apply_rewrites(vec![rewrite])
+            .expect_err("the grown target must be refused");
+
+        let WriteError::Conflict(message) = error else {
+            panic!("expected a conflict, got {error:?}");
+        };
+        assert!(
+            message.contains("changed after this change was planned"),
+            "{message}"
+        );
+        assert_eq!(
+            fs::metadata(&target).expect("target").len(),
+            MAX_NOTE_BYTES + 1,
+            "nothing was written to the grown note"
+        );
+    }
+
     #[test]
     fn mutation_journal_preserves_a_manual_edit_before_forward_rewrite_commit() {
         let dir = tempdir().expect("tempdir");
@@ -1988,7 +3080,7 @@ mod tests {
         let backlink = root.join("Backlink.md");
         fs::write(&note_source, "note").expect("note");
         fs::write(&backlink, "original backlink").expect("backlink");
-        let mut journal = MutationJournal::new(root);
+        let mut journal = MutationJournal::new(root, None);
         journal
             .move_note(&note_source, &note_destination, &content_hash("note"))
             .expect("move note");

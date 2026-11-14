@@ -151,11 +151,11 @@ vault you control.
 
 ## How Hatchdoor Compares
 
-The MCP-for-Obsidian field is crowded. The honest short version: if you live
-inside the Obsidian app and want the smallest possible bridge to it, the
-plugin-based tools are fine. Hatchdoor is for when you want the vault served
-independently of Obsidian: from a homelab box, for browsers and agents at
-once, across more than one vault.
+Tools for agents working with Obsidian vaults include Obsidian's own tools
+and third-party bridges. If you live inside the Obsidian app and want the
+smallest possible bridge to it, the plugin-based tools are fine. Hatchdoor is
+for when you want the vault served independently of Obsidian: from a homelab
+box, for browsers and agents at once, across more than one vault.
 
 | | Hatchdoor | [mcp-obsidian](https://github.com/MarkusPfundstein/mcp-obsidian) | [Local REST API](https://github.com/coddingtonbear/obsidian-local-rest-api) | [Basic Memory](https://github.com/basicmachines-co/basic-memory) | [OpenKnowledge](https://github.com/inkeep/open-knowledge) |
 |---|---|---|---|---|---|
@@ -165,6 +165,14 @@ once, across more than one vault.
 | Serves multiple vaults | ✅ one server, per-vault git sync | ❌ | ❌ | ✅ projects | ❌ one folder per instance |
 | Write safety for agent edits | Atomic writes, optimistic concurrency | Via plugin REST API | — | Overwrite guards | — |
 | Deploys as a service | ✅ Docker/Podman, rootless, token auth | ❌ desktop-bound | ❌ | ❌ local process (cloud is paid) | ❌ local CLI app |
+
+Obsidian also offers its own agent tooling. [Obsidian CLI](https://help.obsidian.md/cli)
+reads, searches and edits notes through the desktop app, which must be running.
+[Obsidian Headless](https://help.obsidian.md/headless) runs Obsidian Sync and
+Obsidian Publish without the desktop app, but does not itself serve the vault.
+The [obsidian-skills repository](https://github.com/kepano/obsidian-skills)
+teaches agents Obsidian Markdown, Bases, JSON Canvas and the CLI. Hatchdoor
+serves the vault from a server with a web UI and MCP, without Obsidian installed.
 
 Basic Memory and OpenKnowledge are good projects solving adjacent problems
 (agent memory, an AI-native editor). Hatchdoor overlaps them only where your
@@ -191,9 +199,9 @@ Two other things are wanted but not slotted to a version yet:
   beside the commit it produced, and one-click revert. Today git is the whole
   answer: each commit names the agent that made it, but reading a commit log is
   not the same as seeing what an agent did to your note.
-- **Vault integrity checks.** A vault-scoped lint for orphaned notes, broken
-  wikilinks, and layer markers whose declaration has vanished, so a vault an
-  agent maintains unattended cannot quietly drift out of shape.
+- **Vault integrity checks.** Agents can already list a Vault's broken links,
+  isolated notes and dead ends with `find_link_problems`. Still to come: layer
+  markers whose declaration has vanished, and the same checks in the Web UI.
 
 The [product roadmap](docs/roadmap/product-roadmap.md) has the full set of
 workstreams and where each one stands.
@@ -237,18 +245,19 @@ What these mean:
   host-side locations for the generated cache, authoritative Vault registry,
   and downloaded models; Compose defaults them beside the project.
 
-Before the first managed-Vault start, create the default authoritative state
-directory with access for the image's numeric `nonroot` user. Docker otherwise
-may create a missing bind source as root, leaving the registry unwritable:
+Before the first start, create the data folders and hand them to the image's
+numeric `nonroot` user. Docker otherwise creates a missing bind source as root,
+and Hatchdoor cannot write its cache, its Vault registry or its model:
 
 ```bash
-mkdir -p data/state
-chmod 700 data/state
-sudo chown 65532:65532 data/state
+mkdir -p data/cache data/state models
+chmod 700 data/cache data/state models
+sudo chown -R 65532:65532 data models
 ```
 
-For rootless Podman, use `podman unshare chown 65532:65532 data/state` instead
-of `sudo chown`. Apply the same ownership rule to a custom `HOST_STATE_PATH`.
+For rootless Podman, use `podman unshare chown -R 65532:65532 data models`
+instead of `sudo chown`. Apply the same ownership rule to a custom
+`HOST_CACHE_PATH`, `HOST_STATE_PATH` or `HOST_MODELS_PATH`.
 
 Do not add ordinary Settings values to `.env`: an unset value can be changed
 live in Settings. See [Configuration](#configuration) for the few deployment
@@ -261,18 +270,17 @@ docker compose up -d
 ```
 
 Docker Compose binds Hatchdoor to a non-loopback container interface, so a
-first run without a web token stops safely and prints a fresh, recoverable
-token. Retrieve it with:
+first run without a web token stops safely and saves a fresh token, readable by
+its owner only, in `data/state/new-web-token.env`. The token never goes to the
+log. Add it to `.env`:
 
 ```bash
-docker compose logs hatchdoor
+sudo cat data/state/new-web-token.env >> .env
 ```
 
-Copy the printed `HATCHDOOR_WEB_BEARER_TOKEN=...` assignment into `.env`, then
-start again with `docker compose up -d`. The token is deliberately not stored
-by Hatchdoor; use the one from that refusal or generate a new long random token.
-Once the server is running, open `http://localhost:42824` and enter it in the
-browser prompt.
+Then start again with `docker compose up -d`, or set any long random value as
+`HATCHDOOR_WEB_BEARER_TOKEN` yourself. Once the server is running, open
+`http://localhost:42824` and enter it in the browser prompt.
 
 ### 4. Choose Your Search Model
 
@@ -294,16 +302,16 @@ version you are running.
 The image is published on [Docker Hub](https://hub.docker.com/r/battermanz/hatchdoor):
 
 ```text
-battermanz/hatchdoor:latest          # also version tags, e.g. 2.9.0
-battermanz/hatchdoor:podman-latest   # for Podman users (podman-<version> too)
+battermanz/hatchdoor:latest          # also version tags, e.g. 2.10.0
 ```
 
 The runtime image is **distroless and rootless**. It is built on
 `gcr.io/distroless/cc-debian13:nonroot`, ships no shell or package manager, and
 runs as an unprivileged `nonroot` user. Hatchdoor also runs unchanged under
-Podman (rootless included); swap `docker` / `docker compose` for `podman` /
-`podman compose` **and** the image tag for `podman-latest` (or
-`podman-<version>`) — the `latest` tag above is Docker-only.
+Podman (rootless included), from the same image and tags; swap `docker` /
+`docker compose` for `podman` / `podman compose`. The older `podman-latest` and
+`podman-<version>` tags name the same image and will soon stop receiving new
+versions.
 
 Docker Compose mounts:
 
@@ -504,6 +512,11 @@ reference](https://docs-hatchdoor.battercloud.cc/v/bef3df28-8c2e-4722-89ad-bd4d0
 - Keep the SQLite cache outside the vault.
 - Keep `.env` out of git.
 - Review Docker volume paths before starting the container.
+- Hatchdoor can't be embedded in another page, such as a dashboard tile or a
+  Home Assistant iframe panel. Every response carries `X-Frame-Options: DENY`
+  and `Content-Security-Policy: frame-ancestors 'none'`, so a malicious page
+  cannot load it in a hidden frame and trick you into clicking its buttons
+  (clickjacking). Open it in its own tab instead.
 
 ## Development
 

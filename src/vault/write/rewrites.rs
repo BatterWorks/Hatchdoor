@@ -1,4 +1,3 @@
-use std::fs;
 use std::path::Path;
 
 use crate::cache::parse::{content_hash, parse_fence_marker};
@@ -24,11 +23,15 @@ pub(super) struct NoteText {
 ///
 /// A Vault-wide planner skips a note it cannot open, such as a dangling `.md`
 /// symlink, because `build_link_graph` skips the same file: it holds no link
-/// the index knows about, so there is nothing to plan for it (#360). A note
-/// that is not valid UTF-8 is read lossily, so the planner can still tell
-/// whether it holds anything the operation would change.
-pub(super) fn read_note_text(path: &Path) -> Option<NoteText> {
-    let bytes = fs::read(path).ok()?;
+/// the index knows about, so there is nothing to plan for it (#360). The same
+/// goes for a note over `MAX_NOTE_BYTES` or one that became a FIFO, which the
+/// link graph's bounded read skips too, so a rename never reads a huge note
+/// whole or waits on a pipe (#670).
+///
+/// A note that is not valid UTF-8 is read lossily, so the planner can still
+/// tell whether it holds anything the operation would change.
+pub(super) fn read_note_for_rewrite(path: &Path) -> Option<NoteText> {
+    let bytes = crate::vault::read_bounded(path, crate::vault::MAX_NOTE_BYTES).ok()?;
     Some(match String::from_utf8(bytes) {
         Ok(content) => NoteText {
             content,
@@ -120,6 +123,10 @@ pub(super) fn backlink_rewrite_plan(
         .unwrap_or_default();
     let paths_after =
         new_target.map(|target| index.note_paths.relocated(moved_slug, moved_from, target));
+    // The same question for wikilinks: which note each one reaches once the
+    // note has moved. Nearest-folder ties mean a move can change that for
+    // links that never named the moved note (#626).
+    let titles_after = new_target.map(|target| index.relocated(moved_slug, target));
     let mut rewrites = Vec::new();
     for entry in entries {
         let rewrite_path = match moved_to {
@@ -127,33 +134,68 @@ pub(super) fn backlink_rewrite_plan(
             Some(moved) => moved.destination.to_path_buf(),
             None => continue,
         };
-        let Some(note) = read_note_text(&entry.path) else {
+        let Some(note) = read_note_for_rewrite(&entry.path) else {
             continue;
         };
         let content = note.content;
-        let rewritten = transform_wikilinks(&content, |target| {
-            let Some(candidate) = index.resolve_wikilink(target) else {
-                return Some(target.to_string());
-            };
-            if candidate.slug != moved_slug {
-                return Some(target.to_string());
-            }
-            match bare_new_target.as_deref() {
-                // The target resolved to the moved note through any lookup
-                // pass, title or slug, so its folder path is all that decides
-                // its form.
-                Some(bare) if is_bare_target(target) => Some(bare.to_string()),
-                _ => new_target.map(ToOwned::to_owned),
-            }
-        });
-        let source_moves = entry.slug == moved_slug;
         let folder_before = note_dir(&entry.relative_path);
+        let source_moves = entry.slug == moved_slug;
+        let folder_after = match new_target {
+            Some(target) if source_moves => note_dir(target),
+            _ => folder_before,
+        };
+        let rewritten = transform_wikilinks(&content, |target| {
+            // Only a link that resolves, the way the link graph resolves it
+            // from this note's folder, to exactly one note changes. One that
+            // ties with a namesake was never clearly any note's, and is left
+            // for whichever note it reaches afterwards (#626).
+            let reached = match index.resolve_wikilink_match(target, folder_before) {
+                Some(found) if found.unique => found.entry,
+                _ => return Some(target.to_string()),
+            };
+            let (Some(after), Some(new_target)) = (titles_after.as_ref(), new_target) else {
+                // Delete: a link to the note goes, and nothing else can
+                // change what it reaches.
+                return (reached.slug != moved_slug).then(|| target.to_string());
+            };
+            if reached.slug != moved_slug {
+                // A link to another note stays as written while it still
+                // reaches that note after the move, and is pinned to its
+                // full path when the move would hand it to a namesake. A
+                // path a wikilink cannot carry is left as written.
+                if WIKILINK_SYNTAX
+                    .iter()
+                    .any(|c| reached.relative_path.contains(*c))
+                {
+                    return Some(target.to_string());
+                }
+                return Some(reaching_form(
+                    after,
+                    &reached.slug,
+                    Some(target),
+                    &reached.relative_path,
+                    folder_after,
+                ));
+            }
+            // The target resolved to the moved note through any lookup pass,
+            // title or slug, so its folder path is all that decides its form.
+            let bare = bare_new_target
+                .as_deref()
+                .filter(|_| is_bare_target(target));
+            Some(reaching_form(
+                after,
+                moved_slug,
+                bare,
+                new_target,
+                folder_after,
+            ))
+        });
         let rewritten = rewrite_note_links(&rewritten, |link| {
             let Some((slug, form)) = index.note_paths.resolve(&link.path, folder_before) else {
                 return NoteLinkEdit::Keep;
             };
             let target_moves = slug == moved_slug;
-            let (Some(new_target), Some(paths_after)) = (new_target, paths_after.as_ref()) else {
+            let (Some(moved), Some(paths_after)) = (moved_to, paths_after.as_ref()) else {
                 return if target_moves {
                     NoteLinkEdit::Unlink
                 } else {
@@ -163,11 +205,14 @@ pub(super) fn backlink_rewrite_plan(
             if !target_moves && !source_moves {
                 return NoteLinkEdit::Keep;
             }
-            let target_after = if target_moves {
-                new_target
+            // The extension travels as the target's file spells it, so a
+            // link to `Deep.MD` keeps naming `Deep.MD` (#740).
+            let new_target = moved.new_target;
+            let (target_after, extension) = if target_moves {
+                (new_target, note_extension(moved.destination))
             } else {
                 match index.find_by_slug(slug) {
-                    Some(target) => target.relative_path.as_str(),
+                    Some(target) => (target.relative_path.as_str(), note_extension(&target.path)),
                     None => return NoteLinkEdit::Keep,
                 }
             };
@@ -183,6 +228,7 @@ pub(super) fn backlink_rewrite_plan(
                 folder_after,
                 slug,
                 target_after,
+                extension,
             )
         });
         if rewritten != content && !note.utf8 {
@@ -213,6 +259,8 @@ pub(super) fn backlink_rewrite_plan(
 /// linking note's folder. Each candidate is checked against `paths_after`, the
 /// index as it will be after the move, so a form that would now land on a
 /// namesake falls back to the note-relative path and then the anchored one.
+/// Every rewritten path ends in `extension`, the target file's own, in its
+/// own case (#740).
 fn retarget_markdown_link(
     paths_after: &NotePaths,
     written: &str,
@@ -220,6 +268,7 @@ fn retarget_markdown_link(
     folder_after: &str,
     target_slug: &str,
     target_after: &str,
+    extension: &str,
 ) -> NoteLinkEdit {
     let reaches_target = |path: &str| {
         paths_after
@@ -231,20 +280,20 @@ fn retarget_markdown_link(
     }
     let name = target_after.rsplit('/').next().unwrap_or(target_after);
     let preferred = if !written.contains(['/', '\\']) {
-        format!("{name}.md")
+        format!("{name}.{extension}")
     } else {
         match form {
-            LinkForm::Root => format!("/{target_after}.md"),
-            LinkForm::VaultRelative => format!("{target_after}.md"),
+            LinkForm::Root => format!("/{target_after}.{extension}"),
+            LinkForm::VaultRelative => format!("{target_after}.{extension}"),
             LinkForm::NoteRelative | LinkForm::ByName => {
-                relative_note_path(folder_after, target_after)
+                relative_note_path(folder_after, target_after, extension)
             }
         }
     };
     let candidates = [
         preferred,
-        relative_note_path(folder_after, target_after),
-        format!("/{target_after}.md"),
+        relative_note_path(folder_after, target_after, extension),
+        format!("/{target_after}.{extension}"),
     ];
     let chosen = candidates
         .iter()
@@ -253,15 +302,23 @@ fn retarget_markdown_link(
     NoteLinkEdit::Retarget(chosen.clone())
 }
 
+/// A note file's extension as its name spells it: `MD` for `Deep.MD`. Every
+/// note file ends in some case of `.md`, so `md` stands in only for a path
+/// that somehow does not, as in the index snapshot's own reading (#675).
+fn note_extension(path: &Path) -> &str {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .filter(|extension| extension.eq_ignore_ascii_case("md"))
+        .unwrap_or("md")
+}
+
 /// The moved note's new bare title, when no *other* note in the pre-move index
 /// already carries it.
 ///
 /// Only the moved note changes name, so the pre-move index answers the
-/// post-move question. `resolve_wikilink` tries `by_path_title` before
-/// `by_title`, but a bare title holds no `/` while a nested note's path key
-/// always does, so the only note a bare title can capture on the path pass is
-/// a root-level note whose relative path is its own title — which carries that
-/// title too, and so is already caught here.
+/// post-move question. A bare title holds no `/`, so wikilink resolution reads
+/// it by title alone, and a title no other note carries reaches the moved
+/// note from any folder.
 fn unambiguous_bare_title(
     entries: &[NoteEntry],
     moved_slug: &str,
@@ -273,6 +330,35 @@ fn unambiguous_bare_title(
         .iter()
         .any(|entry| entry.slug != moved_slug && normalize_title(&entry.title) == normalized);
     (!taken_by_another_note).then(|| bare.to_string())
+}
+
+/// Characters that end or break a wikilink target, so a path holding one
+/// cannot be written into a link.
+const WIKILINK_SYNTAX: [char; 5] = ['#', '^', '|', '[', ']'];
+
+/// The first of `preferred`, the note's full `path` and that path anchored at
+/// the Vault root that reaches `slug` from `folder` once the move has
+/// happened (#626). A root-level note's full path is its bare title, which a
+/// namesake can still take, so the `/`-anchored form is the last resort and
+/// is written even if, against expectation, nothing else reaches the note.
+fn reaching_form(
+    after: &VaultIndex,
+    slug: &str,
+    preferred: Option<&str>,
+    path: &str,
+    folder: &str,
+) -> String {
+    let reaches = |form: &str| {
+        after
+            .resolve_wikilink_from(form, folder)
+            .is_some_and(|found| found.slug == slug)
+    };
+    let anchored = format!("/{path}");
+    preferred
+        .into_iter()
+        .chain(Some(path))
+        .find(|form| reaches(form))
+        .map_or(anchored, str::to_string)
 }
 
 /// Whether this target names its note without a folder path.
@@ -385,11 +471,23 @@ fn transform_wikilink_body<F>(body: &str, transform_target: &F) -> Option<String
 where
     F: Fn(&str) -> Option<String>,
 {
-    let (target, suffix) = split_wikilink_note_body(body);
+    let (target, _) = split_wikilink_note_body(body);
     if target.is_empty() {
         return Some(body.to_string());
     }
-    transform_target(target).map(|new_target| format!("{new_target}{suffix}"))
+    let new_target = transform_target(target)?;
+    if new_target == target {
+        // Nothing changes, so nothing is rebuilt: the author's spacing and
+        // escapes survive byte for byte (#626).
+        return Some(body.to_string());
+    }
+    // The split trims `target`, so it starts at the body's first
+    // non-whitespace character. Splicing there swaps the target alone and
+    // keeps the whitespace around it, an escaped pipe and the alias or anchor
+    // after it.
+    let start = body.len() - body.trim_start().len();
+    let end = start + target.len();
+    Some(format!("{}{new_target}{}", &body[..start], &body[end..]))
 }
 
 /// Fold two plans into one rewrite per path, keeping the later content.
@@ -459,13 +557,13 @@ pub(super) fn planned_base(path: &Path, rewrites: &[TextRewrite]) -> Option<Rewr
 }
 
 /// The base a later planner composes onto for `path`: the planned one when
-/// there is one, otherwise the note as [`read_note_text`] reads it, or `None`
+/// there is one, otherwise the note as [`read_note_for_rewrite`] reads it, or `None`
 /// when it cannot be read at all.
 pub(super) fn rewrite_base_or_read(path: &Path, rewrites: &[TextRewrite]) -> Option<RewriteBase> {
     if let Some(base) = planned_base(path, rewrites) {
         return Some(base);
     }
-    let note = read_note_text(path)?;
+    let note = read_note_for_rewrite(path)?;
     Some(RewriteBase {
         original_hash: content_hash(&note.content),
         content: note.content,

@@ -50,10 +50,16 @@ pub struct NoteSummary {
 #[derive(Debug, Clone)]
 pub struct VaultIndex {
     pub by_slug: HashMap<String, NoteEntry>,
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub by_title: HashMap<String, String>,
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub by_path_title: HashMap<String, String>,
+    /// Case-folded, NFC-normalised title to the slugs of every note carrying
+    /// it, in the order notes claim slugs (default surface first, then path).
+    /// Wikilink resolution ranks among these; a path-qualified target is a
+    /// suffix of one of their paths, so they hold its candidates too (#626).
+    pub by_title: HashMap<String, Vec<String>>,
+    /// The slug each note's name folds to before any collision suffix
+    /// (`note_slug_base`) to the slugs of every note sharing it, in the same
+    /// order. The last wikilink tier reads this, so a link by slug reaches a
+    /// note by its name and never by a `-2` counter (#626).
+    pub by_name_slug: HashMap<String, Vec<String>>,
     pub ordered_slugs: Vec<String>,
     /// Every servable non-Markdown file in the Vault, as a `/`-joined
     /// Vault-relative path. Notes are addressed by slug; assets have no slug

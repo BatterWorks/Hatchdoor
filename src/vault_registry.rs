@@ -683,6 +683,31 @@ pub enum VaultRegistryState {
     Recovery(VaultRegistryRecovery),
 }
 
+/// An edit [`VaultRegistryStore::edit_prepared`] has validated and is about
+/// to save: the source it replaces, and whether the edit changes the Vault's
+/// source identity.
+pub struct PendingEdit<'a> {
+    pub previous: &'a VaultSource,
+    /// The commit identity the Vault had before this edit, for work committed
+    /// under its old definition.
+    pub previous_commit_identity: Option<&'a VaultCommitIdentity>,
+    pub identity_changed: bool,
+}
+
+/// Why [`VaultRegistryStore::edit_prepared`] saved nothing: the registry
+/// refused the edit, or the caller's preparation step did.
+#[derive(Debug)]
+pub enum PreparedEditError<E> {
+    Registry(VaultRegistryError),
+    Prepare(E),
+}
+
+impl<E> From<VaultRegistryError> for PreparedEditError<E> {
+    fn from(error: VaultRegistryError) -> Self {
+        Self::Registry(error)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum VaultRegistryError {
     RevisionConflict { expected: u64, actual: u64 },
@@ -766,6 +791,63 @@ impl VaultRegistryStore {
         self.load_unlocked()
     }
 
+    /// Remove the temporary registry copies an interrupted [`Self::persist`]
+    /// left beside the registry, returning how many it removed. Each one is a
+    /// full copy of the registry, HTTPS Git credentials included, that would
+    /// otherwise outlive a credential rotation or a disconnect (#640). Called
+    /// once at startup, before the registry is loaded, when no write of this
+    /// process can be in flight. Only names [`temporary_path`] produces are
+    /// touched.
+    pub fn remove_stale_temporary_files(&self) -> usize {
+        let Some(file_name) = self.path.file_name().and_then(|name| name.to_str()) else {
+            return 0;
+        };
+        let parent = self.path.parent().unwrap_or_else(|| Path::new("."));
+        let parent = if parent.as_os_str().is_empty() {
+            Path::new(".")
+        } else {
+            parent
+        };
+        let entries = match fs::read_dir(parent) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return 0,
+            Err(error) => {
+                tracing::warn!(
+                    directory = %parent.display(),
+                    %error,
+                    "could not look for stale temporary Vault registry files"
+                );
+                return 0;
+            }
+        };
+        let mut removed = 0;
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else {
+                continue;
+            };
+            if !is_temporary_registry_name(name, file_name) {
+                continue;
+            }
+            let path = entry.path();
+            match fs::remove_file(&path) {
+                Ok(()) => {
+                    removed += 1;
+                    tracing::warn!(
+                        path = %path.display(),
+                        "removed a temporary Vault registry file an interrupted write left behind"
+                    );
+                }
+                Err(error) => tracing::warn!(
+                    path = %path.display(),
+                    %error,
+                    "could not remove a stale temporary Vault registry file"
+                ),
+            }
+        }
+        removed
+    }
+
     /// Persist an intentionally empty registry: what a start with no registry
     /// writes (ADR-40).
     pub fn initialize_empty(
@@ -822,7 +904,8 @@ impl VaultRegistryStore {
                 commit_identity,
             },
         );
-        self.commit(expected_revision, vaults)
+        let local_history = source_of(&vaults, vault_id);
+        self.commit_with_local_history(expected_revision, vaults, &local_history)
     }
 
     /// Refuse `vault_path` when it equals, sits inside, or contains the folder
@@ -864,22 +947,43 @@ impl VaultRegistryStore {
         vault_id: VaultId,
         edit: VaultDefinitionEdit,
     ) -> Result<VaultRegistrySnapshot, VaultRegistryError> {
+        self.edit_prepared(expected_revision, vault_id, edit, |_| {
+            Ok::<(), std::convert::Infallible>(())
+        })
+        .map_err(|error| match error {
+            PreparedEditError::Registry(error) => error,
+            PreparedEditError::Prepare(never) => match never {},
+        })
+    }
+
+    /// [`Self::edit`], with `prepare` run once the edit has passed every
+    /// check and just before it is saved. A refusal from `prepare` saves
+    /// nothing. Vault collection management uses it to set a managed
+    /// checkout aside before its identity changes, so a checkout whose work
+    /// cannot be committed keeps the definition it belongs to (#639).
+    pub fn edit_prepared<E>(
+        &self,
+        expected_revision: u64,
+        vault_id: VaultId,
+        edit: VaultDefinitionEdit,
+        prepare: impl FnOnce(PendingEdit<'_>) -> Result<(), E>,
+    ) -> Result<VaultRegistrySnapshot, PreparedEditError<E>> {
         let VaultRegistryState::Ready(current) = self.load()? else {
-            return Err(VaultRegistryError::RecoveryRequired);
+            return Err(VaultRegistryError::RecoveryRequired.into());
         };
         ensure_revision(&current, expected_revision)?;
         let Some(existing) = current.vaults.get(&vault_id).cloned() else {
-            return Err(VaultRegistryError::InvalidDefinition(
-                VaultDefinitionError::VaultNotFound,
-            ));
+            return Err(
+                VaultRegistryError::InvalidDefinition(VaultDefinitionError::VaultNotFound).into(),
+            );
         };
         let name = normalize_vault_name(edit.name)?;
         if current.vaults.iter().any(|(other_id, record)| {
             *other_id != vault_id && vault_name_key(&record.name) == vault_name_key(&name)
         }) {
-            return Err(VaultRegistryError::InvalidDefinition(
-                VaultDefinitionError::DuplicateName,
-            ));
+            return Err(
+                VaultRegistryError::InvalidDefinition(VaultDefinitionError::DuplicateName).into(),
+            );
         }
         let source = normalize_structural_source(edit.source)?;
         let source = if same_source_identity(&existing.source, &source) {
@@ -892,12 +996,14 @@ impl VaultRegistryStore {
         if identity_changed && existing.enabled {
             return Err(VaultRegistryError::InvalidDefinition(
                 VaultDefinitionError::IdentityChangeRequiresDisabled,
-            ));
+            )
+            .into());
         }
         if identity_changed && !edit.confirm_identity_change {
             return Err(VaultRegistryError::InvalidDefinition(
                 VaultDefinitionError::IdentityChangeRequiresConfirmation,
-            ));
+            )
+            .into());
         }
         let vault_path = canonical_or_normalized(&self.source_vault_path(vault_id, &source));
         self.ensure_no_path_overlap(&current.vaults, vault_id, &vault_path)?;
@@ -925,7 +1031,33 @@ impl VaultRegistryStore {
                 commit_identity: normalize_commit_identity(edit.commit_identity)?,
             },
         );
-        self.commit(expected_revision, vaults)
+        let next = source_of(&vaults, vault_id);
+        // A Vault already on Local history at this folder gets no repository
+        // from an edit: one that went missing was lost or is not mounted, and
+        // `enable` refuses it for the same reason. Only switching to Local
+        // history creates one.
+        let switching_to_local_history = !matches!(
+            (&existing.source, &next),
+            (
+                VaultSource::ExistingGit {
+                    repository_path: before,
+                    mode: VaultGitMode::LocalHistory,
+                    ..
+                },
+                VaultSource::ExistingGit {
+                    repository_path: after,
+                    ..
+                },
+            ) if before == after
+        );
+        let local_history = switching_to_local_history.then_some(&next);
+        self.commit_prepared(expected_revision, vaults, local_history, || {
+            prepare(PendingEdit {
+                previous: &existing.source,
+                previous_commit_identity: existing.commit_identity.as_ref(),
+                identity_changed,
+            })
+        })
     }
 
     pub fn enable(
@@ -988,12 +1120,44 @@ impl VaultRegistryStore {
         if enabled {
             let source = normalize_source(existing.source.clone())?;
             self.ensure_outside_instance_state(&source)?;
+            // Only adding a Vault or switching it to Local history creates a
+            // repository (#639). One missing at enable was lost or is not
+            // mounted, and starting it over empty would hide its history.
+            if let VaultSource::ExistingGit {
+                repository_path,
+                mode: VaultGitMode::LocalHistory,
+                ..
+            } = &source
+                && is_plain_folder(repository_path)
+            {
+                return Err(invalid_source(&format!(
+                    "the Local history repository in '{}' is missing: restore its .git folder, or mount the drive it lives on, before turning this Vault on",
+                    repository_path.display()
+                )));
+            }
         }
         let record = vaults
             .get_mut(&vault_id)
             .expect("record checked before enable transition");
         record.enabled = enabled;
         self.commit(expected_revision, vaults)
+    }
+
+    /// [`Self::commit`] for a change that may name a Local-history source on
+    /// a plain folder, whose repository is created under the write lock.
+    fn commit_with_local_history(
+        &self,
+        expected_revision: u64,
+        vaults: BTreeMap<VaultId, VaultRecord>,
+        source: &VaultSource,
+    ) -> Result<VaultRegistrySnapshot, VaultRegistryError> {
+        self.commit_prepared(expected_revision, vaults, Some(source), || {
+            Ok::<(), std::convert::Infallible>(())
+        })
+        .map_err(|error| match error {
+            PreparedEditError::Registry(error) => error,
+            PreparedEditError::Prepare(never) => match never {},
+        })
     }
 
     fn load_unlocked(&self) -> Result<VaultRegistryState, VaultRegistryError> {
@@ -1074,18 +1238,42 @@ impl VaultRegistryStore {
         expected_revision: u64,
         vaults: impl IntoIterator<Item = (VaultId, VaultRecord)>,
     ) -> Result<VaultRegistrySnapshot, VaultRegistryError> {
+        self.commit_prepared(expected_revision, vaults, None, || {
+            Ok::<(), std::convert::Infallible>(())
+        })
+        .map_err(|error| match error {
+            PreparedEditError::Registry(error) => error,
+            PreparedEditError::Prepare(never) => match never {},
+        })
+    }
+
+    /// [`Self::commit`], with the changes a definition makes on disk done
+    /// under the write lock, after the revision check and before the save, so
+    /// no other registry write can land between them (#639): creating the
+    /// repository a Local-history source on a plain folder needs, then the
+    /// caller's `prepare`. A refusal from either, or a failed save, removes
+    /// the repository again. Undoing `prepare` after a failed save is the
+    /// caller's part.
+    fn commit_prepared<E>(
+        &self,
+        expected_revision: u64,
+        vaults: impl IntoIterator<Item = (VaultId, VaultRecord)>,
+        local_history: Option<&VaultSource>,
+        prepare: impl FnOnce() -> Result<(), E>,
+    ) -> Result<VaultRegistrySnapshot, PreparedEditError<E>> {
         let _guard = self
             .write_lock
             .lock()
             .map_err(|_| VaultRegistryError::LockPoisoned)?;
         let VaultRegistryState::Ready(current) = self.load_unlocked()? else {
-            return Err(VaultRegistryError::RecoveryRequired);
+            return Err(VaultRegistryError::RecoveryRequired.into());
         };
         if current.revision != expected_revision {
             return Err(VaultRegistryError::RevisionConflict {
                 expected: expected_revision,
                 actual: current.revision,
-            });
+            }
+            .into());
         }
         let revision = current
             .revision
@@ -1096,7 +1284,18 @@ impl VaultRegistryStore {
             revision,
             vaults: vaults.into_iter().collect(),
         };
-        self.persist(&next)?;
+        let initialized = match local_history {
+            Some(source) => initialize_local_history(source)?,
+            None => None,
+        };
+        if let Err(error) = prepare() {
+            undo_local_history_initialization(initialized);
+            return Err(PreparedEditError::Prepare(error));
+        }
+        if let Err(error) = self.persist(&next) {
+            undo_local_history_initialization(initialized);
+            return Err(error.into());
+        }
         Ok(next)
     }
 
@@ -1360,6 +1559,14 @@ fn normalize_optional_branch(branch: Option<String>) -> Result<Option<String>, V
             "Git branch must not contain control characters",
         ));
     }
+    // Git's own rule, so a name no remote can hold (`a..b`, `x.lock`, a
+    // trailing slash) is refused here instead of failing every clone (#638).
+    if branch
+        .as_ref()
+        .is_some_and(|branch| !git2::Branch::name_is_valid(branch).unwrap_or(false))
+    {
+        return Err(invalid_source("Git branch is not a valid branch name"));
+    }
     Ok(branch)
 }
 
@@ -1470,25 +1677,29 @@ fn normalize_source(source: VaultSource) -> Result<VaultSource, VaultRegistryErr
                     repository_path.display()
                 ))
             })?;
-            let repository = git2::Repository::open(&repository_path).map_err(|_| {
-                invalid_source("existing Git location must be a readable working checkout")
-            })?;
-            if repository.is_bare() || repository.workdir().is_none() {
-                return Err(invalid_source(
-                    "existing Git location must be a readable working checkout",
-                ));
-            }
-            let workdir = repository
-                .workdir()
-                .expect("non-bare repository checked above")
-                .canonicalize()
-                .map_err(|_| {
+            // A plain folder chosen for Local history is valid: Hatchdoor
+            // creates its repository just before saving (#639).
+            if !(mode == VaultGitMode::LocalHistory && is_plain_folder(&repository_path)) {
+                let repository = git2::Repository::open(&repository_path).map_err(|_| {
                     invalid_source("existing Git location must be a readable working checkout")
                 })?;
-            if workdir != repository_path {
-                return Err(invalid_source(
-                    "existing Git location must be the working checkout root",
-                ));
+                if repository.is_bare() || repository.workdir().is_none() {
+                    return Err(invalid_source(
+                        "existing Git location must be a readable working checkout",
+                    ));
+                }
+                let workdir = repository
+                    .workdir()
+                    .expect("non-bare repository checked above")
+                    .canonicalize()
+                    .map_err(|_| {
+                        invalid_source("existing Git location must be a readable working checkout")
+                    })?;
+                if workdir != repository_path {
+                    return Err(invalid_source(
+                        "existing Git location must be the working checkout root",
+                    ));
+                }
             }
             let vault_path = vault_subdirectory.as_ref().map_or_else(
                 || repository_path.clone(),
@@ -1796,6 +2007,75 @@ fn normalize_relative_subdirectory(path: PathBuf) -> Result<PathBuf, VaultRegist
     Ok(normalized)
 }
 
+/// A readable directory with no Git repository of its own: no `.git` entry
+/// of any kind, and nothing `git2` can open there.
+fn is_plain_folder(path: &Path) -> bool {
+    let no_git_entry = matches!(
+        fs::symlink_metadata(path.join(".git")),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound
+    );
+    // `open` does not search parent folders, so a folder inside another
+    // repository, a home folder kept in a dotfiles repository for one, is
+    // plain too, and gets a repository of its own nested in that one.
+    no_git_entry
+        && fs::metadata(path).is_ok_and(|metadata| metadata.is_dir())
+        && matches!(
+            git2::Repository::open(path),
+            Err(error) if error.code() == git2::ErrorCode::NotFound
+        )
+}
+
+fn source_of(vaults: &BTreeMap<VaultId, VaultRecord>, vault_id: VaultId) -> VaultSource {
+    vaults
+        .get(&vault_id)
+        .expect("record inserted before it is read back")
+        .source
+        .clone()
+}
+
+/// Create the Git repository a Local-history source on a plain folder needs,
+/// and return its `.git` directory so a change that is not saved can remove
+/// it again. Nothing else is written: no commit, no `.gitignore`. The
+/// generated files `init_local_repo` ignores (the cache and settings files)
+/// can never sit inside a registered Vault, because
+/// `ensure_outside_instance_state` refuses one that holds them.
+fn initialize_local_history(source: &VaultSource) -> Result<Option<PathBuf>, VaultRegistryError> {
+    let VaultSource::ExistingGit {
+        repository_path,
+        mode: VaultGitMode::LocalHistory,
+        ..
+    } = source
+    else {
+        return Ok(None);
+    };
+    if !is_plain_folder(repository_path) {
+        return Ok(None);
+    }
+    git2::Repository::init(repository_path).map_err(|error| {
+        invalid_source(&format!(
+            "could not create the Local history repository in '{}': {}",
+            repository_path.display(),
+            error.message()
+        ))
+    })?;
+    Ok(Some(repository_path.join(".git")))
+}
+
+/// Remove a `.git` directory [`initialize_local_history`] created for a change
+/// that was then not saved. It holds no commits, so nothing is lost.
+fn undo_local_history_initialization(initialized: Option<PathBuf>) {
+    let Some(git_directory) = initialized else {
+        return;
+    };
+    if let Err(error) = fs::remove_dir_all(&git_directory) {
+        tracing::warn!(
+            path = %git_directory.display(),
+            %error,
+            "could not remove the Local history repository created for a refused Vault change"
+        );
+    }
+}
+
 fn invalid_source(message: &str) -> VaultRegistryError {
     VaultRegistryError::InvalidDefinition(VaultDefinitionError::InvalidSource(message.to_string()))
 }
@@ -1813,7 +2093,10 @@ fn path_relation(path: &Path, other: &Path) -> Option<VaultPathRelation> {
     }
 }
 
-fn paths_overlap(first: &Path, second: &Path) -> bool {
+/// Whether either folder equals or holds the other: the registry's overlap
+/// rule, which the runtime also applies to Vaults no longer registered whose
+/// old turn may still write (#745).
+pub(crate) fn paths_overlap(first: &Path, second: &Path) -> bool {
     path_relation(first, second).is_some()
 }
 
@@ -1886,7 +2169,7 @@ fn normalized_absolute_path(path: &Path) -> PathBuf {
     normalized
 }
 
-fn canonical_or_normalized(path: &Path) -> PathBuf {
+pub(crate) fn canonical_or_normalized(path: &Path) -> PathBuf {
     let normalized = normalized_absolute_path(path);
     let mut existing_ancestor = normalized.as_path();
     let mut missing_suffix = Vec::new();
@@ -1907,6 +2190,24 @@ fn canonical_or_normalized(path: &Path) -> PathBuf {
         };
         existing_ancestor = parent;
     }
+}
+
+/// Whether `name` is one [`temporary_path`] produces for a registry file
+/// called `registry_file_name`: `.<file name>.<pid>.<nonce>.tmp`.
+fn is_temporary_registry_name(name: &str, registry_file_name: &str) -> bool {
+    let Some(rest) = name
+        .strip_prefix('.')
+        .and_then(|rest| rest.strip_prefix(registry_file_name))
+        .and_then(|rest| rest.strip_prefix('.'))
+        .and_then(|rest| rest.strip_suffix(".tmp"))
+    else {
+        return false;
+    };
+    let mut parts = rest.split('.');
+    let numeric = |part: Option<&str>| {
+        part.is_some_and(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()))
+    };
+    numeric(parts.next()) && numeric(parts.next()) && parts.next().is_none()
 }
 
 fn temporary_path(path: &Path) -> Result<PathBuf, VaultRegistryError> {

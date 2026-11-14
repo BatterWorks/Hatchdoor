@@ -60,13 +60,7 @@ pub(super) fn describe_asset(
 
     let root = std::fs::canonicalize(vault_root).map_err(|_| AssetPathError::Internal)?;
     let candidate = vault_root.join(relative);
-    let path = match std::fs::canonicalize(candidate) {
-        Ok(path) => path,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Err(AssetPathError::NotFound);
-        }
-        Err(_) => return Err(AssetPathError::Internal),
-    };
+    let path = std::fs::canonicalize(candidate).map_err(|error| canonicalize_failure(&error))?;
 
     if !path.starts_with(&root) {
         return Err(AssetPathError::Forbidden);
@@ -130,6 +124,32 @@ fn percent_encode_segment(input: &str) -> String {
     encoded
 }
 
+/// What a failed canonicalisation of a requested path says about the request.
+/// A path that runs through a file (`note.md/x.png`) names nothing, and a name
+/// the filesystem cannot hold (too long, or otherwise refused) is the caller's
+/// mistake: neither is a server fault, on any surface (#647).
+fn canonicalize_failure(error: &std::io::Error) -> AssetPathError {
+    use std::io::ErrorKind;
+    match error.kind() {
+        ErrorKind::NotFound | ErrorKind::NotADirectory => AssetPathError::NotFound,
+        // A symlink loop leads nowhere, like a missing file. Its own
+        // `ErrorKind` is not stable yet, so it is matched by errno.
+        _ if is_symlink_loop(error) => AssetPathError::NotFound,
+        ErrorKind::InvalidFilename | ErrorKind::InvalidInput => AssetPathError::BadRequest,
+        _ => AssetPathError::Internal,
+    }
+}
+
+#[cfg(unix)]
+fn is_symlink_loop(error: &std::io::Error) -> bool {
+    error.raw_os_error() == Some(libc::ELOOP)
+}
+
+#[cfg(not(unix))]
+fn is_symlink_loop(_error: &std::io::Error) -> bool {
+    false
+}
+
 fn read_asset_bytes_with_limit(path: &FsPath, maximum: u64) -> Result<Vec<u8>, AssetReadError> {
     let file = std::fs::File::open(path).map_err(|error| {
         AssetReadError::Io(format!(
@@ -155,7 +175,9 @@ fn read_asset_bytes_with_limit(path: &FsPath, maximum: u64) -> Result<Vec<u8>, A
 fn sanitize_asset_path(raw_path: &str) -> Option<PathBuf> {
     let mut sanitized = PathBuf::new();
     let trimmed = raw_path.trim();
-    if trimmed.is_empty() || FsPath::new(trimmed).is_absolute() {
+    // NUL ends a path at the system-call boundary, so no file can be named by
+    // one: refuse it here rather than let the filesystem fail on it (#647).
+    if trimmed.is_empty() || trimmed.contains('\0') || FsPath::new(trimmed).is_absolute() {
         return None;
     }
 
@@ -196,6 +218,9 @@ fn content_type_for_path(path: &FsPath) -> &'static str {
         Some("avif") => "image/avif",
         Some("bmp") => "image/bmp",
         Some("pdf") => "application/pdf",
+        // An Obsidian canvas is JSON; the HTTP adapter sends it as a
+        // download (ADR-53).
+        Some("canvas") => "application/json",
         _ => "application/octet-stream",
     }
 }
@@ -251,6 +276,40 @@ mod tests {
         assert!(sanitize_asset_path("../secrets.png").is_none());
         assert!(sanitize_asset_path("/abs/path.png").is_none());
         assert!(sanitize_asset_path("folder/../../escape.png").is_none());
+        assert!(sanitize_asset_path("x\0.png").is_none());
+        assert!(sanitize_asset_path("Media\0/x.png").is_none());
+    }
+
+    #[test]
+    fn describe_asset_answers_unresolvable_paths_as_caller_errors() {
+        // #647: each of these reached the filesystem and came back as an
+        // internal error, so a mistyped embed logged a server fault per view.
+        let tmp = TempDir::new().expect("temp dir");
+        let vault_root = tmp.path().join("vault");
+        fs::create_dir_all(&vault_root).expect("create dir");
+        fs::write(vault_root.join("note.md"), b"# note").expect("write note");
+
+        assert_eq!(
+            describe_asset(&vault_root, "x\0.png").err(),
+            Some(AssetPathError::BadRequest)
+        );
+        assert_eq!(
+            describe_asset(&vault_root, "note.md/x.png").err(),
+            Some(AssetPathError::NotFound)
+        );
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink("loop.png", vault_root.join("loop.png")).expect("loop");
+            assert_eq!(
+                describe_asset(&vault_root, "loop.png").err(),
+                Some(AssetPathError::NotFound)
+            );
+        }
+        let long_name = format!("{}.png", "a".repeat(300));
+        assert_eq!(
+            describe_asset(&vault_root, &long_name).err(),
+            Some(AssetPathError::BadRequest)
+        );
     }
 
     #[test]
@@ -274,6 +333,25 @@ mod tests {
             content_type_for_path(FsPath::new("Attachments/manual.pdf")),
             "application/pdf"
         );
+    }
+
+    /// ADR-53: a canvas is servable, as JSON, and nothing else new is.
+    #[test]
+    fn a_canvas_is_servable_as_json_and_other_unknown_extensions_are_not() {
+        assert!(is_allowed_asset_extension(FsPath::new(
+            "Boards/Plan.canvas"
+        )));
+        assert!(is_allowed_asset_extension(FsPath::new("Plan.CANVAS")));
+        assert_eq!(
+            content_type_for_path(FsPath::new("Boards/Plan.canvas")),
+            "application/json"
+        );
+        for refused in ["data.json", "query.base", "notes.txt", "Plan.canvas.bak"] {
+            assert!(
+                !is_allowed_asset_extension(FsPath::new(refused)),
+                "{refused}"
+            );
+        }
     }
 
     #[test]

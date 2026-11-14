@@ -93,14 +93,25 @@ that production inventory are still checked for stale paths and duplicates.
 
 - `lib.rs` exposes the application modules to the main binary and auxiliary
   binaries.
-- `main.rs` selects serve, model-prefetch, and container-healthcheck modes.
+- `main.rs` selects serve, model-prefetch, model-fetch, and
+  container-healthcheck modes. Model-fetch (`--fetch-model <gemma|nomic>
+  <models dir>`, `model_setup::run_fetch_child`) is the child process model
+  setup starts and watches; it is never started by hand.
 - `server.rs` is the HTTP composition root: it validates startup posture,
-  constructs `AppState`, builds routes, and starts background work. Unsafe
-  public startup without web authentication remains a refusal; its error
-  includes a freshly generated, non-persisted recovery token for the operator
-  to place in `.env`. Per-Vault variables left in the environment
-  (`HATCHDOOR_EXCLUDE`, `HATCHDOOR_GIT_*`) are named in one startup warning;
-  they no longer hold the instance in a restricted recovery mode (#427).
+  constructs `AppState`, builds routes, and starts background work. It starts
+  and joins Vault work execution's signal-driven cache-recovery waiter (#633). Unsafe
+  public startup without web authentication remains a refusal. Its recovery
+  token never reaches the log (#629): `check_web_auth_posture` saves it as one
+  `.env` line to `NEW_WEB_TOKEN_FILE` (`new-web-token.env`) beside the Vault
+  registry, mode 0600, reuses a valid file an earlier refusal left, and names
+  the file in the error. Per-Vault variables left in the environment
+  (`HATCHDOOR_EXCLUDE`, `HATCHDOOR_GIT_*` except the still-live
+  `HATCHDOOR_GIT_AUTHOR_NAME`/`_EMAIL`, #687) are named in one startup warning,
+  logged right after the settings load and before any startup refusal, followed
+  by `vault_migration::stored_retired_settings_warning` naming each retired
+  key `settings.json` still stores (#644);
+  they no longer hold the instance in a restricted recovery mode (#427), and
+  no startup check parses them, so no value of one can stop a start.
 - `AppState` carries shared runtime state. Every field has a production
   reader, and each is one of: collection runtime (`vault_registry`, `vaults`,
   `vault_work`, `managed_git`, `startup_sqlite`, `embedder`,
@@ -123,6 +134,14 @@ that production inventory are still checked for stale paths and duplicates.
   it runs only for a request that was let in and runs the same on an install
   with no token. The asset and attachment routes are left out because the MCP
   token opens them too.
+- `refuse_framing` (#702) is the outermost middleware inside the trace layer,
+  over every route, `/mcp` and the fallback included. Every response carries
+  `X-Frame-Options: DENY` and a `Content-Security-Policy` holding
+  `frame-ancestors 'none'`; a response that already sets a policy (the SVG
+  asset's `sandbox`, `handlers/assets.rs`) keeps it with that directive
+  appended. It adds no other directive. Any frame of Hatchdoor is refused,
+  one on Hatchdoor's own pages included, so the frontend must not show its own
+  routes or Vault assets in an `<iframe>`, `<object>` or `<embed>`.
 - `ShutdownSignal` (`AppState::shutdown`) fires once when the process starts
   shutting down. `server.rs` stops accepting on it, and every response that
   would otherwise stay open forever ends on it: the collection events stream
@@ -191,7 +210,7 @@ that production inventory are still checked for stale paths and duplicates.
   goes through, adding no second execution lane, and skips disabled Vaults,
   which have no active runtime.
   The one dispatch loop binds each turn's instance-wide Git commit identity
-  from that turn's own settings snapshot (`git_author_defaults`) rather than
+  from that turn's own settings snapshot (`git::config::author_defaults`) rather than
   from a value captured at startup, so a saved `HATCHDOOR_GIT_AUTHOR_NAME` or
   `HATCHDOOR_GIT_AUTHOR_EMAIL` applies to the next Git turn of any Vault
   without its own commit identity, with no restart.
@@ -246,7 +265,20 @@ that production inventory are still checked for stale paths and duplicates.
   retained participating SQLite snapshot before its reconstructed Index turn
   runs; a missing, nonparticipating, or unreadable snapshot remains
   Unavailable. Each enabled block owns its
-  definition and resolved Markdown root, capability-specific activation/local
+  definition and resolved Markdown root, the stored root with every symlink
+  in it resolved before the retain-or-replace comparison, so the write
+  layer's no-follow walk can reach it (#630); a root that cannot be resolved,
+  a missing folder, keeps its stored path. A block activated Active, and a
+  managed Git block the moment its checkout makes it available, first calls
+  `vault::repair_interrupted_writes` with its `IntentLog`
+  (`<registry folder>/write-intents/<vault-id>.json`), which finishes a
+  multi-note write a dead process left recorded and sweeps the Vault's
+  leftover temporary files, before the watcher starts or a write is admitted.
+  It does so once per Vault per process (`repair_once`): every later
+  activation, an edit or a quick disable and re-enable among them, can overlap
+  a write of the retiring block that owns those files (#631, ADR-51). The
+  block hands the same `IntentLog` to the mutation core through
+  `intent_log()`. It also owns capability-specific activation/local
   content/search/Git/watcher status and errors, mutation and refresh locks, and
   independently cancellable watcher. Its `index_turn` (`VaultIndexTurn`:
   `running` or `waiting`, absent when idle) is the Vault's place in the
@@ -285,12 +317,71 @@ that production inventory are still checked for stale paths and duplicates.
   `VaultWriteExclusion` — the mutation lock, its generation counter, and the
   refresh lock — so the exclusion's lifetime is the Vault's, not the block's,
   and an edit can never put two live mutexes on one Vault directory (issue
-  #321, [ADR-25](../adr/README.md)). Only a genuinely new or re-enabled Vault
-  gets a fresh exclusion. `write_exclusion()` exposes it so a caller holding a
+  #321, [ADR-25](../adr/README.md)). A Vault gets a fresh exclusion only
+  when no retiring block holds its folder: a genuinely new Vault, or one
+  re-enabled after its disable has passed its safe boundary, on such a
+  folder. Every block an edit, a disable or a disconnect retires stays in
+  `retiring` until that lifecycle's safe boundary, whatever happens to its
+  Vault meanwhile. A Resume arriving before it inherits that block's exclusion
+  and write ledger, so the old Git turn and the writes after the Resume share
+  one lock and one commit record (#640), and any other Vault activated on that
+  block's folder, such as a new Vault added where a paused one was
+  disconnected, inherits only its exclusion (#681). Whatever exclusion it
+  starts from, a Vault activated on a folder equal to, inside or around the
+  folders of one or more retiring blocks first waits, at each acquisition,
+  until every such block's lock is free (#745); the overlap rule is the
+  registry's `paths_overlap`. An edit hands the Git-lane work
+  (sync, commit, recovery) its drain discarded back to the coordinator once
+  the replacement block is active; a Vault left disabled or removed drops it.
+  A lifecycle a newer one supersedes while it waits still starts the
+  replacement blocks it installed that are still live, since the newer one
+  took them as already running.
+  `write_exclusion()` exposes it so a caller holding a
   guard across a reconcile can check, by pointer, that a freshly resolved
   block still serializes against what it holds.
 - `ModelSetup` owns local model selection, terms acceptance, download integrity,
-  and persistent setup records. Once the embedder is installed, startup queues
+  and persistent setup records. Both models are pinned to a commit
+  (`GEMMA_REVISION`, `NOMIC_REVISION`) and every file their loads read has a
+  SHA-256 shipped in `model_setup.rs` (#643). `prepare_download` checks the
+  cache through the snapshot paths the load opens, links followed, and
+  removes it whole when a file differs or an unlisted regular file sits in the
+  snapshot; only a cache that needs a download must find
+  `MIN_SETUP_FREE_BYTES` free. A cache that was valid there is loaded without
+  hashing it again; a downloaded one is checked by `verify_download` before
+  its load. `point_main_at_pinned_revision` points the cache's `main` at the
+  pinned commit, which is what FastEmbed's Nomic load reads; Gemma loads from
+  the snapshot folder by path (`FastembedEmbedder::embedding_gemma_300m_q4_from`).
+  The revision is part of each embedder identity, so a revision change
+  rebuilds the vectors. Before any model file is fetched, removed or
+  re-pointed (`prepare_download` on a cache that is not valid,
+  `reset_download_cache`, `point_main_at_pinned_revision` moving `main`),
+  `files-changed.json` is written in the model's folder; setup clears it
+  once `prepare_for_embedder` has succeeded, so a start that stopped in
+  between still counts as a change. Setup passes `prepare_for_embedder` a
+  `ModelFiles` verdict from that record: `Fetched` while it exists,
+  `AlreadyPinned` otherwise. With `AlreadyPinned`, a cache whose stored
+  identity is the current one without its `-rev-` marker (written before
+  #643) is kept and its identity rewritten in place; with `Fetched`, or any
+  other difference, the model check wipes it (#693). `main.rs` drops
+  `HF_HOME` before the runtime starts, because FastEmbed reads it ahead of
+  the folder Hatchdoor passes. A
+  selection or terms record that cannot be parsed reads as "terms required"
+  instead of stopping the server, and records are written with `sync_all` on
+  the file and its folder. It also owns the model download (#642):
+  `fetch_model` fetches every file of the pinned revision that the snapshot
+  lacks, through `HF_ENDPOINT`, into the model's own folder under the models
+  directory, so the load needs no network. Setup runs it in a child copy of the
+  executable (`fetch_command`) under `run_supervised_fetch`, which reads the
+  child's `hatchdoor-model-fetch` progress lines and kills it when no data
+  arrives for `DOWNLOAD_STALL_AFTER` (60 s) or the attempt passes
+  `DOWNLOAD_DEADLINE` (2 h). `hf-hub` has no timeout or cancellation, and a
+  stuck request holds a blob lock, so only ending the process frees both. A
+  stopped download fails setup at once with `FetchFailure::status_message`
+  as the startup message, skips the in-run cache reset so the next attempt
+  resumes the partial files, and releases `model_setup_started` like any
+  failure, so a retry needs no restart. The startup status reads `step`
+  `download` during the fetch and `load` after it
+  (`StartupTracker::set_model_loading`), with the phase still `Downloading`. Once the embedder is installed, startup queues
   each active Vault through the collection Index coordinator; it does not run a
   second legacy single-Vault cache build. Startup becomes Ready once every
   active collection Vault's Index turn has settled (see
@@ -326,9 +417,11 @@ that production inventory are still checked for stale paths and duplicates.
   `is_vault_change_path`, the one rule `should_refresh_for_event` also uses:
   the cache database and its sidecars, `.git` and noise paths never count, a
   layer marker does. The first round only sets the baseline, an unchanged
-  Vault never reports, and a round that cannot read the Vault root or
-  anything under it logs a warning, keeps the previous baseline and tries
-  again next round. Cancelling
+  Vault never reports. An entry below the root that the process may not open
+  costs only itself, by `vault::walk_error_costs_only_itself`, the rule the
+  catalogue walk uses (#674). A round that cannot read the Vault root, or
+  meets any other error under it, logs a warning, keeps the previous
+  baseline and tries again next round. Cancelling
   the handle stops the re-scan with the watcher.
 - The watcher is not the only producer of that intent. The mutation core
   reports every successful foreground write on the same channel through
@@ -356,7 +449,26 @@ that production inventory are still checked for stale paths and duplicates.
   only stats `vault_path` once, at `reconcile()` time, before a managed
   checkout exists. When that makes the Vault Active it also starts (or
   replaces) the Vault's watcher, which activation skipped for want of a
-  directory (#324). `activation_snapshot`'s Git status defaults to `Pending`
+  directory (#324). When it makes the Vault not Active it stops that watcher
+  and reports it `disabled`, and reports `search` `unavailable`; becoming
+  Active again restores `search` from the retained snapshot (#641). A
+  folder the operator owns (Local, and ExistingGit, whose Git turn may keep
+  failing) has nothing else to re-derive this, so
+  `VaultControlBlock::reprobe_local_content` stats it again through
+  `stat_local_content` and publishes the result; it is a no-op for
+  ManagedGit, whose Git turns create the folder.
+  `VaultCollectionRuntime::reprobe_local_vault` runs it for one Vault and
+  requests an Index turn if it has just become readable. `server.rs`'s
+  `spawn_local_content_probe` calls it on a `LOCAL_CONTENT_PROBE_INTERVAL`
+  tick (60 seconds, `RESCAN_INTERVAL`), one blocking task per Vault and
+  skipping a Vault whose previous probe has not returned. The Index turn
+  calls it before it scans, so a watcher or re-scan report re-probes too,
+  and the management core's now-async `retry` and `refresh` call it off the
+  request workers (`retry_local_content` also restarts a watcher that failed
+  to start). `repair_once` holds its record locked across the repair, since
+  these callers can race to activate one Vault.
+  `collection_capabilities` grants `search` only to an Active Vault.
+  `activation_snapshot`'s Git status defaults to `Pending`
   (an immediate first sync) for a genuinely new Vault or a
   disabled-to-enabled transition only; `reconcile()`'s non-retained-
   definition branch (an in-place edit to an already-active Vault) instead
@@ -416,6 +528,13 @@ another Vault and rejoin that lane (ADR-35): `another_vault_waits_to_index`
 is the question it asks, and `requeue_paused_index_turn` moves its Vault's
 one indexing position to the back, folding in any rerun requested while it
 ran, and refuses a drained Vault so lifecycle still discards paused work.
+`vault_is_stopping` answers whether a Vault is drained or the queue is shut
+down, so a running Index turn stops at its next chunk instead of embedding
+to the end while Pause, an edit, disconnect or SIGTERM waits for it (#640).
+`drain_vault` returns the kinds it discarded, and
+`wait_for_vault_safe_boundary` also returns once a newer lifecycle has
+reopened the Vault, so a Pause superseded by a Resume does not wait for the
+resumed Vault's work.
 `index_lane_state` (`IndexLaneState::Running` or `Waiting`) says where a
 Vault's indexing stands, and the one observer set with `observe_index_lane`
 is called, outside the queue lock, with each Vault whose indexing may have
@@ -476,8 +595,9 @@ composition (`src/server.rs`) runs every admitted turn on its own task through
 `vault_executor` and joins them all before it exits; Repair remains separately
 owned. `git::ManagedGitScheduler`'s
 `tick` is the one production caller of `request_if_idle`. `vault_executor`
-is the one caller of `requeue_paused_index_turn` and
-`another_vault_waits_to_index`, and sets the index-lane observer.
+is the one caller of `requeue_paused_index_turn`,
+`another_vault_waits_to_index` and `vault_is_stopping`, and sets the
+index-lane observer.
 
 **Coordination paths:** `src/lib.rs` for the module export; runtime composition,
 per-Vault watcher intent, cache refresh, Git lifecycle, and repair producers
@@ -523,9 +643,15 @@ the collection concludes from a finished turn. The executor is assembled once
 at startup and binds one immutable `ConfigSnapshot` at the start of every
 turn, so an admitted operation observes a single configuration view while a
 saved setting still reaches the next turn without a restart — that is where
-`git_author_defaults` (the instance-wide `HATCHDOOR_GIT_AUTHOR_NAME`/`_EMAIL`
+`git::config::author_defaults` (the instance-wide `HATCHDOOR_GIT_AUTHOR_NAME`/`_EMAIL`
 commit identity, overridden per Vault by
 `git::config::resolve_commit_identity`) and `HATCHDOOR_EMBED_LAYERS` are read.
+`recover_corrupt_cache`, started once by `server.rs` and stopped on shutdown,
+waits for the cache's corruption signal. It runs handle replacement and
+quarantine on the blocking pool, then requests an Index turn for every active
+Vault through the existing coordinator. It reports `cache_rebuilding` on each
+Vault until its turn starts, or `cache_recovery_failed` while retrying a failed
+recovery. It creates no new indexing lane and changes no Markdown.
 `settle_startup` latches startup Ready, and is the one place that does:
 `publish_outcome` asks it after an Index turn, and runtime composition asks
 it when model setup finishes and, through
@@ -557,7 +683,12 @@ task, so the Index retry backoff and the commit cooldown behave the same
 whichever lane the turn ran in.
 
 - `dispatch_vault_index_turn` executes a `VaultWorkKind::Index` turn for one
-  active Vault. Through `dispatch_vault_index_turn_with_progress`, `run`
+  active Vault. It first re-probes a Local Vault's folder
+  (`reprobe_local_content`, on the blocking pool) and returns `Ok` without
+  scanning for any Vault whose activation is not `Active` (#641): every
+  producer, model setup and collection reindex included, goes through this
+  one gate, and the probe or Git turn that makes the Vault readable requests
+  its turn. Through `dispatch_vault_index_turn_with_progress`, `run`
   hands it an `IndexTurnSlicing` (the coordinator and `INDEX_TURN_SLICE`,
   five minutes of embedding, a constant per ADR-14; tests shorten the
   executor's `index_slice`). Once the build has embedded for a slice, it asks
@@ -568,7 +699,11 @@ whichever lane the turn ran in.
   generation supports with no error (`retained_search_status`, shared with
   the failure path), and returns `Ok`: a pause is not a failure, and the
   next turn resumes from the saved progress. A turn that has embedded
-  nothing yet, or has nothing left to embed, never pauses. It acquires that
+  nothing yet, or has nothing left to embed, never pauses for another Vault.
+  Whatever it has embedded, it stops before its next chunk once its Vault is
+  drained or the coordinator shuts down, and is not requeued: the lifecycle
+  that drained it, or the next start, requests a fresh turn that resumes from
+  the saved progress (#640). It acquires that
   Vault's foreground mutation and refresh
   boundaries, builds an authoritative Markdown index and isolated candidate
   cache off the async runtime, hands that scan's asset catalog and layer map
@@ -662,8 +797,8 @@ whichever lane the turn ran in.
 - `dispatch_commit_turn` executes a `VaultWorkKind::Commit` turn: the local
   half of Git, on its own (#267). `plan_commit_turn` resolves the Vault's
   source and mode to `git::run_local_history_git_turn` (Local history, no
-  mutation lock), `git::run_existing_git_commit_turn` (`ExistingGit` Two-way,
-  mutation lock held because `prepare_two_way_worktree` stages from the whole
+  mutation lock, given the source's registered `repository_path`, #678),
+  `git::run_existing_git_commit_turn` (`ExistingGit` Two-way, mutation lock held because `prepare_two_way_worktree` stages from the whole
   checkout's status), or `git::run_managed_git_commit_turn` (`ManagedGit`
   Two-way, lease *and* mutation lock). Pull-only and `Local` plan nothing and
   return `Ok(())`: the first refuses writes and must leave its operator's own
@@ -753,13 +888,17 @@ backend checks.
 
 **Public contract:** `RuntimeConfig`, `ConfigSnapshot`, `ResolvedSetting`,
 `SettingSource`, `Environment`, `SETTINGS_SCHEMA`, `live_settings_defaults`,
+`RETIRED_SETTINGS`,
 `settings_file_path`, `is_truthy`, and the versioned
 `settings.json` file format. `RuntimeConfig::snapshot` gives one immutable,
 lock-free configuration view to bind at the start of an operation;
 `RuntimeConfig::save` serializes writes, persists first, then publishes the
 new view. `RuntimeConfig::remove_stored` lets the registry's startup step
-purge the retired Git-lane keys, persisting before publishing and leaving
-environment pins and unrelated values untouched.
+purge the retired keys, persisting before publishing and leaving
+environment pins and unrelated values untouched. `RETIRED_SETTINGS` names
+them (`HATCHDOOR_EXCLUDE` and the Git-lane keys, not the two author keys):
+still listed by the defaults so the settings document keeps its shape, but
+refused by the settings save and purged at every start (#644).
 `RuntimeConfig::validate_and_save` runs a caller-supplied decision
 against the snapshot current at the moment the write lock is taken and only
 persists on success, so validation and persistence serialize behind the same
@@ -851,16 +990,20 @@ checks.
 
 **Public contract:** `DEFAULT_VAULT_REGISTRY_PATH`, the startup step
 `vault_migration::{prepare_registry, RegistryStartupError,
-LEGACY_MIGRATION_DOC_URL}`,
+LEGACY_MIGRATION_DOC_URL, stored_retired_settings_warning}`,
 `REGISTRY_SCHEMA_VERSION`, canonical `VaultId` generation and parsing,
 `VaultRegistryStore`, immutable `VaultRegistrySnapshot` values, explicit
 `VaultRegistryState::Ready` versus `Recovery`, structured recovery/error
 types, redacted `VaultDefinition` projections, tagged `VaultSource` values for
 local, existing-Git, and managed-Git Vaults, `VaultGitMode`, credential write
 inputs/updates, validated `add`/`edit`/`enable`/`disable`/`disconnect`
-operations, store-owned `vault_path` resolution for runtime consumers, the
+operations, `edit_prepared` with its `PendingEdit` and
+`PreparedEditError` (#639), (a configured Git branch must pass `git2::Branch::name_is_valid`,
+#638), store-owned `vault_path` resolution for runtime consumers, the
 crate-private `ensure_outside_instance_state` containment check the folder
-listing reuses to hide instance state,
+listing reuses to hide instance state, the crate-private
+`canonical_or_normalized` path resolution the management core's agent mount
+rule reuses (#700),
 a remote-backed source's own `poll_interval_secs` (issue #97's reopening
 finding 2: per-Vault, not scheduler-wide; `#[serde(default)]`s to 24h so a
 registry record written before this field existed keeps loading under the
@@ -911,20 +1054,22 @@ username.
 
 `vault_migration::prepare_registry` is the registry's startup step, all that
 remains of the legacy single-Vault import #427 removed (ADR-40). A start that
-finds a registry purges the retired Git-lane keys from stored settings
-(`HATCHDOOR_GIT_SYNC_ENABLED`, `_HTTPS_TOKEN`, `_HTTPS_USERNAME`, `_REMOTE`,
-`_BRANCH`, `_DEBOUNCE_SECONDS`), logging and retrying on the next start on
-failure, so a plaintext Git token never survives there (#325), then loads it.
+finds a registry purges every retired setting from stored settings
+(`runtime_config::RETIRED_SETTINGS`: `HATCHDOOR_EXCLUDE`,
+`HATCHDOOR_GIT_SYNC_ENABLED`, `_HTTPS_TOKEN`, `_HTTPS_USERNAME`, `_REMOTE`,
+`_BRANCH`, `_DEBOUNCE_SECONDS`), logging and retrying on the next start on failure, so a plaintext Git token
+never survives there (#325) and a value nothing reads cannot stop a start
+(#644), then loads it.
 A start that finds none refuses with
 `RegistryStartupError::UnconvertedLegacyInstall` when stored settings still
 carry any of those retired Git-lane keys, which only a single-Vault release
 wrote: that install is from 2.4.x or earlier, and the
 message sends it through a 2.5.0 to 2.7.x release and names
 `docs/migrations/legacy-single-vault.md`. Otherwise it writes an empty
-registry, whatever `VAULT_PATH` holds. It never reads, registers, or writes
-the `VAULT_PATH` folder, and the refusal writes nothing at all.
-`HATCHDOOR_EXCLUDE` and the author keys never trigger it, because a current
-install stores them too.
+registry, after the same purge, whatever `VAULT_PATH` holds. It never reads,
+registers, or writes the `VAULT_PATH` folder, and the refusal writes nothing at
+all. `HATCHDOOR_EXCLUDE` and the author keys never trigger it, because a
+current install could store them too.
 
 **Consumers:** runtime composition calls `vault_migration::prepare_registry`
 after the security refusals and before recording the start or opening the
@@ -932,7 +1077,8 @@ cache, and loads the registry through it; that step consumes `load` and
 `initialize_empty`, and live configuration's `remove_stored` and snapshot.
 Runtime composition then passes the snapshot on, and
 `VaultCollectionRuntime` consumes its safe
-projections and resolved paths; the Vault work executor's managed-Git Git-turn
+projections and resolved paths, and `paths_overlap` to find the retiring
+control blocks a newly active Vault waits for (#745); the Vault work executor's managed-Git Git-turn
 dispatch (`dispatch_git_turn`) is the one consumer of the crate-private
 `https_credentials` accessor, and also resolves `commit_identity` through
 `git::config::resolve_commit_identity` before every Git turn. `handlers/vaults.rs`
@@ -948,6 +1094,25 @@ falling back to `AppState::runtime_archive_prefix` when absent. Both the HTTP an
 writes through Vault collection management, which owns the
 `create_vault`/`edit_vault` request and credential-patch types they share.
 Frontend, cache, and search adapters remain separately owned later packets.
+
+Issue #639: an `ExistingGit` `LocalHistory` source on a plain folder (no `.git`
+entry and nothing `git2::Repository::open` opens there; a folder inside
+another repository counts, and gets a nested repository) is valid. `add` and
+`edit` (switching to Local history, not an edit of a Vault already on it at
+that folder) create its repository with
+`git2::Repository::init` under the registry write lock, after the revision
+check and just before the save, with no commit and no `.gitignore` (the
+generated files `init_local_repo` ignores can never sit inside a registered
+Vault). When the save then fails, the `.git` it created is removed again; no
+other writer can have relied on it meanwhile. Modes with a remote still
+require a working checkout. `enable` and an ordinary edit never create one:
+a Local-history source whose repository went missing (a lost `.git`, an unmounted drive) is
+refused as `InvalidSource`. `edit_prepared` is `edit` with a caller step run
+at the same point, under the lock, given a `PendingEdit` (the previous
+source, the previous commit identity, whether the source identity changed);
+a refusal there saves nothing and comes back as `PreparedEditError::Prepare`.
+Undoing that step after a failed save is the caller's part. Vault collection
+management is its one caller.
 
 The folder listing consumes `load`, `vault_path` and
 `ensure_outside_instance_state` to flag registered Vaults and skip folders
@@ -971,7 +1136,10 @@ identity-bearing changes require a disabled definition plus explicit
 same-Vault confirmation; readable
 non-writable directories remain valid; disconnect deletes no files or Git
 state; HTTPS credentials persist only in the private registry record and never
-appear in projections, debug output, errors, status, or repository URLs;
+appear in projections, debug output, errors, status, or repository URLs, and
+`remove_stale_temporary_files`, run once at startup before the registry
+loads, deletes and logs any `.<registry>.<pid>.<nonce>.tmp` copy a crash
+between write and rename left beside it (#640);
 recovery retains the original bytes; Vault contents remain authoritative
 Markdown and SQLite remains disposable (ADR-01); the store adds no service,
 framework, or speculative trait (ADR-02/13); filesystem behavior assumes no
@@ -1142,8 +1310,11 @@ followed by the full backend checks.
 **Owned paths:** `src/auth.rs`.
 
 **Public contract:** `WebToken`, `WebOrLiveMcpToken`, `require_web_token`,
-`require_web_or_live_mcp_token`, and `require_web_or_live_mcp_read_token`, plus
-the crate-internal `request_is_authorized(request, token)`, the web-token check
+`require_web_or_live_mcp_token`, `require_web_or_live_mcp_read_token`, and
+`require_local_host_and_origin`, plus the crate-internal `bearer_credential` and
+`presented_bearer`, the one parser of `Authorization: Bearer` for every web gate
+and `/mcp` (scheme matched case-insensitively, any spaces or tabs after it), and
+`request_is_authorized(request, token)`, the web-token check
 those middlewares share, which the public manual routes (`src/handlers/docs.rs`)
 use to decide whether a caller may see private pages without gating the route. Both
 attachment middlewares bind the MCP token from the current runtime snapshot
@@ -1182,10 +1353,13 @@ web token configured, and not demo mode — so a deployment with no web token
 keeps serving assets openly and enabling MCP never demands a credential the
 browser has never held.
 
-**Consumers:** `server.rs` and protected HTTP routes.
+**Consumers:** `server.rs`, protected HTTP routes, and `mcp/auth.rs`
+(`presented_bearer`).
 
 **Consumed dependencies:** live runtime configuration and `McpConfig` parsing
-for per-request attachment authorization.
+for per-request attachment authorization and for the token-less guard's
+`HATCHDOOR_PUBLIC_URL` and `HATCHDOOR_MCP_ALLOWED_ORIGINS`;
+`mcp::auth::is_allowed_origin` for that guard's Origin allow-list.
 
 **Coordination paths:** `src/server.rs`, `src/config.rs`, frontend
 `frontend/src/api/api.ts`, and any route whose authentication requirements
@@ -1199,8 +1373,24 @@ shared `429`.
 token's `access_token`, so neither reaches the request trace span (ADR-27).
 Transfer links are redeemed on their own routes, not through these guards.
 
+`require_local_host_and_origin` (#629) is what protects an instance with no web
+token, which ADR-07 allows on loopback only. `build_router` layers it over every
+route except `/mcp` when no web token is configured and demo mode is off. It
+reads the live snapshot per request and answers `403` when the `Host` is not
+`localhost`, `127.0.0.1` or `[::1]` (any port) or `HATCHDOOR_PUBLIC_URL`'s host,
+and when a request other than `GET`/`HEAD`/`OPTIONS` carries an `Origin` that
+is neither the request's own, the public URL's, nor one
+`mcp::auth::is_allowed_origin` accepts from `HATCHDOOR_MCP_ALLOWED_ORIGINS`, or
+carries no `Origin` and `Sec-Fetch-Site: cross-site`. A request with no `Host`
+cannot come from a browser and passes.
+
 **Invariants:** constant-time token comparison, no token logging, and deliberate
-query-parameter fallback for browser contexts that cannot set headers (ADR-08).
+query-parameter fallback for browser contexts that cannot set headers (ADR-08),
+accepted only on `GET` requests to `QUERY_TOKEN_ROUTES` (assets, note download,
+the event stream; #703). `request_is_authorized` applies the list, so every
+guard using it, the asset-read guard and the docs routes included, refuses a
+query-only token elsewhere. A test reads every `withAccessToken` call in
+`frontend/src` and fails when one builds an address outside the list.
 
 **Validation:** `cargo test auth` and server/router tests.
 
@@ -1323,7 +1513,7 @@ the collector endpoint (the maintainer's infrastructure, set up outside this
 repository), Instance state (`InstanceStateStore`, `base_version`, and
 `VersionRecord`, whose `fresh_install` tells `take_notice` an upgraded install
 from a fresh one),
-`config::{version_string, build_channel, build_image}` (a build is a release,
+`config::{version_string, build_channel, install_image}` (a build is a release,
 and its channel `stable`, only when the `VERSION` build argument names the
 crate's own version, #504), the Vault collection registry (which
 Vaults are enabled and their Git mode), the cache's
@@ -1334,7 +1524,8 @@ ID.
 **Coordination paths:** `src/lib.rs`, `src/app_state.rs`, `src/server.rs`,
 `src/runtime_config.rs` (the setting's default), `src/instance_state.rs`
 (`remove_section`), `src/handlers/settings.rs`, `src/mcp/adapter.rs`,
-`src/config.rs` and `Dockerfile` (the `HATCHDOOR_IMAGE` build argument, and
+`src/config.rs` and `Dockerfile` (the `HATCHDOOR_IMAGE` build argument,
+which marks the published image while the engine is read at run time, #705, and
 `VERSION`, compiled in as `HATCHDOOR_RELEASE_VERSION`, which marks a release,
 #504),
 `README.md` (the paragraph under Configuration that names the setting, which
@@ -1399,7 +1590,8 @@ put through the note slug rule, so `03 Reference/MCP tools reference.md` is
 `reference/mcp-tools-reference`. `page` ignores case, surrounding slashes and a
 `#heading` fragment. A page's `markdown` has no frontmatter, and every wikilink
 outside code is a Markdown link to a page name, plus a `#heading` anchor in the
-note slug rule when the link names a heading. `search` is case-insensitive word
+note slug rule when the link names a heading, or the `#^id` it was written
+with when it names a block (#578), which the Help reader anchors. `search` is case-insensitive word
 matching with a trailing plural `s` folded and common words such as `how` and
 `the` dropped from the query. Pages rank by how many query words their title
 holds, then their headings outside code, then how often the words appear
@@ -1424,7 +1616,10 @@ leave code blocks alone.
 **Coordination paths:** `src/lib.rs`, `Dockerfile` and `.dockerignore` (the
 image build must see `docs/user-vault` for `include_str!`), and
 `scripts/check-docs-freshness.mjs` (the `bundled-manual` surface, and
-`docs/user-vault/` as shipped content).
+`docs/user-vault/` as shipped content), and `scripts/check-mode.mjs`
+(`MANUAL_RUST_TESTS` and `MANUAL_FRONTEND_TESTS`: the tests `just check`
+runs when a branch only edits manual pages; its tests fail when a file that
+names the manual is missing from them).
 
 **Invariants:** every Markdown file under `docs/user-vault` is bundled and
 nothing else is (`every_manual_page_is_bundled`, `only_markdown_is_bundled`);
@@ -1536,6 +1731,7 @@ synchronized; no automated cross-language schema check currently exists.
 - `src/vault/link_style.rs`
 - `src/vault/links.rs`
 - `src/vault/markdown_links.rs`
+- `src/vault/note_file.rs`
 - `src/vault/paths.rs`
 - `src/vault/sections.rs`
 - `src/vault/types.rs`
@@ -1552,11 +1748,15 @@ resolves it by searching the vault, so a purely note-relative reading broke ever
 embed in a vault using one top-level attachments folder (#158). `is_servable_asset`
 is shared with the read core's contained-resource seam
 (`src/vault_read/assets.rs`), so resolution can never name a path the asset
-route or the MCP `get_attachment` tool would refuse.
+route or the MCP `get_attachment` tool would refuse. Since #579 the servable
+extensions include `canvas` (ADR-53), which puts every Obsidian canvas in
+`asset_paths`: the write layer's canvas repair and the explorer tree's file
+list both read it from there, so neither walks the Vault for canvases.
 `resolve_note_link` answers a Markdown note link (ADR-28) through the same
 path ladder (`resolve_path_ladder` in `paths.rs`, which `resolve_asset` now
 calls too) over `note_paths`, the catalogue's notes keyed by path and by
-filename. `markdown_links.rs` is the one scanner for Markdown links: the link
+filename. `VaultIndex::link_resolution_catalog` builds only resolver lookups from published note identities, without touching disk, assets or graph edges. `unresolved_note_targets` in `links.rs` is the sibling pass used by link findings (#575): the graph's existing scanners skip code and attachment embeds, and its resolvers identify missing or ambiguous wiki targets and missing Markdown note targets. Existing outgoing and backlink behavior is unchanged.
+`markdown_links.rs` is the one scanner for Markdown links: the link
 graph reads it, and so does the write layer's rename, move and delete
 rewriting, through `rewrite_note_links`.
 `link_style.rs` answers a Vault's link style (ADR-33) through
@@ -1569,7 +1769,8 @@ process-wide memo keeps each note's counts until its size or modification
 time changes, so a listing re-reads only changed notes. The scanner records
 inline images as `MarkdownLink::Image` for that count only, and no rewriter
 touches them.
-`sections.rs` is the one rule for what a Section is (#502), crate-private as `NoteSections`: `scan` finds every ATX heading outside a fenced code block (one to six `#` characters and then whitespace), `span` gives the byte range from a heading's line to the next heading of the same or a higher level, and `heading_paths` gives each heading's path, its enclosing headings' text and its own joined with ` > `, passing over a heading with no text as the chunker does. The scan moved here unchanged from `write/notes.rs`, where it was private to `replace_section`, so the write layer and the read core's outline and section reads cannot disagree about a span. `scan_from` starts at a byte offset for a caller that knows where the frontmatter block ends; the write layer still scans the whole file, as it always has.
+`note_file.rs` is the one bounded reader of a Vault file (#636): `read_bounded` refuses anything but a regular file (a FIFO, a device, a symbolic link) without opening it for a blocking read, and refuses a file over the caller's bound before reading it. `read_note_text` is that read for a note's text under `MAX_NOTE_BYTES` (8 MiB, the MCP reply cap): `read_note_by_slug`, the read core's exact reads and attachment list, the link graph and `count_link_forms` read notes through it, `find_text` through `read_bounded` with the same bound, and the `app.json` probe under 64 KiB. The Index turn's note upsert reads through `read_note_text` too, so a note over the bound is listed without being read, under the `oversized` content-hash marker, with no text, chunks, links or tags, and one that became a FIFO or device after the scan loses its row in that turn (#670, #672). `read_open_bounded` is the same bounded read of a handle the caller opened itself: the write layer opens a note through its no-follow walk and reads it with it before an edit, so an edit of a note over `MAX_NOTE_BYTES` is refused as `invalid_write_input` without reading it whole (#670), and every later read of a note in the same write goes through it too (#672). `open_without_blocking` is the open those reads share, with no read attached: the write layer's attachment report opens through it and streams the whole file, since attachments have no bound (#736). `note_file_name` gives the file name of a note known only by its extension-free relative path, as a published snapshot row is, finding a `.MD` or `.Md` extension when no `.md` file is there (#637).
+`sections.rs` is the one rule for what a Section is (#502), crate-private as `NoteSections`: `scan` finds every body ATX heading outside fenced or indented code (at most three leading spaces, no leading tab, one to six `#` characters and then whitespace), `span` gives the byte range from a heading's line to the next heading of the same or a higher level, and `heading_paths` gives each heading's path, its enclosing headings' text and its own joined with ` > `, passing over a heading with no text. The write layer, the read core's outline and section reads, and the chunker's heading paths share this scan and cannot disagree about a span or a path (#635). The crate-private `body_start` re-export locates the end of the canonical frontmatter block for section scanning and the read core's text-match place classification. `scan` skips that block automatically; `scan_from` starts at a caller-supplied line boundary for a caller that already has the same offset (#625).
 
 **Consumed dependencies:** filesystem traversal and parsing; `cache::parse`
 currently supplies content hashing to the index, the frontmatter parser
@@ -1579,7 +1780,7 @@ Markdown code-region scanner (`for_non_code_line`) the link reader uses to skip
 fenced code blocks and inline code spans.
 
 **Consumers:** cache population, handlers, MCP reads, write coordination,
-watching, and application startup.
+watching, application startup, and chunking (`NoteSections` for heading paths, #635).
 
 **Coordination paths:** `src/cache/**`, `src/vault_watcher.rs`,
 `src/api_types.rs`, and adapters when a public vault type changes.
@@ -1587,9 +1788,15 @@ watching, and application startup.
 **Invariants:**
 
 - Markdown files remain authoritative (ADR-01).
-- Excluded/noise paths do not enter the index.
-- Layer markers remain visible to classification even under broad exclusions.
+- Excluded/noise paths do not enter the index. `.git/` is built-in noise, re-includable with `!.git/` (#637).
+- Layer markers remain visible to classification even under broad exclusions, except under `.git`, which the marker walk never enters (#637).
+- An entry either walk may not open (`PermissionDenied`, or `NotFound` for one deleted mid-walk) costs only itself: the catalogue walk logs and skips it, the marker walk skips it at debug level (`paths::walk_error_costs_only_itself`, which the watcher's folder re-scan also uses, #674). An unreadable Vault root or any other error, such as a share's passing I/O fault, still fails the build, so the Index turn retries instead of unpublishing a folder's notes (#637).
+- A note pattern in the exclude list covers its `.md` extension in any case (`ExcludeMatcher::is_excluded`); every other pattern matches case as written. Of two files differing only in the extension's case, the catalogue lists the `.md` one, and the write layer's `resolve_new_note_path` resolves a case variant to the existing file, so a create conflicts, an overwrite replaces it and a move refuses it (#637).
+- A note path that is not UTF-8 is left out of the catalogue with a warning, and so is a layer marker in such a folder; nothing is listed under a shared fallback name (#637).
+- `paths::is_note_path` is the one answer to "is this a note?": an `md` extension in any case. The catalogue walk, the write layer's `is_markdown_path`, note-path normalisation, note uploads and the startup note count all use it, and `strip_md_extension` strips the extension in any case to match (#247, #637).
 - A note remains addressable while its layer is reported to callers.
+- Every read the read model and the read core make of a note's or `app.json`'s bytes goes through `read_bounded`, so none can block on a FIFO or read without a size bound (#636).
+- A note that is not UTF-8 fails `read_note_text` as `BoundedReadError::NotUtf8`. Every exact read reports it as `note_unreadable`, not retryable; the Index turn indexes its text lossily, so it stays in every listing and `find_text` matches it the same way (#637).
 - `read_note_by_slug` fills `Note.metadata` from the file it just read, with the parser the frontmatter read uses, so an exact note read and `exact_note_frontmatter` agree. Frontmatter that does not parse leaves `metadata` as `None` and never fails the read, because reading the note is how it gets repaired (#521).
 - A backslash before a wikilink's alias pipe is syntax rather than part of the
   target, so `[[Note\|alias]]` - the form a Markdown table cell forces - names
@@ -1598,8 +1805,9 @@ watching, and application startup.
   with the write layer's rewriters, and no escape reaches
   `normalize_link_target`, which would read it as a path separator (#252).
 - A Section's span has one implementation, `NoteSections::span`. Neither `replace_section` nor a section read computes it another way (#502).
+- Wikilink resolution has one rule, `VaultIndex::resolve_wikilink_match`, which the link graph, the read core's resolve and resolve-batch reads and the write layer's rewriters all call (#626). The cache has no resolver of its own (#653). A target holding `/` matches a note's Vault-relative path in full or as a whole-segment suffix before any title fallback, and a leading `/` allows the full path alone; then the last segment matches a title with case folded; then its slug matches the slug a note's name folds to (`by_name_slug`), never a generated collision suffix such as `meeting-2`, so a link to a note that does not exist stays broken (ADR-28), and a folder the target names still ranks first there. Within a tier a full path beats a suffix, exact case beats folded case, the default surface beats a layer, and the note nearest the linking note's folder (the Vault root when there is none) wins; a remaining tie goes to path order and is reported as not unique. Titles, path keys, slugs and targets are compared NFC-normalised (`normalize_title`, `nfc_title`, `note_slug_base`), so a decomposed filename meets a composed link; the stored title and path keep their bytes.
 - A note link is a wikilink or a Markdown link whose destination, once any
-  `#anchor` is removed, ends `.md` (ADR-28), and both feed the same outgoing
+  `#anchor` is removed, ends `.md` in any case (ADR-28, #675), and both feed the same outgoing
   and backlink records. A Markdown target resolves by path from the linking
   note's folder, never by the wikilink title rule, and the two rules must not
   be merged. Links in code, image syntax and unused reference definitions do
@@ -1617,14 +1825,18 @@ watching, and application startup.
 - `src/vault/write.rs`
 - `src/vault/write/assets.rs`
 - `src/vault/write/attachments.rs`
+- `src/vault/write/canvas.rs`
 - `src/vault/write/frontmatter.rs`
 - `src/vault/write/fs_ops.rs`
+- `src/vault/write/intent.rs`
 - `src/vault/write/notes.rs`
 - `src/vault/write/paths.rs`
 - `src/vault/write/rewrites.rs`
 - `src/vault/write/tags.rs`
 - `src/vault/write/types.rs`
 - `src/vault/write/tests.rs`
+- `src/vault/write/tests/canvas.rs`
+- `src/vault/write/tests/journaled.rs`
 
 **Public contract:** write functions and result/error types re-exported from
 `src/vault.rs`, including note CRUD-by-move, section/edit primitives,
@@ -1635,16 +1847,32 @@ tag delete (`delete_tag` with `TagDelete`, `TagDeleteNote`, `TagDeleteError`,
 and `NestedTag`, #258), the path-addressed note checks a note upload makes
 before its bytes arrive (`note_target` with `NoteTarget`,
 `note_exists_conflict`, and `check_note_content_hash`, #303), allowed
-attachment extensions, `WriteOutcome`, `WriteError`, and `UnrewritableNote`,
-which `WriteError::LinkRewriteUnsupported` carries (#360).
+attachment extensions, the crate-visible `normalize_note_relative_path` and
+`normalize_attachment_relative_path` shared with the mutation core so exclusion
+checks use the same separators and note extension as writes (#624),
+`WriteOutcome`, `WriteError`, and `UnrewritableNote`,
+which `WriteError::LinkRewriteUnsupported` carries (#360). Since #631 every
+multi-note write (`move_or_rename_note`, `archive_note`, `delete_note`,
+`move_attachment`, `rename_attachment`, `delete_attachment`, and the applying
+`rename_tag` and `delete_tag`) takes the Vault's `IntentLog` as its last
+argument, `None` only in tests, and the layer exports `IntentLog`,
+`repair_interrupted_writes` and its `WriteRepair` report for Vault
+activation (ADR-51).
+`update_note_frontmatter` keeps an existing leading UTF-8 BOM at the start
+when it creates, edits or removes the frontmatter block (#633).
 `frontmatter.rs` is internal to the layer: `edit_frontmatter_block` is a plain
 `pub(super)` function, deliberately not a trait or an extension point
 (ADR-13), and its second caller is the Vault-wide tag rename and delete in
 `tags.rs` (#242, #258).
 
-**Consumed dependencies:** vault index/types, the local filesystem, the
+**Consumed dependencies:** vault index/types, the local filesystem (and,
+for the intent record, the `write-intents/` folder beside the Vault registry,
+written with `serde_json`), the
 filesystem rename-flag capability (`src/rename_flags.rs`) that decides whether
-a commit can use `renameat2`'s flags here, and
+a commit can use `renameat2`'s flags here, the read model's bounded reader
+(`read_open_bounded`, `MAX_NOTE_BYTES`, `BoundedReadError`) for every read of
+a note's bytes (#670, #672), and `read_bounded` for the Vault-wide rewrite
+planners, which skip a note over the bound as the link graph does (#670), and
 `cache::parse` for content hashing, frontmatter span parsing, and the shared
 Markdown code-region scanner (`for_non_code_line`, `parse_fence_marker`) that
 keeps every rewriter's idea of a code block identical to the indexer's. The
@@ -1654,13 +1882,18 @@ note back, plus `search::tag_matches` for what a tag and its namespace match. It
 also consumes the vault read model's wikilink body splits
 (`split_wikilink_note_body`, `split_wikilink_asset_body`), so a rewriter and
 the link graph can never disagree about where a target ends (#252).
-`replace_section` takes its headings and its span from the read model's `NoteSections` (#502); which heading the caller means, and the two refusals for a heading that is missing or not unique, stay in `write/notes.rs`.
+`replace_section` takes its headings and its span from the read model's `NoteSections` (#502); which heading the caller means, and the two refusals for a heading that is missing or not unique, stay in `write/notes.rs`. A missing heading is the typed `WriteError::HeadingNotFound` (#625), translated by the mutation core to non-retryable `heading_not_found` rather than generic invalid input.
 
 **Consumers:** the Vault-qualified mutation core (`src/vault_mutation.rs`),
 which since #186 is the sole caller of every write primitive. The one
 exception is `list_note_attachments`, a read that lives here for its path
 handling and is called by the MCP `list_note_attachments` tool through the
-core's own `write_operation_error` translation.
+core's own `write_operation_error` translation. It takes the note's text from
+the read core, which reads it under the read model's size bound (#636). The other is
+`repair_interrupted_writes` (#631, ADR-51), which Vault activation in
+`src/vault_runtime.rs` calls once per Vault per process, before the Vault
+admits a write. It moves and rewrites files outside the mutation core, so
+what it changes reaches Git as an outside edit, without a write record.
 
 **Coordination paths:** `src/vault_mutation.rs`, Git write records, frontend
 write API/types, and configuration for archive or upload limits.
@@ -1669,6 +1902,29 @@ write API/types, and configuration for archive or upload limits.
 
 - All HTTP and MCP mutations use this shared layer (ADR-03).
 - Optimistic concurrency uses the expected content hash.
+- Every read the layer makes of a note's bytes goes through `fs_ops.rs`'s
+  `read_note_bounded` or `read_file_at_no_follow`, which open without
+  following a symbolic link and with `O_NONBLOCK`, and read through
+  `read_open_bounded` under `MAX_NOTE_BYTES` (#672), so no write blocks on a
+  FIFO or reads a huge file whole while it holds the Vault's mutation guard.
+  What a read that hits the bound, finds bytes that are not UTF-8, or finds
+  something other than a regular file (a symbolic link included) does depends
+  on the read. The pre-edit check, the asset plan's read of the moving note
+  and the moved note's re-read refuse the write as invalid input, undoing it
+  where it had begun. The commit's read-back of the file it replaces reports a
+  conflict for one over the bound or not UTF-8, since the expected hash came
+  from a bounded UTF-8 read, and refuses a non-file as a non-file destination.
+  The journal's rewrite apply and the move checks report a conflict, the tag
+  rewrite's re-check reports its plan stale, and the intent log's replay
+  lists the note as needing attention. One unbounded read remains, and it is
+  not of a note: `intent.rs`'s read of the intent record, a file Hatchdoor
+  writes in its own state folder. `attachments.rs`'s `size_and_hash` streams
+  a whole attachment, since attachments have no size bound, but opens it
+  without following a final symbolic link and with `O_NONBLOCK`, and refuses
+  anything but a regular file as a conflict before reading it (#736). A
+  move or rename that finds its attachment swapped for one at the report
+  rolls back like any other failure after the move, and the attachment list
+  passes over a reference to anything but a regular file.
 - A conditional write commits by exchanging its temporary sidecar with the
   destination wherever the filesystem can do that, so past that exchange the
   outcome a caller is told depends on whether the undo put the old bytes back.
@@ -1683,6 +1939,21 @@ write API/types, and configuration for archive or upload limits.
   no caller is told a write did not land when it did. A `recovery_required`
   message is the one write failure that reaches an API client unsanitized, so
   it names the note and its sidecar without the directories above them.
+- A write that is refused or fails before its commit removes its sidecar, so
+  nothing it prepared reaches Git (#630). A symlink or anything other than a
+  regular file at the destination is refused as invalid input, not as a
+  retryable conflict. A replaced file keeps its permission bits, without
+  set-ID or sticky bits since the bytes are the caller's, and its owner where
+  the process may set it, or else its group where the process belongs to it.
+  It also keeps the old file's access ACL, and an owner or group it could
+  not keep is named in that ACL with the rights the mode gave them, never
+  with more than any entry had in effect, and never as an id the process's
+  user namespace cannot see (#661). A filesystem without ACLs keeps only
+  the mode. A new file is created asking for 0666, so the umask or the folder's default
+  ACL decides. The walk to a write's folder opens each folder above it as a
+  path handle, so it needs only permission to pass through them. `import_attachment` without `overwrite`
+  commits as `create_note` does, refusing a file that appeared after its
+  existence check.
 - A write that names part of a note edits that part and leaves every other byte
   alone (ADR-22). `update_note_frontmatter` rewrites only the lines its named
   keys own, so key order, one-line versus block lists, indentation, quoting,
@@ -1711,7 +1982,8 @@ write API/types, and configuration for archive or upload limits.
   name without a namespace, or any note whose rewritten text the indexer would
   not read back as exactly the promised tags. The writes go through
   `MutationJournal` one note at a time, and a failure restores every note
-  already written.
+  already written. A process that dies part-way leaves the plan's record,
+  which the Vault's next activation finishes (ADR-51).
 - A tag delete (#258) shares the rename's handshake, frontmatter editor,
   read-back backstop and journal, with its own fingerprint. It removes one
   exact tag from frontmatter `tags` values and never edits a note body. It is
@@ -1720,7 +1992,60 @@ write API/types, and configuration for archive or upload limits.
   bodies, and the delete promises that a search for the tag then finds
   nothing. A list it empties stays as `tags: []`: the key is kept and the
   block never stripped, unlike `update_note_frontmatter` deleting its last key.
+- A multi-note write survives the process dying part-way (#631, ADR-51).
+  `MutationJournal::begin` writes the whole plan, every move and every
+  rewrite with its plan-time hash, its resulting hash and its text, to the
+  Vault's `IntentLog` and syncs it before the first step; a plan that cannot
+  be recorded is refused before anything changes. `finish` removes the
+  record on success, and `rollback` removes it once the in-process undo has
+  run, complete or not, because the caller has been told the outcome. A
+  record still present at activation belongs to a dead process:
+  `repair_interrupted_writes` leaves the Vault as it was when no step had
+  landed (removing a move's reservation folder), and otherwise rolls every
+  remaining step forward, never rewriting a note whose hash is neither the
+  plan's base nor its result, which it names as needing attention instead,
+  and rewriting no backlink while a planned move cannot be finished. A step
+  that fails with an I/O error keeps the record for the next start. `begin`
+  never replaces a record already there: the write is refused, and only a
+  journal that wrote the record removes it. The repair then moves every
+  `.<name>.hatchdoor-tmp-<32 hex>` file outside `.git` to
+  `write-intents/<vault-id>.leftovers/`, since one can hold the only copy of
+  an outside edit, and logs each action. A record from a newer schema, or
+  one that cannot be read, is logged and left in place.
 - Delete is recoverable trash; archive is move-based (ADR-11).
+- A rename, move or archive of a note or an attachment repairs the Vault's
+  Obsidian canvases, the one non-Markdown file this layer rewrites (#579,
+  ADR-53). `canvas_rewrite_plan` in `canvas.rs` reads each `.canvas` file the
+  index catalogued (`VaultIndex::asset_paths`, so none in an excluded
+  folder) under the note size bound and, for every `file` node of the
+  top-level `nodes` list whose decoded value equals an operation move's old
+  Vault-relative path, replaces the characters between that value's quotes
+  with the new path, escaped as JSON. Every other byte is copied (ADR-22),
+  and the edited text is parsed again and must equal the original document
+  with those values replaced, or the canvas is skipped. The moves are the
+  operation's own: the note or attachment and each asset travelling with a
+  note. The rewrites are appended to the operation's one plan, so they are
+  recorded, compared against the plan-time hash, undone with the rest and
+  finished by a restart like a backlink (ADR-51); a canvas that itself moves
+  is keyed to its destination. A canvas that is not valid UTF-8 JSON, is
+  over the bound or fails that reparse never refuses the operation: it is
+  left untouched and named, one over the bound or impossible to open always
+  and any other when its text contains an old path, in `WriteOutcome::quality_warnings` for a
+  note and `AttachmentOutcome::cleanup_warning` for an attachment, and in
+  the log. A delete of a note or an attachment plans no canvas rewrite.
+  `rewritten_notes` never counts a canvas; `affected_paths` names it.
+- A rename, move or delete changes only a wikilink that resolves, from its
+  own note's folder, uniquely to the moved note; any other link, one that
+  ties with a namesake included, is copied through byte for byte, unless the
+  move would hand it to a different note: `VaultIndex::relocated` answers
+  which note each link reaches afterwards, and a link that would change is
+  pinned to its note's full path, `/`-anchored for a root-level note. A link
+  retargeted to the moved note is checked the same way and takes the first
+  of its bare title, the new full path and the `/`-anchored path that reaches
+  it. A pin is a change like any other, so a non-UTF-8 note holding one
+  refuses the operation as #360 describes. A
+  retargeted link swaps its target alone and keeps the whitespace around it
+  and everything after it (#626).
 - A rewritten backlink keeps its shape, and a link that resolved before a
   move still resolves after it: a path-qualified link takes the new full path,
   and any target without a folder path, whether a title, a title whose
@@ -1757,8 +2082,10 @@ write API/types, and configuration for archive or upload limits.
   archive, delete or attachment move is refused before anything is written,
   folders included, naming every such note under `link_rewrite_unsupported`.
   The tag rename and delete skip an unopenable note the same way.
-- An asset travels with its note only from inside the note's own folder (#225),
-  and an occupied destination refuses the whole write - except where that
+- An asset travels with its note only from inside the note's own folder (#225);
+  for a note at the Vault root, whose folder is the whole Vault, only when no
+  other note references it in any link form (#701). An occupied destination
+  refuses the whole write - except where that
   destination is the asset's own file, which is a move to nowhere rather than a
   collision: no move and no rewrite are planned for it, and `moved_assets`
   counts what actually moved (#238).
@@ -1788,13 +2115,16 @@ write API/types, and configuration for archive or upload limits.
   known gap #103 opened is closed.
 
 **Validation:** `cargo test vault::write`, `cargo test vault_mutation`, and
-the full backend checks.
+the full backend checks. `cargo test canvas` runs the canvas editor's cases
+and the canvas cases of every write.
 
 ### Vault-qualified read projections
 
 **Kind:** product capability/domain core.
 
-**Owned paths:** `src/vault_read.rs`, `src/vault_read/assets.rs`, `src/vault_read/query.rs`, `src/vault_read/saved_query.rs`, `src/vault_read/sections.rs`, `src/vault_read/text_match.rs`.
+**Owned paths:** `src/vault_read.rs`, `src/vault_read/assets.rs`, `src/vault_read/query.rs`, `src/vault_read/saved_query.rs`, `src/vault_read/sections.rs`, `src/vault_read/text_match.rs`, `src/vault_read/link_findings.rs`.
+
+`VaultReadCore::find_link_problems` (#575) lists one Vault's broken or ambiguous note targets, orphans or dead ends under the shared freshness envelope. `LinkFindingKind`, `LinkFinding` and `LinkFindingsResponse` carry findings, `total` and an offset `next_cursor`, never a score or repair state. Paging defaults to 50 and caps at 200. Malformed cursors are non-retryable `invalid_link_findings_cursor`. The broken-link pass uses the published note bodies and a resolution-only catalogue rebuilt from that same snapshot's identities, so sources and targets cannot come from different generations. It uses the graph's scanners and resolvers without changing graph edges. Orphans share the statistics computation, and dead ends have no resolved outgoing links. Browse-surface restrictions apply before any finding is computed; all readable layers participate.
 
 **Public contract:** `VaultReadCore`, `BrowseSurface`, `AssetSurface`,
 `NoteDownload` (#342), explicit `VaultScope`,
@@ -1836,7 +2166,8 @@ current UTC month, zero-filled where no Note was created, and counting no Note
 from outside the window. Each entry's `created_count` counts Notes by created
 date (#300, ADR-29): a `created` property that reads as a date, else, for a
 Git-backed Vault, the commit that first added the Note through the Vault's
-`NoteHistory` (`git/note_history.rs`, held on its control block), else
+`NoteHistory` (`git/note_history.rs`, held on its control block), looked up
+by the Note's file name with its extension spelled as on disk (#675), else
 modification time. `created_date_status` reports `estimated` when history
 should have dated a Note and could not (shallow, unreadable) and `reading`
 while the walk is still running; the recent lists stay on modification
@@ -1850,7 +2181,8 @@ against one
 catalog build, rather than one build per target. `resolve_batch`
 generalizes it to note *and* asset targets over that same one build (#158),
 taking the embedding note's Vault-relative directory because an asset target
-resolves relative to the note that names it; assets are returned as
+resolves relative to the note that names it, and a wikilink target's tie
+between namesakes goes to the one nearest it (#626); assets are returned as
 Vault-relative paths, since an asset has no slug. Resolution does not apply
 the browse surface: an embed only resolves for a caller already reading the
 note that contains it. Fetching the resolved asset does, through
@@ -1970,7 +2302,7 @@ frontmatter read has already loaded. It is therefore identical to the hash
 `exact_note` reports for that Note at that instant and costs no extra
 filesystem read, and it is not optional: the hash covers the whole file, so a
 Note with no frontmatter block still has one to report.
-`note_outline` and `note_sections` (#502) are the partial reads of one Note, in `src/vault_read/sections.rs`. Both are exact reads like `exact_note_frontmatter`: the catalog walk, the browse surface (`Ok(None)` for a Note this surface withholds), one read of the Note's file through the shared private `visible_note_file`, and the canonical `content_hash` of the whole file. Neither is wrapped in `VaultReadProjection`. The outline reports the file's size, the frontmatter block's size (delimiter lines included, from `text_match::body_start`, now `pub(super)`), the size of the text before the first heading, and every body heading with its text, level, heading path and Section size; the frontmatter size, the opening text and the Sections of the headings under no other heading sum to the file's size. `note_sections` takes 1 to `MAX_SECTION_HEADINGS` (10, public so the MCP schema can state it) strings and answers one `NoteSectionEntry` per string, in order: a string that is the text of exactly one heading selects it, and otherwise it is compared with each heading's path and must equal exactly one. Requests are trimmed and otherwise matched exactly. A miss is data in its own entry (`heading_not_found`, or `heading_ambiguous` with the matching paths), so the other entries still answer; only a malformed list refuses the call, as `invalid_heading_selection`, before any Vault is resolved. The Section text travels in a field named `section`, never `content`, so a partial read cannot be mistaken for the whole Note an `update_note` replaces. Headings and spans come from the read model's `NoteSections`, scanned from the end of the frontmatter block, so a `# comment` in the YAML is not a heading here. That is the one place a section read and `replace_section` differ: the write scans the whole file, as it did before #502, so it still counts such a line when it checks that a heading is unique, and a code-fence marker line inside the frontmatter opens a fence for the write alone. For any heading both see with the same headings after it, the span is the same bytes. A heading path matches a search hit's `heading_path` for clean headings; the chunker (consumed, not editable here) also reads a `#tag` line as a level 1 heading, which no Section rule does, so a hit below such a line carries a path that `note_sections` reports as `heading_not_found`. An ambiguous request lists every heading it matched by text or by path.
+`note_outline` and `note_sections` (#502) are the partial reads of one Note, in `src/vault_read/sections.rs`. Both are exact reads like `exact_note_frontmatter`: the catalog walk, the browse surface (`Ok(None)` for a Note this surface withholds), one read of the Note's file through the shared private `visible_note_file`, and the canonical `content_hash` of the whole file. Neither is wrapped in `VaultReadProjection`. The outline reports the file's size, the frontmatter block's size (delimiter lines included, from the read model's crate-private `body_start`), the size of the text before the first heading, and every body heading with its text, level, heading path and Section size; the frontmatter size, the opening text and the Sections of the headings under no other heading sum to the file's size. `note_sections` takes 1 to `MAX_SECTION_HEADINGS` (10, public so the MCP schema can state it) strings and answers one `NoteSectionEntry` per string, in order: a string that is the text of exactly one heading selects it, and otherwise it is compared with each heading's path and must equal exactly one. Requests are trimmed and otherwise matched exactly. A miss is data in its own entry (`heading_not_found`, or `heading_ambiguous` with the matching paths), so the other entries still answer; only a malformed list refuses the call, as `invalid_heading_selection`, before any Vault is resolved. The Section text travels in a field named `section`, never `content`, so a partial read cannot be mistaken for the whole Note an `update_note` replaces. Headings and spans come from the read model's `NoteSections`, scanned from the end of the frontmatter block, so a `# comment` in the YAML is not a heading here. `replace_section` now skips the same frontmatter block, so YAML comments and fence markers cannot change its selection or span. Both also ignore headings and fence markers indented by four or more spaces or a leading tab (#625). Every search hit's `heading_path` is the path of one of these headings, because the chunker takes its headings from the same `NoteSections` scan (#635). An ambiguous request lists every heading it matched by text or by path.
 
 `exact_note` returns the `Note` the Vault index read, with `metadata` filled from the file's frontmatter by the same parser `exact_note_frontmatter` calls, so the two reads agree on tags, aliases and properties (#521). The two differ only on frontmatter that does not parse: `exact_note` still answers, with `metadata: None`, and `exact_note_frontmatter` refuses with `invalid_frontmatter`.
 `vault_capabilities` reports one Vault's own mutation/sync posture under the
@@ -2003,6 +2335,14 @@ an empty folder stay distinguishable; under `all` it lands on the participant,
 the same route any other non-participation takes, which is why `collection`'s
 per-Vault projection is fallible — and `trees` raises it back to a refusal when
 no Vault produced a tree, so the blur does not simply move up to the collection.
+`TreeScope::include_files` (#579, ADR-53) adds `files` to each folder: one
+`VaultExplorerFile` (`name`, `relative_path`) per `.canvas` path in the
+Vault's `IndexedAssets`, withheld under a layer the browse surface hides and
+empty before the Vault's first Index turn. Only the HTTP tree route sets it.
+`files` is left out of a payload where it is empty and out of the
+`JsonSchema`, so `get_tree`'s reply and `outputSchema` are unchanged. A
+folder holding only a canvas is a folder of that tree. The content-type table
+answers `application/json` for a canvas.
 Zero enabled Vaults stays the empty projection it has always been. `VaultExplorerFolder` reports `note_count`
 (the Notes directly inside it) and marks `truncated` when `max_depth` held it
 back; `VaultExplorerNote` carries no `vault_id`, because the `VaultTree` around
@@ -2014,7 +2354,13 @@ and one index build. That is required whenever a caller
 needs both, since a concurrent Vault edit reconciles a *replacement* control
 block rather than mutating the current one in place, so two independent
 `exact_note`/`vault_directory` calls could otherwise observe different Vault
-generations. The private `control_and_catalog` seam shares the
+generations. Every content read (`control_and_catalog`, `exact_note_links`,
+`vault_directory`, the demo asset check) goes through the private
+`readable_control_block`, which refuses a Vault whose activation is not
+`Active` with retryable `vault_read_unavailable`, and `selected_vaults` marks
+such a Vault `inactive`, so `try_collection` and `search::vault_scoped` report
+it as an unavailable participant without reading its retained snapshot
+(#641). The private `control_and_catalog` seam shares the
 control-block-then-catalog-build sequence between `catalog` and
 `exact_note_for_download` so the two cannot diverge on identical failure
 conditions.
@@ -2056,6 +2402,7 @@ link graph, and the Index turn's retained `IndexedAssets`.
 
 - Exact reads inspect the requested Vault's Markdown directory; SQLite remains
   a disposable projection (ADR-01).
+- A Note over `MAX_NOTE_BYTES` is refused on every exact read with `note_too_large` (HTTP 413) before its bytes are read, and `find_text` lists it as `unreadable`; a Note path that is no longer a regular file is `note_unreadable` and `unreadable`. `find_text` adds no reason for size, since a client checks replies against the `outputSchema` it connected with (#636).
 - Note content and its hash are never older than disk. Links and backlinks
   are the one exception the maintainer accepted (#361): after an edit made
   outside Hatchdoor they may lag disk until the watcher reports the change,
@@ -2097,8 +2444,12 @@ the HTTP and MCP write adapters used to repeat around a `vault/write`
 primitive: resolving the Vault ID to a control block and refusing a missing,
 disabled, or runtime-less Vault; the mutation capability check; the per-Vault
 mutation lock; building the authoritative index off the async runtime;
-resolving the slug to an entry; refusing a write to a path this Vault's own
-exclusion patterns would make invisible; resolving the archive prefix from the
+resolving the slug to an entry and, for `update_note` given an expected
+Vault-relative path, refusing with non-retryable `note_moved` when the slug
+names another file (#627; the HTTP adapter answers `409`, MCP passes none);
+refusing a write to a path this Vault's own
+exclusion patterns would make invisible, using the write layer's shared path
+normalisers before matching, including `.md` for note targets (#624); resolving the archive prefix from the
 Vault's own archive folder or the instance default; running the blocking write
 off the async runtime; recording what that write did in the Vault's
 `git::WriteLedger`, so the commit that eventually records it can say so
@@ -2131,7 +2482,7 @@ redemption: it refuses bytes over the limit or not UTF-8, then runs the
 `update_note` write (`replace_entry`, shared with `update_note`) on the note it
 finds at that path, so both carry the same refusals, normalisation, warnings,
 ledger entry and index request as the tools. `is_note_upload_target` is the
-one rule for which uploads are notes: a filename ending in `.md`, in any case. Both note-upload paths write the target with that extension in lower case (`note_upload_path`), so `Report.MD` lands at `Report.md`.
+one rule for which uploads are notes: a filename ending in `.md`, in any case. Both note-upload paths write the target as named, so `Report.MD` replaces the `Report.MD` note the index lists, by the same `is_note_path` rule the index uses (#637).
 `rename_tag` is
 the one Vault-wide mutation: without an expected plan hash it plans off the
 async runtime and records nothing; with one it
@@ -2153,7 +2504,7 @@ answers for the filesystem rather than for the Vault's permissions, so it is
 for a Vault that is merely read-only (ADR-26, #345). An I/O write failure and
 a `write_recovery_required` failure are both logged server-side before being
 mapped, so neither reaches only the client's log. `write_operation_error`
-maps a link rewrite the planners refused (#360) onto
+maps `WriteError::HeadingNotFound` onto non-retryable `heading_not_found` (#625), which the HTTP error mapper treats as `404` and MCP preserves in its structured refusal. It also maps a link rewrite the planners refused (#360) onto
 `link_rewrite_unsupported`, not retryable, with every affected note named in
 the message; the HTTP adapter answers it with `409`. A caller whose critical section spans several
 operations on one Vault builds a `VaultMutation` with `VaultMutation::gated`
@@ -2184,8 +2535,9 @@ authoritative index and mutation lock, `VaultControlBlock::mark_snapshot_behind_
 (which labels the Vault's published SQLite snapshot stale through the cache's
 `mark_vault_snapshot_behind_write`) and `VaultControlBlock::report_write` (which
 sends the Vault ID on the watcher intent channel so the server requests Commit
-and Index turns) (#324), `AppState::vault_archive_prefix`, and the live
-settings snapshot.
+and Index turns) (#324), `VaultControlBlock::intent_log`, which every
+multi-note write receives (#631, ADR-51), `AppState::vault_archive_prefix`,
+and the live settings snapshot.
 
 **Consumers:** `handlers/vault_write.rs` (all eight routes) and
 `mcp/tools/write.rs` (every write tool standalone, and every one except
@@ -2249,7 +2601,13 @@ remote, and a `VaultWorkKind::Commit` request (plus a clear of that Vault's
 `git::CommitCooldown`, because an operator asking explicitly is exactly the
 case suppression must not swallow) for one that keeps history but has no
 remote. `capability_unavailable` narrowed with it: it now names only a Vault
-with no Git at all, not every Vault with no remote.
+with no Git at all, not every Vault with no remote. Since #641 `retry` on a
+`Local` Vault is no longer refused: it calls
+`VaultControlBlock::retry_local_content`, requests an Index turn once the
+folder reads, and answers retryable `vault_unavailable` carrying the
+activation error's message when it still does not. `refresh` re-probes a
+Local Vault's folder before its `browse` check. `sync` still refuses a
+`Local` Vault.
 `publish_recovery` (ADR-30) admits a `VaultWorkKind::Recovery` request only
 while the Vault's runtime reports the `publish_recovery` capability, refusing
 with `capability_unavailable` otherwise, and `VaultSummary` carries the
@@ -2286,6 +2644,36 @@ turn and notifies a definition change, because `VaultDefinition` equality
 cannot observe a credential value change (#97's and #98's reopening
 findings).
 
+An edit that changes a managed Git Vault's source identity (#639) goes
+through `VaultRegistryStore::edit_prepared`: before the change is saved,
+`git::retire_managed_checkout` commits the old checkout's pending notes and
+moves it into the Vault's `retired-checkouts/` folder, so the next Git turn
+clones the new identity. A failure refuses the edit with
+`checkout_set_aside_failed` (HTTP `409`), its retryability taken from the Git
+error, and nothing is saved or moved. When the registry save itself fails
+after the checkout moved, `git::restore_retired_checkout` puts it back; a
+failure to do so is logged with the archive's place. Every set-aside is
+logged too, so the report survives a response that is lost. The response's optional
+`retired_checkout` (`RetiredCheckoutReport`: the archive path relative to the
+state directory, whether notes were committed, and the commits the old
+remote lacks) reports what was kept; Settings shows it after the identity
+round trip.
+
+`VaultCollectionManagement::within_vault_mount` (#700, ADR-54) is the same
+core for a caller that may name a folder on this machine only inside the Vault
+mount (`AppState::vault_mount_root`, from `VAULT_PATH`); the MCP
+`create_vault` and `edit_vault` tools use it, the HTTP routes use `new`. Its
+`create` refuses a `local` path or `existing_git` repository that resolves,
+through the operating system first and `vault_registry::canonical_or_normalized`
+for a missing path, outside the resolved mount, with non-retryable
+`vault_path_outside_mount` (HTTP `403`, never reached there). Its `edit`
+checks only a source whose resolved folders (the repository and the folder
+read inside it) differ from the stored ones, compared as stored and never
+resolved again, or whose kind (`local`, `existing_git`) differs: once against a registry read
+before the save, so the refusal precedes the registry's readability error,
+and again inside `edit_prepared`'s preparation step against `PendingEdit::previous`,
+so a concurrent change cannot slip past. Managed Git is never checked.
+
 Discovery reports registry recovery as `recovery` when the persisted registry
 file itself is unreadable, and lists no Vaults then (#150). The
 credential-replacement retry skips a disabled Vault, which would otherwise
@@ -2295,14 +2683,18 @@ gain a Git schedule entry that disconnect never deactivates (#325).
 management tools reached it by calling handler functions with hand-built axum
 extractors and decoding the HTTP response body. No wire shape changed.
 
-**Consumed dependencies:** `VaultRegistryStore::{load, add, edit, enable,
-disable, disconnect}`, `VaultCollectionRuntime::{snapshot,
+**Consumed dependencies:** `VaultRegistryStore::{load, add, edit_prepared,
+enable, disable, disconnect}`, `git::{retire_managed_checkout,
+restore_retired_checkout}` and
+`git::config::{author_defaults, resolve_commit_identity}`, `VaultCollectionRuntime::{snapshot,
 reconcile_and_reconstruct_and_wait_for_mutation_boundary, runtime,
 notify_definition_changed, subscribe_revisions}`,
 `ManagedGitScheduler::{sync_now, retry_now, polling_clock}`,
 `vault_runtime_state::format_timestamp`, `VaultWorkCoordinator::request`,
 `vault::{vault_link_style, count_link_forms}`, `VaultControlBlock::{vault_path,
-authoritative_catalog}` for the link style, and `AppState`'s composed handles including `demo_mode`.
+authoritative_catalog}` for the link style, `vault_registry::canonical_or_normalized`
+for the mount rule, and `AppState`'s composed handles including `demo_mode` and
+`vault_mount_root`.
 
 **Consumers:** `handlers/vaults.rs` (every `/api/v1/vaults` route) and
 `mcp/tools/read.rs` (`list_vaults`, `create_vault`, `edit_vault`,
@@ -2357,6 +2749,7 @@ backend checks.
 
 - `src/cache/mod.rs`
 - `src/cache/chunk_ops.rs`
+- `src/cache/keyword.rs`
 - `src/cache/migrate.rs`
 - `src/cache/parse.rs`
 - `src/cache/populate.rs`
@@ -2370,7 +2763,7 @@ backend checks.
 **Public contract:** `SqliteCache`, `ReadConn`, `BuildOptions`, `SemanticHit`,
 and the methods implemented on `SqliteCache`. The read queries are the
 Vault-qualified snapshot lookups, the evaluation binaries' `semantic_search`
-and `fts_search_notes`, `read_note_by_slug`, and the link/wikilink queries;
+and `fts_search_notes`, `read_note_by_slug`, and the link and backlink queries;
 the scope-less stats, explorer-tree, recently-modified, read-by-path,
 demoted-layer, note-summary, health-check, graph, and layered/filtered
 search variants are retired. The crate-private
@@ -2380,7 +2773,11 @@ shared cache. `mark_vault_snapshot_behind_write` is the one stale-marking
 call that begins no attempt, so an Index turn already building still
 publishes; its caller holds the Vault's mutation guard, which is what lets
 that turn's own freshness verdict stay correct (#324). A published `VaultSnapshotRead` is structural: notes, links,
-tags, and the layer catalog. It carries no chunks — search reads those and
+tags, and the layer catalog. Each note row carries its file's `extension` as
+spelled on disk, read from the indexed path, and `VaultSnapshotNote::file_path`
+puts it back on the extension-free `relative_path` for Git dating and query
+file fields (#675). An Index turn treats a note whose file path changed, even
+only in its extension's case, as changed, so that path stays current. It carries no chunks — search reads those and
 their vectors through its own SQL rather than through a snapshot, so the
 `vault_chunk_vectors` join every collection read used to pay for is gone —
 and it carries note bodies only when the read asks for `NoteBodies::Load`.
@@ -2388,8 +2785,7 @@ Frontmatter properties are parsed unless the pinned read asks for
 `NoteProperties::Omit`, which search does because it never returns them;
 `vault_snapshot_embeds_demoted_layers_on` reads the generation's
 `embed_layers` stamp on the same pinned read (#328).
-The detailed stats report is the only caller that does, because it counts
-words and images; bodies come back from the same pinned read as the note
+Detailed statistics load bodies to count words and images; broken-link findings load them to scan unresolved targets (#575). Bodies come back from the same pinned read as the note
 list so a projection can never pair one generation's rows with another's
 text. Publication carries the caller's freshness verdict rather than
 assuming `Fresh`, and `MutationGuardHandoff` is how an Index turn hands its
@@ -2406,7 +2802,8 @@ fence delimiter. The Vault link reader and the asset-reference rewriter consume
 `for_non_code_line`; the backlink, section, and asset-reference rewriters
 consume `parse_fence_marker` for their own line-rebuilding loops, which must
 preserve line endings and so cannot use the visiting form, as does the Bundled
-manual's wikilink rewrite. It lives here
+manual's wikilink rewrite, and so do the Section rule and chunking's
+`fence_marker`, which also refuse a marker indented four spaces or by a tab (#635). It lives here
 because tag extraction, link extraction, and rewriting have to agree on what
 counts as code: an indexer that reads a hashtag inside a fenced block as a tag
 while a rewrite refuses to touch it makes a Vault-wide tag rename look
@@ -2421,9 +2818,41 @@ occupies in the note, for the Vault-wide tag rename (`vault/write/tags.rs`,
 store, or miss one it would. A tag split by an inline code span is recognised
 but has no range, because no single run of text spells it.
 `ReadSnapshot` is the crate-private pinned-read seam used where participant
-metadata and cache queries must observe one published generation.
+metadata and cache queries must observe one published generation. Its keyword
+time limit installs a SQLite progress handler on that lease; committing checks
+the same deadline, and returning the lease clears the handler before reuse.
+`open` checks physical integrity with `quick_check(1)` before trusting a file.
+Read guards report `SQLITE_CORRUPT` and `NOTADB` before a rollback clears the
+error; writer acquisition and cache-publication failures report them too.
+`wait_for_corruption` and `recover_corruption` are the crate-private recovery
+seam consumed by Vault work execution. Reporting only signals: recovery runs
+elsewhere, under the model epoch, drains all read leases, closes pooled and
+writer handles, quarantines the file and sidecars, then recreates the schema.
+New operations refuse while recovery is replacing those handles. A failed
+recovery stays unavailable and is retried by the executor's waiter.
 
-**Consumed dependencies:** Vault IDs and index/types, chunking, embeddings, SQLite,
+The shared frontmatter parser accepts a leading UTF-8 BOM while retaining byte
+offsets into the original file. It refuses inner YAML over 16,384 bytes before
+parsing and reports an unclosed block as invalid. `fts_query_terms` uses at most
+8,192 bytes and 64 case-insensitively distinct terms, in first-occurrence order,
+NFC-normalised before splitting, and keeps at most 24 characters of a term
+holding CJK, kana, Hangul or Thai; query construction and compact snippets
+share those same bounded terms.
+
+The crate-private `keyword` module decides how the keyword index reads CJK
+ideographs, kana, Hangul and Thai (#634). `keyword_index_text` rewrites each
+run of them as overlapping two-character tokens followed by the run's last
+character, and NFC-normalises all text; it returns `None` when the result is
+the chunk text itself, which is then not stored twice. `keyword_query_phrase`
+gives a query term the same rewrite as an FTS5 phrase, leaving out the lone
+last character of a run that ends the term and turning a one-character final
+run into a prefix. `is_bigram_char` and `run_units` are consumed by
+`search/compact.rs` so a snippet finds the word the index matched. The
+offline evaluation's legacy `note_fts` is not rewritten, so a CJK query there
+finds only text whose pairs happen to be separate tokens.
+
+**Consumed dependencies:** Vault IDs and index/types, the Vault read model's bounded
+`read_note_text` for every note an Index turn reads (#670), chunking, embeddings, SQLite,
 FTS5, and sqlite-vec. Its tests capture log lines with runtime composition's
 test-only `config::log_capture` (#535).
 
@@ -2439,7 +2868,20 @@ and embedder identity/dimensions.
 
 **Invariants:**
 
-- A chunk row's `content` holds `Chunk::stored_content`, the text with fence marker lines, and the keyword index is built from that column; vectors and `content_hash` come from `Chunk::content`, the text without them (#532). The `chunk_stored_text` metadata key names the shape of the stored text. A build that finds a different value, or none, sends every note through the write path once, which re-chunks it and reuses its vectors by hash, so a change to the stored shape costs no embedding and no schema bump.
+- A chunk row's `content` holds `Chunk::stored_content`, the text with fence marker lines, and the keyword index is built from that column, read through `keyword_text` where the chunk has one (the `vault_chunk_keyword_source` view, with the tokenizer `unicode61 remove_diacritics 2` plus Thai vowel and tone marks as token characters); vectors and `content_hash` come from `Chunk::content`, the text without them (#532). The `chunk_stored_text` metadata key names the shape of the stored text. A build that finds a different value, or none, sends every note through the write path once, which re-chunks it and reuses its vectors by hash, so a change to the stored shape costs no embedding and no schema bump.
+- An Index turn reads no note over `MAX_NOTE_BYTES`. Such a note keeps a row,
+  so the explorer lists it, with empty content, no chunks, links or tags, and
+  the content-hash marker `oversized`, which no real hash equals: the note
+  reads as unchanged, unread, while it stays over the bound, and is chunked
+  again once it shrinks (#670).
+- An Index turn drops the row, chunks, links and keyword text of a note the
+  scan listed that is no longer a regular file when it is read, such as a
+  FIFO swapped in after the scan, as the next scan would, which no longer
+  lists it. Search then never serves text every exact read refuses (#672).
+- An Index turn indexes a note whose bytes are not UTF-8 with them replaced
+  (`String::from_utf8_lossy`), so it keeps its row, chunks and links and the
+  totals count it, matching `find_text`'s lossy read; only a note that cannot
+  be read at all is skipped for the turn (#637).
 - SQLite is rebuildable and never authoritative (ADR-01).
 - Keep embedded SQLite, FTS5, sqlite-vec, WAL, one writer, and pooled
   query-only reads (ADR-06).
@@ -2450,19 +2892,33 @@ and embedder identity/dimensions.
   runs before the search core takes its snapshot: holding a slot across the
   embedder's inference lock let four concurrent searches starve every other
   read. Waiters are woken one at a time and not in arrival order.
+- The `note_metadata` shape stamp sends every note through the parser once when
+  its rules change, without changing its content hash or re-embedding unchanged
+  chunks. It travels with candidate and published snapshot metadata, so an
+  upgrade repairs cached BOM metadata even when the note itself did not change.
 - Schema or embedder identity mismatch rebuilds rather than mixing data, with
-  one exception (ADR-50): a cache one schema version behind is left alone at
-  open and migrated by `migrate.rs` right after `reset_if_embedder_changed`
+  one exception (ADR-50, ADR-52): a cache on a version `migrate.rs` has a step from
+  (back to the latest release's) is left alone at open and migrated right
+  after `reset_if_embedder_changed`
   has found the same embedder identity. Runtime composition calls
   `prepare_for_embedder` when a model loads and before it installs it, so no
   search reaches a cache still waiting to migrate. If that call fails, the
   model is installed anyway and semantic search reports `search_unavailable`
-  until an Index turn's own model check succeeds. The migration commits only
-  once its row-count, identical-vector, Vault-mapping, self-retrieval and
-  integrity checks pass, and any failure wipes and rebuilds. Seeding a
-  candidate never copies a snapshot's recorded `schema_version` over the
-  candidate's own. The next schema bump replaces the migration rather than
-  adding a second one.
+  until an Index turn's own model check succeeds. Two steps exist, and a
+  version 12 cache runs both in one transaction. 12 to 13 (#634) fills
+  `vault_chunks.keyword_text` from the stored chunk text and rebuilds only
+  the keyword index. 13 to 14 (#655) drops `normalized_title` and
+  `normalized_relative_path` from `notes` and `vault_notes`, with their four
+  indexes, which nothing read once the cache's wikilink resolver went (#653).
+  Neither writes a vector table. The migration commits only once ADR-50's
+  row-count, identical-vector (a BLAKE3 digest of every vector row before and
+  after), Vault-mapping and self-retrieval checks pass, the note rows per
+  Vault are the same before and after, the keyword index holds one entry per
+  chunk and passes FTS5's `integrity-check`, and `PRAGMA integrity_check`
+  passes; any failure wipes and rebuilds. Seeding a candidate never copies a
+  snapshot's recorded `schema_version` over the candidate's own. A schema
+  bump adds a step; a step is deleted once its starting version is older than
+  the latest release's (ADR-52).
 - No vec0 table has a TEXT metadata column: sqlite-vec leaks the SQL it
   formats for every write and delete of one (#600). The per-Vault vector
   tables file each vector under an integer `vault_key` from `vault_keys`,
@@ -2471,7 +2927,12 @@ and embedder identity/dimensions.
   table (#308).
 - A refresh commits a coherent new read snapshot.
 - Shared semantic vectors have one embedder identity and dimension; a mismatch
-  wipes the disposable cache before any partial rebuild can participate.
+  wipes the disposable cache before any partial rebuild can participate. The
+  one identity change that keeps it is a revision marker gained at a start
+  whose model files were all already the pinned ones (`ModelFiles`,
+  `prepare_for_embedder`, #693): the identity is rewritten in the shared
+  stamp, every Vault's snapshot metadata and saved progress in one
+  transaction.
   The cache-wide model epoch covers snapshot and legacy builders, and stamps
   the shared identity atomically with snapshot participation.
 - Every shared snapshot row and relationship is Vault-ID-qualified; failed
@@ -2494,7 +2955,8 @@ and embedder identity/dimensions.
   disabling keeps them, and `snapshot_vault_ids` enumerates them so
   reconciliation can clean up a Vault removed before its first publication.
   A build given an `IndexYield` stops before its next chunk once it has
-  embedded for its slice and another Vault waits; it publishes nothing,
+  embedded for its slice and another Vault waits, or at once when the
+  yield's stop question says its Vault is stopping; it publishes nothing,
   flushes its saved progress, and reports `SnapshotPublication::Paused`
   without marking the retained generation stale again.
   The table has no foreign key to `vault_snapshots`, whose row each
@@ -2523,19 +2985,19 @@ changes require search and application-state tests too.
 - `src/chunk/chunker.rs`
 - `src/chunk/normalize.rs`
 
-**Public contract:** `Chunk`, `ChunkOptions`, `NoteChunking`, `chunk_note`, `is_fence_marker`, and
+**Public contract:** `Chunk`, `ChunkOptions`, `NoteChunking`, `chunk_note`, `fence_marker`, `closes_fence`, and
 normalization behavior re-exported by `src/chunk/mod.rs`.
-A `Chunk` carries two texts (#532). `content` is what is embedded and hashed: fence marker lines removed, code kept. `stored_content` is what the cache stores and a search hit returns: `content` with a marker line back around each run of code: three backticks, the opening one with the block's info string. A block that a chunk boundary cuts is closed at the end of one chunk and reopened at the start of the next, so each `stored_content` holds whole blocks.
+A `Chunk` carries two texts (#532). `content` is what is embedded and hashed: fence marker lines removed, code kept. `stored_content` is what the cache stores and a search hit returns: `content` with a marker line back around each run of code: the block's own opening line, info string included, and a closing run of the same character and length, so a four-backtick block showing a three-backtick example stays one block. A block that a chunk boundary cuts is closed at the end of one chunk and reopened at the start of the next, so each `stored_content` holds whole blocks. Fences follow the Section rule (#635): `fence_marker` reads a run of three or more backticks or tildes after at most three spaces, and `closes_fence` ends a block only at a run of the same character at least as long. A chunk's `heading_path` is the path `NoteSections::heading_paths` gives the last heading of level one to three before the chunk's text, so it is always a path `get_note_outline` lists.
 
-**Consumed dependencies:** Markdown text and tokenizer-aware splitting.
+**Consumed dependencies:** Markdown text and tokenizer-aware splitting, the read model's crate-private `NoteSections` (heading paths) and `cache::parse::parse_fence_marker` (fence markers) (#635).
 
-**Consumers:** cache population, evaluation/index microbench tooling, and Runtime Search's compact snippet (`is_fence_marker` only).
+**Consumers:** cache population, evaluation/index microbench tooling, and Runtime Search's compact snippet (`fence_marker` and `closes_fence` only).
 
 **Coordination paths:** cache population, embedder token limits, and evaluation
 baselines.
 
 **Invariants:** chunk boundaries and contextual text changes alter every
-embedding and therefore require deliberate evaluation, not only unit tests. `stored_content` is outside that rule only while `content` stays byte for byte what it was; a change to it needs a new `CHUNK_STORED_TEXT_SHAPE` value in `src/cache/populate.rs`, which re-chunks existing indexes once and reuses their vectors.
+embedding and therefore require deliberate evaluation, not only unit tests. A change to `stored_content`, or to how a note whose file did not change is chunked, needs a new `CHUNK_STORED_TEXT_SHAPE` value in `src/cache/populate.rs`, which re-chunks existing indexes once; a chunk whose embedding input (text and contextual header) is unchanged keeps its vector and the rest are embedded again. Only a change that leaves `content` and `heading_path` byte for byte what they were is outside the evaluation rule.
 
 **Validation:** `cargo test chunk`, cache population tests, and relevant eval
 commands when retrieval behavior may change.
@@ -2571,7 +3033,7 @@ and assemble helpers, and its request/result/response types are retired.
 
 **Consumed dependencies:** `SqliteCache`, its published Vault snapshot/cache
 query seam, `Embedder`, the Vault collection runtime, the explicit Vault-read
-scope/envelope, vault metadata/types, `cache::parse::fts_query_terms` (the keyword path's own query words, read by `compact.rs` to place a snippet), and `chunk::is_fence_marker` (read by `compact.rs` to leave fenced blocks out of one).
+scope/envelope, vault metadata/types, `cache::parse::fts_query_terms` (the keyword path's own query words, read by `compact.rs` to place a snippet), `cache::keyword::{is_bigram_char, run_units}` (how the index splits CJK, kana, Hangul and Thai runs, read by `compact.rs` for the same purpose), and `chunk::{fence_marker, closes_fence}` (read by `compact.rs` to leave fenced blocks out of one).
 
 **Consumers:** `handlers/vault_collection_reads.rs` (the HTTP consumer of
 `VaultSearchCore::search`, full hits only), MCP search tools (which also consume `compact::CompactSearchResponse`), offline evaluation runners,
@@ -2586,6 +3048,10 @@ and future Vault-scoped MCP adapters.
 
 - Runtime search defaults to pure semantic retrieval; hybrid and reranking stay
   offline (ADR-05).
+- Keyword search uses the cache parser's bounded, deduplicated terms and one
+  750 ms SQLite deadline across its pinned snapshot and candidate windows.
+  Interrupts return `search_unavailable` with a time-limit message. No expired
+  handler reaches the next request, and Semantic search has no new deadline.
 - Layer selection must never widen the eligible result set.
 - There is one retrieval path per mode. #210 removed the unreachable note
   metadata filters, the property projection, and the second semantic path they
@@ -2625,7 +3091,7 @@ and future Vault-scoped MCP adapters.
   costs an embedding on a query whose Vaults turn out not to participate, and
   reports an unhealthy embedder ahead of a bad layer name or an unavailable
   single Vault, both of which need the pinned generation to detect.
-- Outside a tag response, a compact snippet is a verbatim slice of the chunk's prose: fenced blocks are dropped first, marker lines included, found by `chunk::is_fence_marker`, the rule chunking itself uses (#532), and the blank lines a dropped block leaves are closed up to one. A chunk with no prose has an empty snippet. In a keyword response it is centred on the first place a query word occurs, found by tokenizing and folding the chunk the way the keyword index does (`unicode61 remove_diacritics 2`, with a hyphenated or underscored query word matched as the phrase the keyword path quotes); in a semantic response, or when no word is found, it is the start of the chunk. A tag response has no matched chunk: its hit content is the line `Matched tag: #<tag>`, and the snippet is that line. A cut lands on whitespace when there is some in the outer three quarters of the text kept on that side, and otherwise between characters (so a keyword surrounded by unspaced text keeps its context), and never inside a character, a combining sequence, an emoji joiner sequence, a flag or a decomposed Hangul syllable. If the keyword tokenizer or `fts_query_terms` changes, the snippet's matching changes with it.
+- Outside a tag response, a compact snippet is a verbatim slice of the chunk's prose: fenced blocks are dropped first, marker lines included, found by `chunk::fence_marker` and `chunk::closes_fence`, the rule chunking itself uses (#532, #635), and the blank lines a dropped block leaves are closed up to one. A chunk with no prose has an empty snippet. In a keyword response it is centred on the first place a query word occurs, found by tokenizing and folding the chunk the way the keyword index does (`unicode61 remove_diacritics 2`, with a hyphenated or underscored query word matched as the phrase the keyword path quotes, and a CJK, kana, Hangul or Thai run as the overlapping pairs `cache::keyword` indexes); in a semantic response, or when no word is found, it is the start of the chunk. A tag response has no matched chunk: its hit content is the line `Matched tag: #<tag>`, and the snippet is that line. A cut lands on whitespace when there is some in the outer three quarters of the text kept on that side, and otherwise between characters (so a keyword surrounded by unspaced text keeps its context), and never inside a character, a combining sequence, an emoji joiner sequence, a flag or a decomposed Hangul syllable. If the keyword tokenizer or `fts_query_terms` changes, the snippet's matching changes with it.
 - A structure-only frontend Search pilot must not modify these paths.
 
 **Validation:** `cargo test search`, focused Vault-scoped and cache query tests,
@@ -2728,7 +3194,8 @@ three are on a live path; `validate_repo`, `init_local_repo`, and
 lifecycle and the boot-time legacy validation in #185 and are retained
 deliberately by that ticket's explicit keep list. The crate-private
 `parse_mode` and `non_empty_setting` helpers serve the startup parse of the
-legacy settings for the demo posture check. `resolve_commit_identity` (issue #130)
+legacy settings for the demo posture check, and `non_empty_setting` also feeds
+`author_defaults`, read on every Git turn and by a managed identity change. `resolve_commit_identity` (issue #130)
 resolves one Vault's own configured `VaultCommitIdentity`
 (`vault_registry.rs`) if set, else the instance-wide
 `HATCHDOOR_GIT_AUTHOR_NAME`/`HATCHDOOR_GIT_AUTHOR_EMAIL` defaults; the Vault
@@ -2736,9 +3203,15 @@ work executor's `dispatch_git_turn` calls it once per turn, before
 planning any of the branches below, so every commit this boundary makes
 for a Vault — managed-Git, existing-Git remote-sync, or existing-Git
 Local-history — honors that Vault's own identity. `commit_local` commits without network
-access and discovers an enclosing existing checkout while staging only the
-configured Vault subtree. Remote fetch/integrate/push, unpushed accounting,
-and interrupted-merge marker recovery are gone with the instance-wide task
+access into the repository at `GitConfig::repository_path`, the Vault's
+registered repository folder, while staging only the configured Vault
+subtree. `validate_local_repo`, `commit_local` and `has_uncommitted_changes`
+open exactly that repository and never search upward from it (#678): a Vault
+that lost its `.git` would otherwise commit into whatever repository encloses
+it. A missing repository is `GitError::RepositoryMissing`, reported as the
+non-retryable `existing_git_local_history_repository_missing`. Remote
+fetch/integrate/push, unpushed accounting, and interrupted-merge marker
+recovery are gone with the instance-wide task
 (#185); every remote graph operation this boundary still performs lives in
 `managed_sync.rs`, which owns its own conflict and containment rules.
 `commit_local` refuses a checkout found mid-merge, mid-rebase, mid-cherry-pick
@@ -2776,7 +3249,9 @@ neither fetches nor resets, checks out, polls, or pushes.
 Git-backed Vault by the author date of the commit that first added it, following
 renames forward across the whole repository, so a note moved into a Vault
 subdirectory keeps its date; a delete-then-recreate or a copy is new, and a
-shallow clone's graft commit yields `FirstAdd::Unknown` rather than a date. It
+shallow clone's graft commit yields `FirstAdd::Unknown` rather than a date.
+A note is a file ending `.md` in any case, as the Vault read model counts one
+(#637, #675). It
 walks once per `HEAD` on a background thread, keeps the result in memory, and
 extends it by only the new commits when `HEAD` descends from the cached one
 and the cached walk was not shallow. The tree at `HEAD` decides which notes
@@ -2793,6 +3268,25 @@ projection (`vault_read.rs`'s `statistics_detail`) is its only consumer.
 removed and `Ok(None)` in its place (#267): a commit turn must open no network
 connection, and cloning is one, so it reuses the checkout a Vault already has
 and reports "nothing here yet" rather than creating one.
+
+`retire_managed_checkout` (#639) sets a managed checkout aside before its
+Vault's source identity changes: under a freshly acquired lease (refused as
+`managed_git_checkout_busy` while a turn holds it) it reaches the checkout
+through `reuse_recorded_checkout`, which validates against what the receipt
+says the checkout was cloned from rather than the current definition, commits
+pending Vault drift in a Two-way checkout, counts the commits the remote
+branch lacks, and `set_aside_checkout` moves the checkout and its receipt
+into `vaults/<id>/retired-checkouts/<UTC timestamp>/`. A commit failure moves
+nothing. A checkout that no longer validates is moved without a commit, which
+keeps every file. Nothing deletes from `retired-checkouts/`, and
+`discard_interrupted_acquisition` never touches it. It returns
+`RetiredCheckout`, or `None` when no checkout exists yet. A move that fails is
+the non-retryable `ManagedCheckoutError::SetAsideFailed`
+(`managed_git_set_aside_failed`). `restore_retired_checkout` and
+`restore_set_aside_checkout` move a set-aside checkout back for an edit whose
+save failed, refusing rather than overwrite a checkout that appeared since.
+`config::author_defaults` reads the instance-wide commit identity from a
+settings snapshot for the executor's turns and for this.
 
 `ManagedSyncConfig`, `ManagedSyncMode`, `ManagedSyncOutcome`,
 `ManagedSyncError`, and `synchronize_managed_checkout` form the next shared-core
@@ -2837,7 +3331,13 @@ The uniquely selected managed remote and its push URL must remain the
 configured credential-free HTTPS repository identity; unrelated remotes in an
 operator-owned `ExistingGit` checkout are outside this boundary and untouched.
 Public HTTPS makes no credential callback; supplied credentials are callback
-input only and remain redacted. Every fetch, push and clone first calls the
+input only and remain redacted. The crate-private `offer_credentials_once`
+(`git/mod.rs`) is the one credential callback for every clone, fetch and push:
+it offers the token only when the scheme, host and port libgit2 asks for
+match the configured repository URL's (reading libgit2's bracketless IPv6
+form too), so a redirect to another host gets
+none, and at most once per URL, so a rejected token ends the attempt instead
+of being replayed (#638). Every fetch, push and clone first calls the
 crate-private `bound_network_waits` (`git/mod.rs`), which sets libgit2's
 process-wide socket timeouts once: 15 s to connect, 120 s without a byte
 moving. A remote that stalls mid-transfer therefore fails the turn as the
@@ -2879,9 +3379,24 @@ reached an operator as a bare "install failed" over a filesystem that could
 not do `RENAME_NOREPLACE` (#345); the install falls back to check-then-rename
 there, as the Vault write layer does (ADR-26). The classification keeps
 distinguishing authentication failures (`ManagedCheckoutError::AuthenticationFailed`,
-`ManagedSyncError::Authentication`, detected via `git2::ErrorCode::Auth`) from
-other remote failures. It takes a `&ManagedCheckoutLease` rather than acquiring
-its own (issue #95): the process-lifetime ownership boundary the checkout
+`ManagedSyncError::Authentication`: `git2::ErrorCode::Auth`, which the
+credential callback's refusal to offer a token twice produces, or a 403 after
+the token went out, both read by `sign_in_rejected`) from other remote
+failures. A clone that fetched but found no branch by the
+configured name is `ManagedCheckoutError::BranchNotFound`
+(`managed_git_branch_not_found`, not retryable, and remote-only for
+`is_remote_only_failure`), never a transient remote failure that would
+download the repository again on every backoff (#638). Status paths are read
+as bytes (`status_bytes_in_vault`): a changed file inside the Vault whose name
+is not valid UTF-8 is left out of the commit while everything else commits
+and synchronizes, and the turn then reports it, escaped by `escaped_path`, as
+`ManagedSyncError::UnsupportedFileNames` (`managed_git_unsupported_file_names`)
+or, for Local history, `GitError::UnsupportedFileNames`
+(`existing_git_local_history_unsupported_file_names`), both non-retryable with
+the files as affected paths (#638). Until those files are renamed every
+commit turn ends in that error, so the commit cooldown spaces automatic
+commits five minutes apart. It takes a `&ManagedCheckoutLease` rather than
+acquiring its own (issue #95): the process-lifetime ownership boundary the checkout
 lease documents is held by the caller across every turn for a Vault, not
 reacquired and dropped within each one. `ManagedGitScheduler` is one
 process-wide instance — mirroring the coordinator's single-worker design, it
@@ -2973,11 +3488,12 @@ to at most half of `BACKOFF_BASE`. At one sample per backoff base every
 into a build failure rather than a silently degraded retry.
 
 `run_local_history_git_turn` is an `ExistingGit` + `VaultGitMode::LocalHistory`
-Vault's counterpart to `run_managed_git_turn`: given the Vault's already-resolved
-path and commit identity, it builds its own placeholder `GitMode::Local`
-`GitConfig` and calls `validate_local_repo` then `commit_local`, committing
-only the contained Vault subtree of whatever enclosing checkout the Vault sits
-in and never contacting a remote. It classifies every `GitError` into a
+Vault's counterpart to `run_managed_git_turn`: given the Vault's registered
+`repository_path`, its already-resolved path and commit identity, it builds its
+own placeholder `GitMode::Local` `GitConfig` and calls `validate_local_repo`
+then `commit_local`, committing only the contained Vault subtree of the
+repository at `repository_path`, never one found by searching upward from it
+(#678), and never contacting a remote. It classifies every `GitError` into a
 redacted `VaultWorkError`, mirroring the legacy single-Vault task's transient
 split (`Remote`/`Other` retry; validation, conflict, and dirty-tree do not).
 Its client-facing message is fixed per code rather than `GitError`'s text,
@@ -3138,10 +3654,20 @@ connection, whatever the Vault's mode; writes do not block on sync, except
 while a managed-Git or `ExistingGit` remote-sync turn, or a Two-way commit
 turn, is in flight for that Vault, see below; task replacement drains
 before another task can start;
-local mode never contacts a remote; remote mode never force-checks out over
-uncommitted manual vault edits (ADR-10). Managed acquisition never writes
-credentials to URLs, Git configuration, reads, logs, errors, or status; it
-never deletes, overwrites, or silently adopts a checkout destination. The
+local mode never contacts a remote; Local history commits only into the
+Vault's registered repository folder, never into a repository found by
+searching upward (#678); remote mode never force-checks out over
+uncommitted manual vault edits (ADR-10), ignored files included: a
+fast-forward or merge that would write over a file `HEAD` does not track
+(a note in an ignored path, or one inside an ignored folder) stops first as
+`ManagedSyncError::Conflict` naming those files, and both checkouts set
+libgit2's don't-overwrite-ignored flag besides (#623). A merge is checked
+against its in-memory result; the files of a submodule `HEAD` already has,
+paths reached through a symbolic link, and a name a case-insensitive disk
+only matches by case are never counted.
+Managed acquisition never writes credentials to URLs, Git configuration,
+reads, logs, errors, or status, and never offers them to any origin but the
+configured remote's; it never deletes, overwrites, or silently adopts a checkout destination. The
 managed-Git scheduler adds no persisted queue, priority, or second execution
 lane (ADR-13); a Git turn's returned failure always completes that Vault's
 turn so the shared worker is released for the next Vault. A `ManagedGit` or
@@ -3193,7 +3719,11 @@ for the MCP `get_attachment` tool (#176) went with #188: attachment resolution,
 the servable-extension allow-list, the content-type table, and the size bound
 now belong to the read core (`src/vault_read/assets.rs`), which applies
 `VaultReadCore`'s browse-surface gating to them, so both surfaces refuse the
-same paths. What `assets.rs` keeps is this route's own wire shaping.
+same paths. What `assets.rs` keeps is this route's own wire shaping: an SVG
+is sandboxed and sent as a download, and so is `application/json`, the type
+of an Obsidian canvas, which Hatchdoor does not draw (#579, ADR-53). The
+tree route is the one caller that asks the read core for each folder's
+canvases (`TreeScope::include_files`).
 `transfer.rs` redeems transfer links (ADR-27, ADR-32) on
 `/api/v1/vaults/{vault_id}/transfers/{*path}`: `GET` downloads through
 `vault_scoped_asset_handler` with the `McpAssetRead` ceiling after spending the
@@ -3236,9 +3766,18 @@ to 6 one-line items, action-needed items (`**Action needed:**`) first, each
 ending in at most one link into the manual. `the_bundled_page_parses` keeps a
 malformed page from shipping; `scripts/release-common.mjs` drafts and checks
 the same shape at release time. `PAGE` (`whats-new`, re-exported as
-`WHATS_NEW_PAGE`) is the page's name, which the MCP instructions cite.
+`WHATS_NEW_PAGE`) is the page's name, which the MCP instructions cite. The
+standing instructions also cite `guides/how-to-work-in-a-vault-as-an-agent`,
+the agent guide, to read before a first write (#568);
+`server_instructions_point_to_the_agent_guide_before_the_first_write` checks
+that `docs_bundle::page` resolves it and that *Connect your agent*'s example
+skill names the same page, and `server_instructions_fit_what_claude_code_keeps`
+keeps the instructions plus the version line within 2,000 characters (#480).
 `settings.rs` owns the additive `/api/settings` document: effective
-value/provenance/lock/class/kind metadata, a `switch`-kind value always sent
+value/provenance/lock/class/kind metadata, a `choice`-kind value (#698,
+`HATCHDOOR_NOTE_WIDTH`) always sent as one of its `CHOICES`, lower-cased, a
+value that is none of them as the first, and a save of anything else refused
+with a field error, a `switch`-kind value always sent
 as `"true"` or `"false"` by `is_truthy` on the resolved value (#581), and
 partial PATCH saves returning the full refreshed document, plus the read-only `last_agent` (#426) and
 `update_check` (#425, `update_check::status` read from the instance state file
@@ -3273,12 +3812,11 @@ Every save takes one path: the legacy versioning-task lifecycle branch (stop
 the task, preflight the repository, respawn) went with the task itself in
 #185. `HATCHDOOR_GIT_SYNC_ENABLED`, `_REMOTE`, `_BRANCH`, `_HTTPS_USERNAME`,
 `_HTTPS_TOKEN`, `_DEBOUNCE_SECONDS`, and `HATCHDOOR_EXCLUDE` remain in the
-schema although #427 removed the import that consumed them; the registry's
-startup step purges the Git-lane ones from stored settings and refuses an
-install without a registry that still stores any of them. No per-operation
-code reads them; two `server.rs` startup checks
-still parse them — `check_demo_mode_posture` and `HATCHDOOR_EXCLUDE`'s pattern
-validation — and both only refuse a start.
+document although #427 removed the import that consumed them, so `GET` keeps
+its shape. Nothing reads them: a save of any of them is refused with `400` and a field error naming it as
+retired, checked before every other rule so no value is stored and no
+reindex queued (`runtime_config::RETIRED_SETTINGS`, #644), and the
+registry's startup step purges them from stored settings.
 `HATCHDOOR_GIT_AUTHOR_NAME`/`_EMAIL` remain
 the commit-identity fallback the collection lane's Git turns read per turn, so
 a change to them still reaches the next turn without a restart.
@@ -3310,7 +3848,9 @@ directly by `every_management_error_code_keeps_its_historical_status`:
 `400`; `vault_not_found` is `404`; the registry-state conflicts
 (`duplicate_vault_name`, `vault_path_overlap`, the two identity-change
 refusals, `registry_revision_conflict`, `vault_disabled`,
-`capability_unavailable`) are `409`; `vault_registry_recovery_required` and
+`capability_unavailable`) are `409`; `vault_path_outside_mount` is `403`,
+declared only because every core code is, since no route asks the core for
+that rule (ADR-54); `vault_registry_recovery_required` and
 `vault_unavailable` are `503`; and
 `internal_error`/`registry_revision_exhausted` are `500`. On top of that the
 adapter adds the two statuses the core does not model: `201` for a creation and
@@ -3548,7 +4088,7 @@ files, checkouts, Git history, or credentials outside the registry record.
 ### MCP adapter
 
 **Status:** Implemented per [ADR-17](../../adr/README.md) (#168): rmcp 3.x
-(pinned `rmcp = "=3.1.4"`) owns the `/mcp` transport and the advertised
+(pinned `rmcp = "=3.8.0"`, #621) owns the `/mcp` transport and the advertised
 revisions are exactly `2026-07-28` and `2025-11-25`; #170 adds honest
 `tools.listChanged` on the modern surface. The remaining Wayfinder children
 build on this seam: #171 (layered rate limits) and #172 (release evidence).
@@ -3596,7 +4136,7 @@ history. It is rejected inside
 `is_collection_management_tool`: that exemption keeps discovery and Vault
 control reachable while model setup is pending, and an Index turn cannot run
 without a configured search model. Catalogue grows 39 → 40, purely additive.
-`find_text` (#500, ADR-46) is a text match: `VaultReadCore::find_text` takes a `VaultScope` and a `TextMatchRequest` and returns every Note containing one literal string inside the shared envelope as `TextMatchResponse` (`TextMatchNote`, `TextMatchPlaces`, `TextMatchSnippet` with its `TextMatchPlace`, `TextMatchUnread` with its `TextMatchUnreadReason`). `src/vault_read/text_match.rs` holds the matching. It is the one collection read that opens files: the Notes walked are the published snapshot's rows after `BrowseSurface::restrict`, and each is read from `<vault directory>/<relative_path>.md` at call time, so the answer is never older than disk while the Note list can be, which the envelope's `stale` participant reports. A Vault whose directory is unreachable is an `unavailable` participant through `try_collection`, never an empty answer. The string is compared lowercased character by character unless `case_sensitive`, and always NFC-composed, in the body, the frontmatter block (`cache::parse::frontmatter_span`'s block with its delimiters) and the Vault-relative path with `.md`. The request's `layers` are selector tokens and an empty list means every layer, which is this operation's default and deliberately not `LayerSelection::default()`; named tokens go through `BrowseSurface::layer_selection`, so a restricted surface clamps them, and a name no readable participant declares is `invalid_layer_selection` by the same rule `search::vault_scoped` applies (restated here rather than shared, since Runtime Search is a consumed dependency). `path_prefix` reuses `query::CompiledCondition::folder`. Notes are ordered by path, Vault, then slug; `limit` clamps to 1..=500 (default 50) and snippets to 0..=3; `total_notes` and `total_occurrences` are counted before the limit. A file is read only when its resolved path is the one the index named, so no symbolic link added since is followed; an occurrence belongs to the place it starts in; a file that is not UTF-8 is matched lossily, and a Note whose file cannot be read is listed in `unread` (at most 50, `total_unread` counts all). An empty string, an over-long one or an empty `path_prefix` is the `invalid_text_match` refusal, compiled before any Vault is resolved. No HTTP route calls it.
+`find_text` (#500, ADR-46) is a text match: `VaultReadCore::find_text` takes a `VaultScope` and a `TextMatchRequest` and returns every Note containing one literal string inside the shared envelope as `TextMatchResponse` (`TextMatchNote`, `TextMatchPlaces`, `TextMatchSnippet` with its `TextMatchPlace`, `TextMatchUnread` with its `TextMatchUnreadReason`). `src/vault_read/text_match.rs` holds the matching. It is the one collection read that opens files: the Notes walked are the published snapshot's rows after `BrowseSurface::restrict`, and each is read at call time from `<vault directory>/<relative_path>.md`, or the case variant of that extension the catalogue lists (`note_file_name`, #637), so the answer is never older than disk while the Note list can be, which the envelope's `stale` participant reports. A Vault whose directory is unreachable is an `unavailable` participant through `try_collection`, never an empty answer. The string is compared lowercased character by character unless `case_sensitive`, and always NFC-composed, in the body, the frontmatter block (`cache::parse::frontmatter_span`'s block with its delimiters) and the Vault-relative path with `.md`. The request's `layers` are selector tokens and an empty list means every layer, which is this operation's default and deliberately not `LayerSelection::default()`; named tokens go through `BrowseSurface::layer_selection`, so a restricted surface clamps them, and a name no readable participant declares is `invalid_layer_selection` by the same rule `search::vault_scoped` applies (restated here rather than shared, since Runtime Search is a consumed dependency). `path_prefix` reuses `query::CompiledCondition::folder`. Notes are ordered by path, Vault, then slug; `limit` clamps to 1..=500 (default 50) and snippets to 0..=3; `total_notes` and `total_occurrences` are counted before the limit. A file is read only when its resolved path is the one the index named, so no symbolic link added since is followed; an occurrence belongs to the place it starts in; a file that is not UTF-8 is matched lossily, and a Note whose file cannot be read is listed in `unread` (at most 50, `total_unread` counts all). An empty string, an over-long one or an empty `path_prefix` is the `invalid_text_match` refusal, compiled before any Vault is resolved. No HTTP route calls it.
 #242 adds `rename_tag`, the sixteenth write tool: a mapping onto the mutation
 core's `rename_tag`, dispatched under the Vault's mutation lock like every
 other write tool, answering a plan or an applied rename in `RenameTagResult`.
@@ -3665,9 +4205,15 @@ finished result, so `batch` item errors, `VaultOperationError` and HTTP bodies
 never carry it, and errors for other codes, the writes-off `-32602` refusal and
 the plain-text setup refusals are unchanged. Additive. #583 extends the same table to `list_vaults`: the Vault-state codes (a folder Hatchdoor cannot open, the managed-Git sync failures) never come back as a tool error, so `docs_pointers::attach_to_vault_listing` adds `docs` to each Vault status error in the result (`activation_error`, `search_error`, `git_error`, `watcher_error`, `recovery_branch.error`) whose code the table lists, and `output_schema_for` describes the optional field on `list_vaults`' `VaultRuntimeError` definition alone. `VaultRuntimeError` itself and the HTTP Vault list keep their shape. A table test refuses a code that is neither in the management or read cores' closed lists or the mutation core's write codes nor spelled by a status producer (`vault_runtime.rs`, `git/managed_task.rs`, `git/sync.rs`). Additive. #502 adds `get_note_outline` and `get_note_section`, the seventeenth and eighteenth read tools and both `READ_OPS` entries (so `batch` may carry them): mappings onto `VaultReadCore::note_outline` and `note_sections`, answering `GetNoteOutlineResult` (`NoteOutline`) and `GetNoteSectionResult` (`NoteSectionsResponse`) with hand-written input schemas. They refuse a malformed `vault_id` and a missing Note exactly as `get_note` does, and every limit and matching rule is the core's: the adapter does not check `headings`, and its schema takes `maxItems` from the core's `MAX_SECTION_HEADINGS`. `get_note`'s description gains one sentence pointing to them, and its reply does not change. Catalogue grows to 51, purely additive. #521 changes `get_note`'s reply and no mapping: `note.metadata`, empty on every note until then, carries the frontmatter the read core now fills, and its `outputSchema` (generated from `Note`) allows `null` there for frontmatter that does not parse. `properties` is an object whenever `metadata` is, where it was always `null`. The description gains one sentence saying so. Behavior-changing for a client that assumed an object.
 
+#575 adds `find_link_problems`, a read-only, one-`vault_id` tool over the shared reader's link findings. Its strict schema takes `kind`, optional `limit` and optional `cursor`; `READ_OPS` and the shared dispatcher make it batchable. `FindLinkProblemsResult` aliases the core's typed projection and generates its output schema. No HTTP route or web interface is added.
+
 The adapter also records the name the calling client sent in `McpConfig::client_name` (#570, ADR-49), `None` when the request carried no client identity, which the SDK reports as its own placeholder name and version. Every write tool builds its `WriteOrigin` from that name, one per call, so each item of a `batch` shares it, and `create_upload_link` passes it to the transfer link it mints.
 
 #598 gives `create_upload_link` an optional `commit_summary` argument, the one every other write tool takes. The tool passes it with the client's name in the `UploadRequest` it mints the link with, and the transfer handler applies it to the upload's write through `VaultMutationCore::with_commit_summary`; it never enters the link. Additive.
+
+#632 closes five gaps in the resource limits and error contract. The concurrency guard a tool call takes now rides its response body (`routes::hold_until_body_ends`) and is released when the body ends or is dropped, because a legacy session answers with an SSE head at once and runs the tool afterwards. A legacy `initialize` is admitted through `limits::SessionRegistry`: at most `INITIALIZES_PER_MINUTE` handshakes per token, `MAX_SESSIONS_PER_TOKEN` live sessions per token and `MAX_SESSIONS` in all, refused with 429 and `Retry-After` like the tool quota. The registry attributes each session ID to its token and is pruned against rmcp's own `LocalSessionManager::sessions` table, and a session no later request has named within `UNCONFIRMED_SESSION_GRACE` is closed through rmcp, at the next handshake or by a sweep every `SESSION_SWEEP_INTERVAL`. A client that hangs up after a legacy call's head returns frees its slot while rmcp's session worker still runs the tool; only the quota bounds that case. `batch` counts the serialized bytes of its items against `BATCH_REPLY_BUDGET`: a base64 `get_attachment` item is capped by what is left and refused with `attachment_too_large_for_base64` before it is read, and any other read whose answer does not fit becomes an item error with the new code `batch_reply_too_large`. A write tool's Vault resolution and lock now run inside the outcome the dispatcher renders, so an unknown, disabled or read-only Vault is a structured tool error with `docs`, no longer a `-32602` error carrying a JSON string; `docs_pointers` gains `vault_not_found`. `McpConfig::base64_limit` is the smaller of `HATCHDOOR_MCP_MAX_BASE64_BYTES` and `config::MAX_REPLY_BASE64_BYTES` (what one reply can carry), and `get_attachment`, `import_attachment`, `get_attachment_import_config` and the write-mode request body limit all use it. Behavior-changing for a client that read the old error shape or relied on a base64 cap above about 5.95 MiB.
+
+#599 lets a `batch` write take its hash from a read earlier in the same call. `batch.rs` keeps a second map, `ReadHashes`, next to the write `HashChain`: a successful `get_note`, `get_note_outline`, `get_note_section` or `get_frontmatter` item (`HASH_READ_OPS`) records `(vault_id, slug) -> content_hash`, after the reply-budget check so a dropped read records nothing. `apply_read_hash` runs after `apply_hash_chain` and substitutes that hash only when a hash-chained op carries the literal `"from_batch"` (`write::FROM_BATCH_HASH`) as `expected_content_hash`; a real hash is never replaced by a read, and a write earlier in the batch still wins. The write core validates the substituted hash as any other, so a note changed since the read is `write_conflict`. `write::dispatch_write_tool` refuses a marker that reaches it unresolved, inside a batch or standalone, with the new structured code `batch_hash_unavailable` before any tool runs. `batch::run_batch` takes a `before_item` callback, a no-op in production, that `tools::batch_with_item_hook` exposes to tests only. Additive: a new accepted value and a new error code; no schema or result shape changes.
 
 **Kind:** adapter/security surface.
 
@@ -3710,7 +4256,9 @@ list handling from the tool quota, limits tool calls to 120/minute/token and
 concurrency to eight ordinary / two expensive searches, rejects over-limit
 requests with HTTP 429 + `Retry-After`, and is explicitly disableable by
 configuration (`HATCHDOOR_MCP_RATE_LIMITS_ENABLED`; `limits.rs` owns the quota
-window, the concurrency pools, and the POST classification). A `batch` is
+window, the concurrency pools, the legacy session caps (#632), and the POST
+classification). A call's concurrency slots are held until its response body
+ends, on both protocol revisions. A `batch` is
 charged for the searches it carries (`limits::charge`, #327): one quota unit
 per `search_notes` item (at least one, at most `BATCH_MAX_READ_ITEMS`), and an
 expensive-search slot for its whole dispatch when any item searches, which
@@ -3743,13 +4291,21 @@ collection read that names more: since #192 it also takes optional `folder`,
 `max_depth` and `include_notes`, so it no longer shares the scope-only schema
 builder with `get_stats` and `get_graph`, whose schemas are unchanged. It maps
 those three onto the read core's `TreeScope` and nothing else; the narrowing
-itself, and the `folder_not_found` refusal, belong to the core. Every collection read
+itself, and the `folder_not_found` refusal, belong to the core. It never asks
+for a folder's canvases, so its reply and schema carry no `files` (ADR-53);
+`get_attachment` fetches a `.canvas` like any other servable file, and the
+rename, move and archive tool descriptions say that canvases are repaired
+and where a skipped one is named. Every collection read
 names `scope` (one Vault ID or `all`); every exact read, Markdown mutation, and
 existing-Vault control names `vault_id`. Revisioned registry management calls the
 Vault collection management core directly (#187) rather than proxying an HTTP
 handler, and answers with the same shared collection shapes HTTP returns;
 `create_vault` is the only zero-ID exception because the registry atomically
-generates its immutable ID. MCP
+generates its immutable ID. `create_vault` and `edit_vault` reach the core
+through `VaultCollectionManagement::within_vault_mount` (#700, ADR-54), so an
+agent can name a local folder only inside `VAULT_PATH`; the refusal,
+`vault_path_outside_mount`, carries `docs` pointing at the agent guide's
+"Adding or moving a Vault". MCP
 returns shared domain failures as structured error tool results. Since #255
 such a result signals its failure twice: `isError` on the result object, and
 `ok: false` inside the structured payload beside the domain error's own `code`,
@@ -3784,8 +4340,8 @@ same `relative_path` `list_note_attachments` reports: `encoding: "url"` (the
 default) returns a download transfer link (ADR-27, #310) on the Vault-scoped
 `/transfers/{*path}` route, absolute and carrying its own credential, with
 `expires_at`; `encoding: "base64"` inlines the bytes instead,
-bounded by the same `HATCHDOOR_MCP_MAX_BASE64_BYTES` cap `import_attachment`
-enforces on the way in. Resolution goes through
+bounded by the same cap `import_attachment` enforces on the way in,
+`McpConfig::base64_limit` (#632). Resolution goes through
 `VaultReadCore::contained_asset` (#188), so the Vault gate, containment, the
 extension allow-list, the content type, and the browse surface are the same
 ones the `/assets/{*path}` route answers on — a demoted or excluded asset is
@@ -3841,6 +4397,9 @@ itself is rmcp-owned rather than hand-implemented, and the advertised revision
 set stays narrowed to `2026-07-28` + `2025-11-25` (ADR-17). Per-request security
 ordering is preserved across the swap: enabled check → token-configured check →
 Origin allowlist → constant-time bearer compare → protocol-version header.
+The bearer credential is parsed by `auth::presented_bearer`, shared with the web
+gates, so the scheme name is case-insensitive (#629). `is_allowed_origin` is also
+consumed by `auth::require_local_host_and_origin`, the token-less web guard.
 The MCP bearer token is accepted by the multipart attachment endpoint only while
 MCP *and* MCP write mode are both live-enabled, checked per request; token
 changes, write enablement, Origins, and attachment limits apply to the next
@@ -3886,8 +4445,8 @@ the core then applying the authoritative check to the decoded bytes.
 
 **Validation:** `cargo test mcp`, vault write tests for mutation changes,
 server router tests, and golden wire tests locking both supported revisions'
-request/response shapes. Before releases, the manual conformance-run procedure
-(#166) produces mandatory release evidence.
+request/response shapes. Before releases, the conformance run (#166),
+`just conformance` since #617, produces mandatory release evidence.
 
 ### Evaluation and development binaries
 
@@ -3977,7 +4536,11 @@ already holds for the sidebar (Changed on disk, Recently viewed, each capped
 at six rows with the shared `VaultPrefix` and Settings' `formatWhen`), the
 scope's name and Vault and note counts (a note count only once every Vault in
 scope has reported one), and New note and Search; it replaced the "Select any
-note" empty state. `pageName` in `app/pageTitle.ts` names the fixed pages for
+note" empty state. `App.tsx` reads Settings' `useLayoutSettings` once (#684,
+#698), passes its `sidebarSections` as `sections` to both `HomePage` and
+`ExplorerPane`, which leave out whichever of the two lists the Layout
+settings switch off, in the sidebar, the phone drawer and Home alike, and
+passes its `noteWidth` to `NotePage`. `pageName` in `app/pageTitle.ts` names the fixed pages for
 the topbar's breadcrumb, and `App.tsx` hands `AppTopbar` a null `activeNote`
 off the note route, so Stats, Graph and Settings never read "Notes Explorer"
 with a note's actions behind the "…" menu. That menu is about the open note
@@ -3985,7 +4548,11 @@ only: New note and Edit left it for their own buttons, Copy note text and
 Download .md file are the utilities' names, and `Escape` closes it. The theme
 button opens a three-option menu (System, Light, Dark) through `useTheme`'s
 `setTheme`, focusing the current choice and moving with the arrows;
-`cycleTheme` stays for callers without a menu. `e` opens the editor on the
+`cycleTheme` stays for callers without a menu. A chosen theme sets the
+browser bar from `--bg` in the computed style, in one `theme-color` tag put
+in front of the build's two; auto removes it (#648). An item of the "…" menu
+hands focus back to the menu's button before it acts, so a dialog it opens
+returns focus there on close (#648). `e` opens the editor on the
 open note, the key the Edit button shows, unless focus sits in a dialog or
 menu, Help is open, or an inline block is open. The Scope zone starts
 folded (`SCOPE_ZONE_COLLAPSED_KEY` unset reads folded) and its folded head
@@ -4044,6 +4611,9 @@ everything only a Mermaid or PDF.js dynamic import reaches out of the
 install-time precache, found from the bundle graph by `findLazyChunks`, and
 caches those chunks CacheFirst on first use instead; the manifest's splash
 colours are the dark theme's, since the manifest has no light/dark form.
+Both those and `index.html`'s two `theme-color` tags come from `--bg` in
+`base.css` at build time (`readThemeBackgrounds`, `fillThemeColors`, #648),
+and a missing token or placeholder fails the build.
 `useVaultScope.ts` owns
 the selected Vault scope (state/storage, per #137) and the Vault-less-action
 default (`resolvePrimaryVaultId`); the Vault collection itself belongs to the
@@ -4258,6 +4828,16 @@ revision the moment it connects rather than a delta, so against a `0` start
 that first event always read as an invalidation and every consumer keyed on it
 reloaded.
 
+The stream must not die quietly (#646). A browser closes an `EventSource`
+for good when a reconnect answers anything but 200, as a reverse proxy's 502
+during a restart or a 401 after a token change does; the store then reopens it
+with a fresh `withAccessToken` URL after a backoff of 1 s doubling to 30 s,
+and reads the collection again through `apiFetch`, so a 401 reaches the app's
+token prompt. Every reopen after the first, a `visibilitychange` back to
+visible and an `online` event also read it again; the last two reopen a
+closed stream at once. Collection and count reads are numbered when sent, and
+an answer is dropped once a later-sent read of the same kind has published.
+
 A refresh that finds nothing new keeps the previous value's identity, and a
 patch that changes nothing publishes nothing. Without that, a note write — which
 bumps the collection revision — would hand every consumer a fresh-but-identical
@@ -4317,7 +4897,9 @@ new field. Contract changes must list the backend serializer and all frontend
 consumers. New feature-local types should remain local unless genuinely shared.
 
 **Invariants:** preserve bearer/header behavior and the deliberate query-token
-fallback (ADR-08). Never log or render tokens. When the browser refuses to
+fallback (ADR-08), used only for addresses on the server's `QUERY_TOKEN_ROUTES`
+(`src/auth.rs`, #703): `withAccessToken` takes a literal URL so a Rust test can
+check each call. Never log or render tokens. When the browser refuses to
 store the web token, `setToken` keeps it in page memory, prefers it over any
 older stored token, and returns `false`; a caller must then apply it without a
 page reload, which would forget it (Unlock remounts the app in place). The
@@ -4342,7 +4924,13 @@ not verify Rust-to-TypeScript wire compatibility.
 **Public contract:** `StartupGate` (a pure, prop-driven presentational
 component — it no longer polls itself) and `useStartupStatus`, the shared
 hook that polls `/api/startup-status` and owns the model-setup actions
-(accept/decline Gemma, retry). The poll runs once a second while it succeeds;
+(accept/decline Gemma, retry). An action the server refuses, or a request
+that never arrives, leaves the status as it was and sets `actionError` to
+the server's `error` sentence or a connection sentence, without throwing
+(#642); `StartupGate` shows it as a `role="alert"` under the terms choice,
+and `SearchDialog` under its **Retry setup** block (`modelSetupError`,
+threaded through `App.tsx`'s `VaultWorkspace`). The gate reads the status's
+`step` to say "Loading" once the download has finished. The poll runs once a second while it succeeds;
 after a failed or unreachable poll it backs off (`startupPollDelay`: 2s, 4s,
 8s, capped at 30s) and returns to 1s on the first success (#333). Production `App.tsx` resolves Vault discovery
 before enabling this polling, so broken-registry and zero-Vault workspaces
@@ -4381,7 +4969,8 @@ reader's `ContextualHelpLink` and `CONTEXTUAL_HELP` (the model choice's
 types, and shell-wide styles.
 
 **Validation:** `StartupGate.test.tsx`, `useStartupStatus.test.ts`,
-`App.startup-auth.test.tsx`, and full frontend checks.
+`App.startup-auth.test.tsx`, `SearchDialog.test.tsx`, and full frontend
+checks.
 
 ### Vault explorer
 
@@ -4407,7 +4996,11 @@ Each flattened candidate (`NoteCandidate`) also carries its Vault-relative
 `relativePath`, built from the folder chain and the note's title, which is its
 file name; the editor writes a Markdown link's path from it (ADR-33).
 `WireVaultTree` is the payload shape and `VaultTree` the attributed one every
-component below the hook consumes. The sidebar is three zones — the
+component below the hook consumes. A folder's optional `files` (#579,
+ADR-53) are its Obsidian canvases, stamped with the Vault like its notes;
+`FolderTree` lists each after the folder's notes as a `.file-link` row with
+`CanvasIcon` in the index's column. The row is a plain download link to the
+asset route, built with `withAccessToken`, and never a route of the app. The sidebar is three zones — the
 shell-owned Scope zone, a scrolling nav, and a fixed footer holding the rail
 of whole-vault destinations beside the create action (#530) — and
 `.explorer-nav` is the scroll container the shell restores scroll position
@@ -4596,7 +5189,13 @@ loading/error/empty rendering only — the facet rail and results list underneat
 `.field`/`.field-label`/`.field-input` grammar (`App.css`),
 `lib/vaultParticipants.ts`, `lib/noteComments.ts`'s `hideComments` (result
 snippets drop comments, #573), `lib/markdownSyntax.ts`'s `stripHighlights`
-(snippets show a highlight's words without its signs, #572), router navigation supplied by the shell,
+(snippets show a highlight's words without its signs, #572), the backend's
+shared fence rule (`fence_marker` / `closes_fence` in `src/chunk/normalize.rs`,
+mirrored by `SearchDialog.tsx`'s `dropFencedBlocks`: a snippet drops every
+fenced block, backticks or tildes of any length, closed only by a run of the
+same character at least as long, unterminated to the end, plus a block
+opened behind list or quote markers, which the backend leaves as written,
+#668), router navigation supplied by the shell,
 `startup/useStartupStatus.ts`'s status shape, and backend Search.
 
 **Coordination paths:** `App.tsx`, `App.css`, `NotePage.tsx` (tag taps hand
@@ -4924,12 +5523,14 @@ src/App.startup-workspace-states.test.tsx`, then full frontend checks.
 **Owned paths:**
 
 - `frontend/src/components/NotePage.tsx`
+- `frontend/src/components/note-page/NoteEmbed.tsx`
 - `frontend/src/components/note-page/NotePreview.tsx`
 - `frontend/src/components/note-page/PdfPreview.tsx`
 - `frontend/src/components/note-page/RendererComponents.tsx`
 - `frontend/src/components/note-page/SavedQueryBlock.tsx`
 - `frontend/src/components/note-page/dom.ts`
 - `frontend/src/components/note-page/markdownLinks.ts`
+- `frontend/src/components/note-page/noteEmbeds.ts`
 - `frontend/src/components/note-page/paragraphs.ts`
 - `frontend/src/components/note-page/renderers.tsx`
 - `frontend/src/components/note-page/savedQueries.ts`
@@ -4950,9 +5551,12 @@ wikilink resolution — `useResolvedWikilinks` now sends embed and PDF targets t
 them to the resolved Vault-relative path (#158), keeping the note-relative
 reading as the fallback for anything unresolved, including the first render
 before the batch returns; its asset cache is keyed by note path as well as
-target, because the same filename in notes at two depths can be two files; it
+target, because the same filename in notes at two depths can be two files,
+and so is its wikilink cache, because a tie between namesakes goes to the
+one nearest the linking note (#626); it
 also sends Markdown note links (ADR-28, found by `markdownLinks.ts`, which
-skips code, images and wikilinks) as `note_link_targets` and rewrites each
+skips code, images and wikilinks and, like the server's `note_link_target`,
+takes a destination ending `.md` in any case, #675) as `note_link_targets` and rewrites each
 destination to the same note route, archived route or `/__missing__/` form a
 wikilink gets, so `renderers.tsx` needs no branch for them. Local Markdown
 images (`findMarkdownImages`) go out as `asset_targets` too, decoded, and a
@@ -4960,16 +5564,45 @@ resolved one is pointed at the asset route, so a root-anchored or bare-name
 `![](path)`, the forms ADR-33's inserts can write, renders; an unresolved
 image keeps its destination. `resolveAssetTargets` is the uncached form the
 editor asks when choosing a `shortest` attachment path, and
+`findNoteAtPath` (#627) answers, uncached, which slug the note at one exact
+Vault-relative path has now, for the note page's moved-slug check;
 `resolveNoteTargets` (#544) answers wikilink targets alone from the same
 cache the hook fills, one `resolve-batch` per call, for the live editor's
 links, and `cachedAssetHref` (#544) gives one embed target the href the
 rendered body would draw now, the server's path once the hook's batch has
 filled the cache and the note-relative reading before, for the editor's image
-and PDF widgets. A note embed (#573), `![[Other note]]`, goes out as a
+and PDF widgets. A link or an embed whose target ends in `.canvas` (#579,
+ADR-53) is treated as a file like a PDF link: it goes out as an asset target
+only and is rewritten to a plain link to the asset route, which downloads
+it, never to an image. A note embed (#573), `![[Other note]]`, goes out as a
 note target as well as an asset target (PDF embeds aside) and is rewritten to
-the link the same wikilink gets, `#^id` dropped to the note itself, when its
+an `/__embed__/<slug>[?archived]#<anchor>` link (`noteEmbedHref`,
+`note-page/noteEmbeds.ts`, #699) when its
 name reads as a note (`.md` or no extension) or no file answered to it; one
 that reads as a note and resolved as neither gets the `/__missing__/` link.
+`createNoteMarkdownComponents` draws that link as `NoteEmbed`
+(`note-page/NoteEmbed.tsx`), which reads the note through the same
+`GET .../notes/{slug}` the page uses, again whenever the collection revision
+moves, and renders its body (frontmatter and comments out) with the same
+syntax plugins, saved-query evaluation and components, in a `.note-embed`
+frame naming and linking the source. `remarkSelectEmbed` keeps the heading's
+section (to the next heading of the same or a higher level, by
+`extractMarkdownHeadings` ids) or the block whose `remarkBlockIds` anchor
+matches, a list item wrapped in a list of its own, on the whole parsed note
+so every node keeps its file line. `selectEmbed` decides first, on its own
+parse, whether the heading or block exists. `NoteEmbedContext` carries the
+Vault, the chain of notes an embed sits inside (the page's own slug first,
+given by `NotePage` and by `NotePreview` when passed `slug`) and the
+revision; an embed of a note already in the chain, more than
+`MAX_EMBED_DEPTH` (3) levels down, of another Vault, outside any context (`mayEmbed`), or
+whose read fails or names no such heading or block draws the plain note
+link instead (`data-note-embed-fallback`). Embedded content is rendered with
+`{ embedded: true }` and `rehypeDropIds`, so no element in it, footnotes
+included, carries an id and a fragment jump never lands inside an embed;
+a section or block embed keeps the note's link reference and footnote
+definitions. A paragraph holding an embed is split around it, and a
+callout line holding one draws as a `div`, since the frame is a block. The
+live editor and the Help reader draw no embeds; the manual carries none.
 `hideComments` (`lib/noteComments.ts`, #573) removes `%%` and HTML comments
 from the body before the reading view, the source-mode preview, the table
 of contents and the Help reader see it, line-count preserving like `rewriteWikilinks`, by the
@@ -4978,15 +5611,40 @@ link preview's `strip_comments` rule (shared cases in
 math and a whole-line `hatchdoor-query` marker are kept; the search dialog's
 snippets consume it too. The live editor still shows comments.
 `NOTE_SYNTAX_PLUGINS` (`lib/markdownSyntax.ts`, #572) is the one list of
-remark syntax plugins (GFM, math, highlights) that the reading view, the
+remark syntax plugins (GFM, math, highlights, block ids) that the reading view, the
 source-mode preview and the Help reader all render with; a view adds its own
 steps after it rather than keeping a copy. Its `remarkHighlight` reads
 Obsidian's `==text==` as a parser construct by the live editor's rule (an
 exact pair of signs, emphasis flanking, closed within its paragraph) and renders
 it as `<mark class="note-highlight">`, so code, math and escaped signs keep
-theirs; `stripHighlights` drops the signs from plain-text excerpts outside
-code spans, for the search dialog's snippets and the Help reader's search
-excerpts. `NotePage.highlight.test.tsx` reads the editor's two toolbars'
+theirs; one of Obsidian's six colour emoji (`HIGHLIGHT_COLOURS`,
+`highlightColourMarker`, #577) written straight after the opening signs adds
+`note-highlight-<colour>` and is taken out of the drawn text, never the
+file; `stripHighlights` drops the signs, and such an emoji with them, from
+plain-text excerpts, parsing them with `NOTE_SYNTAX_PLUGINS`' extensions so
+code, math and bare URLs keep theirs, for the search dialog's snippets, the
+Help reader's search excerpts and `extractMarkdownHeadings`' outline text
+(#782), which keeps a heading that would be left empty as written. The
+`noteHeadings` and `markdownSyntax` imports of each other are used only inside
+functions, so neither may be called at module load. Its `remarkBlockIds` (#578) is what reads Obsidian's block ids, on
+the parsed tree and not the text, so a `^id` in code or math is left alone and
+no line moves: a ` ^id` closing a paragraph, a list item's own line or a quote,
+or a `^id` alone on a line under a paragraph, a quote or a table, is taken out
+of the tree and the block gets the anchor `^id` (`blockAnchorId` in
+`lib/noteHeadings.ts`) as its element id, on the `li` for a list item and on
+whichever element `CalloutOrQuote` draws for a quote, which also moves an id
+from the first paragraph it takes apart onto that paragraph's last line; a
+heading only loses the text. The caret stays in the anchor and `slugifyHeading` never emits one, so a
+block and a heading of the same name are two elements. `fragmentAnchor` turns
+a link's fragment into its anchor (`^id` for a block, the slug for a heading)
+and `wikilinkAnchor` (`note-page/wikilinks.ts`) does it for a whole wikilink
+target; the reading view's links, Markdown note links and the live editor's
+link opening all go through them, so `[[Note#^id]]` and `[x](Note.md#^id)`
+carry `#^id` and `NotePage`'s fragment jump lands on the block as it does on a
+heading. `createManualMarkdownComponents` takes a `blockAnchor` mapping so the
+Help reader can prefix block ids the way it prefixes heading ids. The live
+editor has no block anchors: a block link opened into it lands at the top.
+`NotePage.highlight.test.tsx` reads the editor's two toolbars'
 sources and fails when a button wraps text in a delimiter the reading view
 does not draw. The contract
 also covers heading/search-hit navigation, Markdown transformations,
@@ -5055,6 +5713,13 @@ reads it to add trailing scroll space only for that jump, so a heading near the
 end of a note can reach the top of the pane. It resets when the note changes
 and otherwise stays armed for the rest of the visit, since removing the space
 would clamp `scrollTop` and pull the heading back down.
+
+`NotePage` takes the Layout setting's `noteWidth` (#698) from the shell and
+renders it as `data-note-width` on `.note-page-layout`; `styles/note-content.css`
+reads it to set `--note-measure` from `base.css`'s `--note-measure-default`
+(38rem) or `--note-measure-wide` (48rem, not in Source's 1120px column), or,
+for `full`, to drop the layout's `max-width` in every view. Help's manual is
+drawn outside this layout and keeps the default measure.
 A note whose first heading is an H1 equal to its title, with nothing but
 blank lines before it, keeps that heading in the file and the DOM but does
 not draw or list it (#530): `lib/noteHeadings.ts`'s `duplicateTitleHeadingLine`
@@ -5117,7 +5782,37 @@ once autosave has stopped on a refused save, the effect's
 every later revision for the session. When no write of ours can be in flight
 the bump is someone else's, so it sets `noteChangedOnDisk` — flagged, with its
 own reading-view notice, rather than refetched, because refetching is what
-would replace the unsaved text. `NotePage`'s
+would replace the unsaved text. A note's identity on the page is its
+Vault-relative path, not the URL's slug (#627): a slug passes to a same-named
+note earlier in path order (ADR-24). Every later read of the open note by slug
+(the revision refresh, the reload after closing source mode, the conflict
+reads behind Review, Save and reload-latest) goes through `ownNoteOrMoved`,
+which drops a read naming another file and sets `noteMoved` instead; every
+save sends the opened path, the draft writer files under it, and a
+`note_moved` refusal sets the same flag. While it is set autosave is disabled
+and `note-page/wikilinks.ts`'s `findNoteAtPath` asks the server who is at the
+opened path now (a root-anchored `note_link_targets` entry of `resolve-batch`,
+which resolves by path alone, ignoring case and Unicode form): another slug
+there means the slug changed hands, so the conflict and error strip gives way
+to one notice that this address opens a different note, with an **Open it**
+button to that slug; nobody there, or this same slug matched only loosely,
+means the note was moved, renamed or deleted outside the page, which the page
+cannot tell from a namesake inheriting the slug, so a second notice asks, and
+its **Open what is here now** opens the address as a fresh visit: the page
+writes out its draft, drops autosave's unsent edits (`useNoteAutosave`'s
+`discard`), moves the old path's draft to the held-draft store
+(`lib/writeDrafts.ts`'s `holdNoteDraft`, restorable from Settings as a note at
+that path) and bumps a visit counter that is part of the note key, so every
+per-note reset runs as on navigation. A lookup that could not be made shows
+the first notice with **Try again**. A Rename, Move or Archive made in the app
+leaves `useNoteActions`' `NoteMovedHere` router state (`{movedFrom, movedTo}`),
+which the page accepts as its own note's new path without asking, once, and
+then replaces out of the history entry. The explorer tree is not asked: it
+serves the index snapshot, which can lag a new note by minutes. Because the
+route reuses the page, a key change also writes any debounced draft out at
+once, inline draft recovery waits for the read made under the new key, and
+autosave is resumed, so a save refused on one note does not leave the next
+unsaved. `NotePage`'s
 `Vault` property row (`NoteProperties`'s `vaultName`, above) is a name only
 — it carries no condition slot, so #152's demo-mode amber clamp has nothing
 to touch there. `handleSave`'s catch and the live editor's `onUploadError`
@@ -5180,6 +5875,7 @@ editor-toolbar syntax check, #572), Markdown/heading/search/state tests,
 - `frontend/src/components/note-page/live-editor/callouts.ts`
 - `frontend/src/components/note-page/live-editor/commands.ts`
 - `frontend/src/components/note-page/live-editor/focusState.ts`
+- `frontend/src/components/note-page/live-editor/highlightColours.ts`
 - `frontend/src/components/note-page/live-editor/imageWidgets.ts`
 - `frontend/src/components/note-page/live-editor/menus.ts`
 - `frontend/src/components/note-page/live-editor/noteLinks.ts`
@@ -5194,7 +5890,8 @@ editor-toolbar syntax check, #572), Markdown/heading/search/state tests,
 - `frontend/src/components/note-page/linkStyle.ts`
 
 **Public contract:** write capability discovery and operations, editor/action
-components, note-action/write-mode hooks, local draft behavior, client path
+components (`NoteActionsDialog` hands focus back on close to whatever held it
+when it opened, #648), note-action/write-mode hooks, local draft behavior, client path
 validation, upload normalization, frontmatter editing, conflict display,
 note-link autocomplete and attachment inserts written in the Vault's link
 style (`linkStyle.ts`, ADR-33: `[[Title]]`/`![[path]]` in a wikilink Vault,
@@ -5218,8 +5915,19 @@ a state field that replaces a `mermaid` fence, a `base` fence and a `$$`
 or `$` formula with a widget while the caret is off their lines and draws a
 `![[file.pdf]]` preview under its line, and from `callouts.ts`, which gives
 a `> [!kind]` quote the reading view's `.callout-<kind>` accent per line and
-draws the title in place of the marker; both read `focusState.ts`, so a blur
-renders everything the way the inline preview does; the mermaid, saved-query
+draws the title in place of the marker; #577: `highlightColours.ts` gives a
+`==🔴text==` the `live-editor-highlight-<colour>` class and hides the emoji
+while the caret is off its line, looking again as the background parser
+extends the tree (`caretAwareField`'s `refindOnParse`), and colours the
+table widget's cell
+highlights in the DOM, wrapping the emoji so the cell's text is unchanged;
+all three read `focusState.ts`, so a blur
+renders everything the way the inline preview does; #783: these layers and
+`imageWidgets.ts` read the note's tree through `focusState.ts`'s
+`treeSoFar`, which hands back what is parsed so far when the 50 ms parse
+runs out and keeps one answer per state, so the layers share that budget,
+and look again as the parser extends the tree (`refindOnParse`, `treeGrew`),
+so a long note's later blocks draw without an edit; the mermaid, saved-query
 and PDF widgets are the reading view's own components, drawn through
 `widgetPortals.ts`'s registry and `WidgetPortals.tsx`'s portals so they keep
 the page's router and saved-query contexts, and every widget is view-only;
@@ -5235,35 +5943,74 @@ asks for in one pass into one request, which `NotePage` points at the
 reading view's `resolveNoteTargets`, so a link resolves by title, alias or
 path as it does in Reading view and a click on `[[Note#Heading]]` opens the
 note at the heading), autosave
-scheduling and save state, and attachment acceptance and insertion (#558: `attachmentRejection` takes the upload limit, `null` for unknown, and both editors call `attachmentRejectionAtCurrentLimit`, which checks the extension first and then holds the file to the limit `writeApi.ts`'s `fetchAttachmentMaxBytes` reads). `lib/writeDrafts.ts`'s `HeldDraft`/`listHeldDrafts`/
+scheduling and save state (#628: the two-second deadline survives callback
+rerenders, pending text retains its base hash, `hasUnsaved()` reports pending
+or refused text synchronously, and `onSaved(result, content, sentAgainst)`
+names the exact text confirmed and the hash it was written against (#695); Saved is withheld while newer typing is pending, and unsaved
+text holds a browser `beforeunload` warning), and attachment acceptance and insertion (#558: `attachmentRejection` takes the upload limit, `null` for unknown, and both editors call `attachmentRejectionAtCurrentLimit`, which checks the extension first and then holds the file to the limit `writeApi.ts`'s `fetchAttachmentMaxBytes` reads). `lib/writeDrafts.ts`'s `HeldDraft`/`listHeldDrafts`/
 `discardHeldDraft`/`collectLegacyHeldDrafts` (#151) are the recovery model
 for drafts that predate Vault qualification, consumed by Settings'
-`UnsavedDrafts.tsx`; ordinary per-note and create drafts
+`UnsavedDrafts.tsx`; `saveNoteDraft` also copies a displaced draft based on another hash into the
+held store before replacing it (#628), refusing the new draft write if the
+copy fails. Its optional `onHeld` callback tells the note page to show the
+Settings notice after both writes succeed, without duplicating the storage
+policy in the page. `clearNoteDraft` takes optional `savedContent`: ordinary save
+callers supply the confirmed text so another tab's or an older refused draft
+is not removed; only explicit discard/transfer omits it. `NotePage` surfaces a
+newly held draft through the Settings notice. The live editor's external-link
+opener allows only HTTP, HTTPS and mailto, including table links. The
+revision refresh rechecks focus, source editing, pending edits and an edit
+counter when its read returns, keeping the editor and flagging an external
+change rather than replacing text typed during the request.
+Ordinary per-note and create drafts
 (`saveNoteDraft`/`loadNoteDraft`/`clearNoteDraft`/`saveCreateDraft`/
 `loadCreateDraft`/`clearCreateDraft`/`pruneNoteDrafts`) keep their shape, with
 one change: `saveNoteDraft` returns whether the write actually landed (#330).
 `NotePage`'s debounced editor draft writer — the one behind the promise the UI
-makes while the user types — raises a notice on a `false`; the reload-latest,
-conflict-resolution and held-draft-restore call sites still discard it, so a
-blocked store stays silent on those paths and surfacing it there is unfinished.
+makes while the user types, raises a notice on a `false`. Settings' held-draft
+restore checks that result before deleting its source or navigating (#628);
+reload-latest and conflict-resolution callers still discard it.
 `collectLegacyHeldDrafts` reads every key before it writes any, the same
 two-phase shape `pruneNoteDrafts` uses, because writing into a storage area
 mid-enumeration can shift entries behind the `key(i)` cursor and skip drafts.
-`api/writeApi.ts`'s `updateNote` takes an optional `{ keepalive }` (#330) for
-the unload send, and `hooks/useNoteAutosave.ts` takes an optional `flushSave`
+`api/writeApi.ts`'s `updateNote` takes an optional `{ keepalive,
+expectedRelativePath }`: `keepalive` (#330) for the unload send, and
+`expectedRelativePath` (#627), sent as `expected_relative_path`, the path the
+page opened, which the server checks against the file the slug names now;
+its `note_moved` refusal is thrown as `NoteMovedError` (`isNoteMovedError`),
+never as `ConflictError`, so neither autosave nor source mode offers the other
+note's text as the version on disk. Note drafts (`lib/writeDrafts.ts`) are
+keyed by Vault and Vault-relative path under `hatchdoor:draft:note-path:`
+(#627), and `NoteDraft` carries `relativePath` in place of `slug`; every
+slug-keyed draft under `hatchdoor:draft:note:`, pre-#137 or Vault-qualified, is
+swept into the held-draft store by `collectLegacyHeldDrafts`, and
+`UnsavedDrafts.tsx` files a restored one under the path its destination read
+returns; a draft the note page held by path (`holdNoteDraft`, which sets
+`HeldNoteDraft.relativePath`) is looked up by that path through Note reading
+and rendering's `findNoteAtPath`, never as a slug, since a root note's path
+can equal a namesake's slug. For the unload send, `hooks/useNoteAutosave.ts` takes an optional `flushSave`
 the `pagehide`/`visibilitychange` flush hands to `write` in place of the
 ordinary sender: a fetch started while the document is being torn down is
 cancelled with it. It is one send, not a side channel — the hook books its
 outcome like any other save, so a tab that was only hidden comes back with a
 current hash rather than conflicting on the next keystroke. That flush now
 takes `pendingRef ?? queuedRef`, so an edit parked behind an in-flight save
-leaves with the page too. `lib/reloadGuard.ts` is the seam that keeps the
+leaves with the page too. The hook also takes a `noteKey` (#658): its hash, stopped
+flag, queue, idle pause and status belong to that one note, a new key starts
+them afresh, and a save still out for the previous key neither holds the new
+note's edits back nor drains them, while its reply reaches only the `onSaved`
+captured for its own note; `NotePage`'s `onSaved` and its refusal notices act
+only while the note they were sent for is open, except that a late successful
+reply moves the left note's held draft onto the new hash when that draft is
+the last copy the left visit wrote and is based on `sentAgainst` (#695). `lib/reloadGuard.ts` is the seam that keeps the
 service worker from reloading over all of this: `NotePage` holds it while an
 edit is unsaved, a block is open, the source editor is open (#332), or a save
 is in flight, and `main.tsx`
 (coordination path) asks it before pulling an update and before acting on one
 that has already activated.
-`hooks/useNoteActions.ts`'s `openCreateDialog` takes an optional second
+`hooks/useNoteActions.ts`'s Rename, Move and Archive navigate with
+`NoteMovedHere` router state naming the note's old and new path (#627), which
+`NotePage` reads. Its `openCreateDialog` takes an optional second
 `targetVaultId` parameter (#151) so a caller outside the currently open note
 — draft recovery — can pin which Vault a note is created in, overriding
 `resolvePrimaryVaultId`'s inference for that one dialog session.
@@ -5315,7 +6062,8 @@ message and carries no instruction either way).
 note candidates, backend HTTP write endpoints, and (#544) Note reading and
 rendering's `MermaidDiagram`, `PdfPreview`, `SavedQueryBlock`,
 `resolveNoteTargets` and `cachedAssetHref`, drawn or called as they are and
-never edited here; and (#558) the `HATCHDOOR_MAX_ATTACHMENT_BYTES`
+never edited here; (#577) its `highlightColourMarker`, the one list of
+highlight colour emoji; and (#558) the `HATCHDOOR_MAX_ATTACHMENT_BYTES`
 record of Settings' `GET /api/settings` response, which
 `writeApi.ts`'s `fetchAttachmentMaxBytes` reads before each pasted or dropped
 file with an accepted extension, so the size check compares against the
@@ -5331,7 +6079,13 @@ held-draft model and `openCreateDialog`'s target-Vault override), backend
 
 **Invariants:** expected content hashes remain part of update concurrency;
 delete stays recoverable; client validation does not replace backend path
-safety; every mutation continues through backend `vault/write` (ADR-03/11);
+safety; every mutation continues through backend `vault/write` (ADR-03/11).
+
+The frontmatter builder's optional `preserveBom` argument keeps an existing
+leading byte order mark through property creation, editing and removal;
+`NoteEditor` and the reading view's property editor pass the original note's
+marker state (#633).
+
 **nothing re-serializes a note** — the editor's document is the file's text,
 the body is put back under the current frontmatter in the file's own line
 ending, and no save ever rewrites what was not typed; **the floating toolbar
@@ -5343,7 +6097,9 @@ code-carrying cases), editor, action dialog, upload, draft, path,
 frontmatter, conflict, and autocomplete tests; `sourceMap`,
 `useNoteAutosave`, `attachmentDrop`, `live-editor/LiveEditor`,
 `live-editor/commands`, `live-editor/renderedBlocks` (#544: each block kind
-and callout, with the caret off and on), `live-editor/noteLinks`, and
+and callout, with the caret off and on), `live-editor/longNoteParse`
+(#783: each layer draws past the first parse once parsing goes on),
+`live-editor/noteLinks`, and
 `properties` tests;
 `useNoteActions.test.tsx` (#152); plus `App.write-mode.test.tsx`,
 `App.demo-mode.test.tsx` (#152), and full frontend checks.
@@ -5368,6 +6124,10 @@ component is laid out on its own and placed as a labelled, dash-enclosed
 island on one shared canvas (one zoom, one pan); at zero or one participating
 component — including a single-enabled-Vault instance under `all` — the page
 is byte-identical to the narrowed single-Vault graph (#118's resolution).
+The canvas is named "Note graph" and takes focus; the arrow keys, Home and
+End step the selection through the notes in title order, bringing an
+off-screen note to the centre, Enter opens it and Escape clears it, with the
+selection announced in a status line (#648).
 
 **Consumed dependencies:** shared API/error/types/UI, router navigation,
 `d3-force`, `useVaultDiscovery` (Vault-management order, `demoMode`, and
@@ -5420,6 +6180,8 @@ route tests, and full frontend checks.
 
 - `frontend/src/features/settings/index.ts`
 - `frontend/src/features/settings/settingsApi.ts`
+- `frontend/src/features/settings/layoutSettings.ts`
+- `frontend/src/features/settings/layoutSettings.test.ts`
 - `frontend/src/features/settings/SettingsPage.tsx`
 - `frontend/src/features/settings/VaultSettingsIndex.tsx`
 - `frontend/src/features/settings/VaultSettingsIndex.test.tsx`
@@ -5438,11 +6200,25 @@ route tests, and full frontend checks.
 
 **Public contract:** `frontend/src/features/settings/index.ts` is what other
 features may import (#419): `FolderPicker`, `formatWhen`, `createVault`,
-`baseSourceForKind`, and `settingsApi.ts`'s `patchSettings` and
+`baseSourceForKind`, `useLayoutSettings` with its `SidebarSections` and
+`NoteWidth` types, `ALL_SIDEBAR_SECTIONS` and `DEFAULT_NOTE_WIDTH`, and `settingsApi.ts`'s `patchSettings` and
 `generateMcpTokenCandidate`, the one definition of the `PATCH /api/settings`
 and `POST /api/settings/mcp-token/generate` requests that the Settings page and
 the First-run checklist both send; the What's new pop-up sends the first for
-its usage report switch (ADR-48). The shell still imports `SettingsPage`
+its usage report switch (ADR-48). A save the server accepts dispatches
+`SETTINGS_SAVED_EVENT` on `window`. `layoutSettings.ts`'s
+`useLayoutSettings` (#684, #698) is the shell's read of the Layout section:
+the two switches `HATCHDOOR_SIDEBAR_CHANGED_ON_DISK` and
+`HATCHDOOR_SIDEBAR_RECENTLY_VIEWED`, and the choice `HATCHDOOR_NOTE_WIDTH`
+(`default`, `wide` or `full`, anything else read as `default`). It reads
+`GET /api/settings` once Settings exist, again on that event and when the tab
+comes back into view, caches the answer in `hatchdoor.sidebarSections` and
+`hatchdoor.noteWidth` so a reload never flashes a hidden list or a different
+width, and answers both lists on and the default width in demo mode, where
+Settings do not exist. `ExplorerPane` and `HomePage` take `sidebarSections`
+as `sections` and draw nothing of a list switched off, leaving its stored fold
+untouched; `NotePage` takes `noteWidth`. A `choice`-kind row draws its
+options, listed in `COPY`, as a `.settings-segmented` group. The shell still imports `SettingsPage`
 directly. The Settings page presents a two-level Vault-management index
 from `GET /api/v1/vaults`, including disabled Vaults only in Settings, and each
 selected Vault's condition, editable definition fields, identity facts, and
@@ -5472,7 +6248,13 @@ red-line recovery state (a `hatchdoor:vault-recovery:{vaultId}`
 `localStorage` marker, since the registry has no "wanted enabled but
 couldn't" flag of its own) shown on both the Vault's own page and its
 management entry in the index, each carrying one recovery button that
-re-enables with a freshly fetched revision. Sign-in is one no-sign-in/access-
+re-enables with a freshly fetched revision. Every step of that round trip,
+the rollback and the recovery adopts the revision its response carries, so
+the next Save does not conflict with the page's own change (#645). Pause,
+resume and rebuild change the Vault's state only: they keep unsaved field
+edits and each says what it did. The detail is keyed per Vault, and once the
+collection no longer lists the open Vault it shows a disconnected state with
+no Save. Sign-in is one no-sign-in/access-
 token control with no separate Remove; the token field is always empty and
 its state reads `saved`, `none`, or (the instant an identity field changes)
 `will be cleared`. The sync schedule is a 1–1440-minute field (client-side
@@ -5566,33 +6348,25 @@ passing its `demoMode` down as `ZeroVaultState`'s `demoMode` prop) — belt and
 suspenders alongside the invariant below, since the zero-Vault state renders
 on a route demo visitors can otherwise reach.
 
-`UnsavedDrafts.tsx` (#151) is a second "This server" nav entry, shown only
-while `lib/writeDrafts.ts`'s `listHeldDrafts()` returns at least one draft
-recovered from before Vault qualification (#137): a pre-#137 note draft was
-keyed by slug alone, and the standalone create draft has never carried a
-Vault. Each row lets the operator pick a destination Vault (pre-filled only
-at exactly one enabled Vault), then Restore or Discard independently — no
-batch action, since drafts need not share a Vault. Restoring a note draft
-checks the destination Vault for a note at that slug before acting: found,
-it seeds that Vault's ordinary `lib/writeDrafts.ts` per-note draft slot and
-navigates to `NotePage` with `?restoreEdit=1`, which `NotePage.tsx` (#151)
-reads once to open the editor the same way its own Edit button would, then
-strips the marker; not found, the row offers a different Vault or restoring
-the text as a new note (preserving the standalone create draft's own
-`folder`, or an empty folder for a recovered note draft, which carries only
-a slug) through `OpenCreateDraft`, a typed callback `UnsavedDrafts.tsx`
-exports and `App.tsx` supplies: it seeds the standalone create draft and
-calls `hooks/useNoteActions.ts`'s `openCreateDialog` with an explicit target
-Vault ID (its second, optional parameter, added for this ticket) rather than
-the Vault `resolvePrimaryVaultId` would otherwise infer from the currently
-open note. A restored note draft keeps its own `baseContentHash` — the
-version it was actually typed against — rather than the destination note's
-current hash, so `NotePage.tsx`'s existing stale-draft comparison still
-fires correctly. `relativeTime.ts`'s `formatWhen` (accepting either an ISO
-string or an epoch-ms number) is the one relative-age ladder both this
-section's draft rows and the Git/index status console share. The section is
-a migration artefact, not a standing feature: it withdraws for good once the
-last held draft is discarded or restored. `NotePage.tsx` separately shows a
+`UnsavedDrafts.tsx` (#151) is a second "This server" nav entry while
+`lib/writeDrafts.ts`'s `listHeldDrafts()` returns any held draft. It covers
+legacy slug-keyed drafts, drafts held when a note's address changes hands
+(#627), and older-base edits displaced by newer typing (#628). Each row
+independently offers Restore or Discard and a destination picker, pre-filled
+only when exactly one Vault can accept writes. A path-held draft resolves
+its exact path through `findNoteAtPath`; a legacy draft is checked by slug.
+When a note exists, restore seeds its path-keyed draft slot, preserving the
+held draft's own `baseContentHash`, and opens `NotePage` with `?restoreEdit=1`.
+The page opens Source and removes that marker from history. If storing the
+restored draft fails, including failure to preserve an existing destination
+draft, the source remains held and the row reports failure without navigating
+(#628). When no note exists, the row offers another Vault or restoration as
+a new note through `RestoreCreateDraft`, supplied by `App.tsx`: the full held
+text is written directly, and the held copy is removed only after success.
+Create drafts retain their folder; held note drafts use an empty folder and
+their recorded name or path. `relativeTime.ts`'s `formatWhen` accepts an ISO
+string or epoch-ms number for both draft ages and Git/index status. The
+section hides while empty and returns whenever another draft is held. `NotePage.tsx` separately shows a
 dismissible (per view, not persisted) notice above the note body — naming
 only that drafts are held and linking to this section, not repeating this
 section's own explanation of what was cleared — whenever any held draft
@@ -5884,6 +6658,57 @@ packet scope:
   too. It drives `playwright-core` from the frontend's dev dependencies and
   the Chrome on the path, or the one `HATCHDOOR_DEV_BROWSER` names. Validate
   with `node --test scripts/proto.test.mjs`.
+  The live-acceptance helpers (#616) are `scripts/mcp-call.mjs` (`just
+  mcp-call`), `scripts/dev-note.mjs` (`just dev-note`), `scripts/dev-wait.mjs`
+  (`just dev-wait`, and the wait at the end of `just dev-restart-backend`)
+  and `scripts/dev-browser.mjs`, the signed-in browser a Playwright script
+  imports, which also holds the sign-in `proto-new` uses. They share
+  `scripts/dev-common.mjs`: the dev ports, which a test holds equal to the
+  `justfile`'s, the `.env` reading, and the scrubbing that keeps a token out
+  of everything printed. Every address is built from `127.0.0.1`, so none
+  can reach a deployed instance. They copy from the server the MCP handshake
+  and `/mcp` path, `/health`, `/api/v1/vaults`, `/api/v1/vaults/{id}/tree`
+  and `/api/v1/vaults/{id}/notes/{slug}` with its `relative_path`, the
+  `/v/{vault_id}/n/{slug}` page address, and the registry's shape in
+  `.dev/state/vaults.json`; from the frontend the storage keys named above.
+  `dev-note` lists what it placed in `.dev/vaults/placed-notes.txt`, inside
+  the tree `scripts/dev-vaults.sh` removes whole on a reset. Validate with
+  `node --test scripts/dev-*.test.mjs scripts/mcp-call.test.mjs
+  scripts/proto.test.mjs`;
+  `dev-backend.test.mjs` runs the `justfile`'s stop recipes against stand-in
+  processes.
+  `scripts/conformance.mjs`, started by `just conformance` (#617), runs the
+  pinned MCP conformance suite against the dev server through a proxy that
+  adds the bearer token, restarting the backend through `just
+  dev-restart-backend` with `HATCHDOOR_MCP_ENABLED` and
+  `HATCHDOOR_MCP_WRITE_ENABLED` set for each posture. It reads the revisions
+  from `SUPPORTED_PROTOCOL_VERSIONS` in `src/mcp/config.rs` with a pattern, so
+  reshaping that constant means editing the script. It lists tools through
+  `openSession` in `scripts/mcp-call.mjs` and writes under
+  `docs/maintenance/conformance-evidence/`. Validate with
+  `node --test scripts/conformance.test.mjs`.
+  The release commands (`scripts/release-*.mjs`, ADR-36) read
+  `HATCHDOOR_RELEASE_HOOK` through `devSetting` in `scripts/dev-common.mjs`,
+  from the environment or the git-ignored `.release.env`. The bump rewrites
+  the README's `e.g. <version>` examples, and a test in
+  `scripts/release-common.test.mjs` holds them to the `Cargo.toml` version.
+  Validate with `node --test scripts/release-*.test.mjs`.
+  `scripts/smoke-install.sh`, started by `just smoke-install` (#569), builds
+  the image from the checkout with Docker, loads it into rootless Podman and
+  follows the README Quick Start there. It copies the deploy guide's API calls (`/api/model/decline-gemma`,
+  `/api/settings`, `/api/v1/vaults`, `/ready`, `/api/startup-status`, MCP
+  `list_vaults` and `search_notes`) and expects the refused first start to
+  leave `HATCHDOOR_WEB_BEARER_TOKEN=` in `data/state/new-web-token.env`
+  (`NEW_WEB_TOKEN_FILE` in `src/server.rs`). The docs-freshness table pairs it
+  with the README and both install guides. The release checklist
+  (`CHECKLIST_ITEMS` in `scripts/release-common.mjs`) asks for a pass. It has
+  no unit test; validate by running it.
+  `scripts/check-mode.mjs`, run by `just check` (#710), picks the check's
+  mode from the branch's changes since its merge base on `development`
+  (docs-only, manual or full) and remembers the tree of the last pass in
+  `.dev/check-pass.json`. It shares the base and merge-base lookup in
+  `scripts/git-changes.mjs` with `scripts/check-docs-freshness.mjs`. Validate
+  with `node --test scripts/check-mode.test.mjs`.
 
 Dependency or build configuration is never implicitly owned by the module that
 wants a new dependency.
@@ -5899,7 +6724,10 @@ the docs-freshness table, and the tests under `scripts/`), formatting, clippy
 for the default and the all-features build, the backend tests with
 `--features eval`, and the frontend format, lint, typecheck, test and build
 steps. `CONTRIBUTING.md` lists the exact commands. Run
-`npm ci` in `frontend/` first on a fresh checkout.
+`npm ci` in `frontend/` first on a fresh checkout. A branch that changed only
+documentation runs the script checks alone, one that also edited manual pages
+adds the tests that read the manual, and a tree that already passed is not
+checked again (`scripts/check-mode.mjs`, `CONTRIBUTING.md`).
 
 `just check-full` adds the backend tests in the default configuration and with
 `--all-features`, which loads real model weights. Run it for changes to

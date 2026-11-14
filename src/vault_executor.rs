@@ -35,7 +35,7 @@ use crate::git::{
     run_existing_git_recovery_turn, run_existing_git_remote_turn, run_managed_git_commit_turn,
     run_managed_git_turn, run_managed_recovery_turn,
 };
-use crate::runtime_config::{ConfigSnapshot, RuntimeConfig};
+use crate::runtime_config::RuntimeConfig;
 use crate::startup::{IndexingParticipant, IndexingProgressSnapshot, StartupTracker};
 use crate::vault_registry::{
     VaultGitMode, VaultId, VaultRegistryState, VaultRegistryStore,
@@ -215,7 +215,7 @@ impl VaultWorkExecutor {
                 // Read per turn, not once at startup, so saving a new author
                 // name or email applies to the next Git turn of every Vault
                 // without its own commit identity — no restart.
-                let (author_name, author_email) = git_author_defaults(&snapshot);
+                let (author_name, author_email) = crate::git::config::author_defaults(&snapshot);
                 dispatch_git_turn(
                     &self.vaults,
                     &self.registry,
@@ -229,7 +229,7 @@ impl VaultWorkExecutor {
             }
             VaultWorkKind::Commit => {
                 // Read per turn for the same reason the Git arm above does.
-                let (author_name, author_email) = git_author_defaults(&snapshot);
+                let (author_name, author_email) = crate::git::config::author_defaults(&snapshot);
                 dispatch_commit_turn(
                     &self.vaults,
                     &self.registry,
@@ -244,7 +244,7 @@ impl VaultWorkExecutor {
             VaultWorkKind::Recovery => {
                 // Read per turn for the same reason the Git arm above does:
                 // a publish commits pending saves before it pushes.
-                let (author_name, author_email) = git_author_defaults(&snapshot);
+                let (author_name, author_email) = crate::git::config::author_defaults(&snapshot);
                 dispatch_recovery_turn(
                     &self.vaults,
                     &self.registry,
@@ -410,6 +410,63 @@ impl VaultWorkExecutor {
     }
 }
 
+/// One signal-driven recovery waiter, started by runtime composition. The
+/// cache owns handle draining and quarantine; rebuilt Vaults use the existing
+/// Index lane. Never recover from inside a query or an Index turn's locks.
+pub(crate) async fn recover_corrupt_cache(state: AppState) {
+    loop {
+        tokio::select! {
+            () = state.shutdown.wait() => return,
+            () = state.startup_sqlite.wait_for_corruption() => {},
+        }
+        loop {
+            let cache = state.startup_sqlite.clone();
+            let dimension = state.embedder.embedding_dim();
+            let result = tokio::task::spawn_blocking(move || cache.recover_corruption(dimension))
+                .await
+                .map_err(|error| format!("cache recovery task failed: {error}"))
+                .and_then(|result| result);
+            match result {
+                Ok(false) => break,
+                Ok(true) => {
+                    for vault_id in state.vaults.active_vault_ids() {
+                        if let Some(vault) = state.vaults.runtime(vault_id) {
+                            let _ = vault.set_search_status(VaultSearchStatus::Unavailable, Some(VaultRuntimeError {
+                                code: "cache_rebuilding".into(),
+                                message: "The damaged search cache was quarantined. Rebuilding from Markdown.".into(),
+                                retryable: true,
+                                detail: None,
+                            }));
+                        }
+                        state.vault_work.request(vault_id, VaultWorkKind::Index);
+                    }
+                    break;
+                }
+                Err(message) => {
+                    error!(%message, "SQLite cache recovery failed; retrying");
+                    for vault_id in state.vaults.active_vault_ids() {
+                        if let Some(vault) = state.vaults.runtime(vault_id) {
+                            let _ = vault.set_search_status(
+                                VaultSearchStatus::Unavailable,
+                                Some(VaultRuntimeError {
+                                    code: "cache_recovery_failed".into(),
+                                    message: message.clone(),
+                                    retryable: true,
+                                    detail: None,
+                                }),
+                            );
+                        }
+                    }
+                    tokio::select! {
+                        () = state.shutdown.wait() => return,
+                        () = tokio::time::sleep(Duration::from_secs(2)) => {},
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Latch startup `Ready` if the instance is ready now: the search model is
 /// set up, the Vault registry loaded normally, and every active Vault's first
 /// index has settled ([`collection_indexes_settled`]). Latching also releases
@@ -572,10 +629,7 @@ fn count_markdown_notes(root: &Path, exclude_patterns: &[String]) -> Option<usiz
     Some(
         entries
             .filter_map(Result::ok)
-            .filter(|entry| {
-                entry.file_type().is_file()
-                    && entry.path().extension().and_then(|ext| ext.to_str()) == Some("md")
-            })
+            .filter(|entry| entry.file_type().is_file() && crate::vault::is_note_path(entry.path()))
             .count(),
     )
 }
@@ -586,18 +640,6 @@ fn index_settled(snapshot: &CollectionVaultSnapshot) -> bool {
         VaultSearchStatus::Ready | VaultSearchStatus::Stale
     ) || snapshot.search_error.is_some()
         || snapshot.activation != VaultActivationStatus::Active
-}
-
-/// The instance-wide default commit identity for a Git turn, read from the
-/// settings snapshot bound to that turn. A Vault's own configured identity
-/// still overrides this (see `crate::git::config::resolve_commit_identity`).
-fn git_author_defaults(snapshot: &ConfigSnapshot) -> (String, String) {
-    (
-        crate::git::config::non_empty_setting(snapshot, "HATCHDOOR_GIT_AUTHOR_NAME")
-            .unwrap_or_else(|| "Hatchdoor".to_string()),
-        crate::git::config::non_empty_setting(snapshot, "HATCHDOOR_GIT_AUTHOR_EMAIL")
-            .unwrap_or_else(|| "hatchdoor@localhost".to_string()),
-    )
 }
 
 /// Publish each Vault's place in the indexing lane on its own status, so the
@@ -708,6 +750,18 @@ pub(crate) async fn dispatch_vault_index_turn_with_progress(
         return Ok(());
     };
 
+    // Index only what the Vault reports it can read (#641). A Local Vault's
+    // folder is looked at again first, so the watcher's or re-scan's report
+    // of a change, a retry and every other Index request also moves its
+    // status to where the folder stands now. A Vault that is still not
+    // Active has nothing to index; its status already says why, and the
+    // probe or Git turn that makes it readable asks for a turn of its own.
+    let probe = control_block.clone();
+    let _ = tokio::task::spawn_blocking(move || probe.reprobe_local_content()).await;
+    if control_block.snapshot().activation != VaultActivationStatus::Active {
+        return Ok(());
+    }
+
     // HTTP and MCP Markdown mutations hold this exact per-Vault guard across
     // their filesystem transaction. Hold it through the authoritative scan and
     // every per-note content read, so an Index turn cannot observe a mixed
@@ -753,9 +807,11 @@ pub(crate) async fn dispatch_vault_index_turn_with_progress(
         let indexing_cache = cache.clone();
         let publication_stale = published_stale.clone();
         let index_yield = slicing.map(|IndexTurnSlicing { work, slice }| {
+            let stopping = work.clone();
             IndexYield::new(
                 slice,
                 Box::new(move || work.another_vault_waits_to_index(vault_id)),
+                Box::new(move || stopping.vault_is_stopping(vault_id)),
             )
         });
         match tokio::task::spawn_blocking(move || {
@@ -882,11 +938,13 @@ pub(crate) async fn dispatch_vault_index_turn_with_progress(
         Ok(IndexTurnEnd::Paused) => {
             // Behind every Vault already waiting, so the one this turn paused
             // for goes first. A drained Vault is not put back: disabling or
-            // removing it discards its paused work with the rest.
+            // removing it discards its paused work with the rest, and an edit
+            // or a restart requests a fresh Index turn when it activates the
+            // Vault again, which resumes from the saved progress (#640).
             if let Some(work) = requeue_on {
                 work.requeue_paused_index_turn(vault_id);
             }
-            info!(%vault_id, "Vault indexing paused so another Vault can index; it resumes when its turn comes round");
+            info!(%vault_id, "Vault indexing paused with its progress saved; it resumes when its turn comes round");
             // Nothing failed, so no error rides along: the Vault shows what
             // its retained generation supports, as an unfinished rebuild does.
             let _ = control_block.set_search_status(retained_search_status(&cache, vault_id), None);
@@ -1532,16 +1590,20 @@ fn plan_commit_turn(
         // documented on `GitTurnPlan::holds_mutation_lock`: it commits
         // already-settled drift and must not park foreground writes behind
         // itself.
+        // `repository_path` is the only repository the turn opens (#678).
         RegistryVaultSource::ExistingGit {
             mode: VaultGitMode::LocalHistory,
+            repository_path,
             ..
         } => {
+            let repository_path = repository_path.clone();
             let vault_path = control_block.vault_path().to_path_buf();
             Some(GitTurnPlan {
                 holds_mutation_lock: false,
                 panic_code: "existing_git_local_history_task_panicked",
                 work: GitTurnWork::Unleased(Box::new(move || {
                     crate::git::run_local_history_git_turn(
+                        repository_path,
                         vault_path,
                         author_name,
                         author_email,

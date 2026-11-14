@@ -38,6 +38,9 @@ import {
   recoverPausedVault,
   recoveryBranchName,
   recoveryBranchUrl,
+  type RetiredCheckout,
+  retiredCheckoutNote,
+  savedMessage,
   REPOSITORY_URL_REQUIRED_MESSAGE,
   requestJson,
   sameSourceIdentity,
@@ -85,6 +88,11 @@ export function VaultSettingsIndex({
   autoOpenCreation?: boolean;
 }) {
   const [recovering, setRecovering] = useState<Record<VaultId, boolean>>({});
+  // Why the last Try again on a row failed, in the server's words: the
+  // Vault's own page shows the same reason for the same action (#645).
+  const [recoveryFailures, setRecoveryFailures] = useState<
+    Record<VaultId, string>
+  >({});
   const [creationOpen, setCreationOpen] = useState(Boolean(autoOpenCreation));
   // The whole Vault collection, disabled Vaults included, from the one client
   // every surface reads (#198). `recovery` means the persisted registry file
@@ -100,10 +108,24 @@ export function VaultSettingsIndex({
     refresh: loadVaults,
   } = useVaultCollection();
 
+  // A reason stops describing its Vault once the Vault is running again,
+  // brought back from its own page or by an assistant, or gone: a later
+  // failure must not show it (#645). Dropped during render, which React
+  // settles before painting.
+  const staleFailures = Object.keys(recoveryFailures).filter(
+    (id) => !vaults.some((vault) => vault.vault_id === id && !vault.enabled),
+  );
+  if (staleFailures.length > 0)
+    setRecoveryFailures((old) =>
+      staleFailures.reduce((next, id) => withoutKey(next, id), old),
+    );
+
   const handleRecover = async (vaultId: VaultId) => {
     setRecovering((old) => ({ ...old, [vaultId]: true }));
+    setRecoveryFailures((old) => withoutKey(old, vaultId));
     const result = await recoverPausedVault(vaultId);
     if (result.ok) await loadVaults();
+    else setRecoveryFailures((old) => ({ ...old, [vaultId]: result.message }));
     setRecovering((old) => ({ ...old, [vaultId]: false }));
   };
 
@@ -147,6 +169,7 @@ export function VaultSettingsIndex({
       {vaults.map((vault) => {
         const needsRecovery =
           !vault.enabled && isRecoveryPending(vault.vault_id);
+        const failureReason = recoveryFailures[vault.vault_id];
         return (
           <Fragment key={vault.vault_id}>
             <button
@@ -170,7 +193,10 @@ export function VaultSettingsIndex({
             </button>
             {needsRecovery ? (
               <div className="settings-recovery-line" role="alert">
-                <span>This Vault changed but did not start back up.</span>
+                <span>
+                  This Vault changed but did not start back up.
+                  {failureReason ? ` ${failureReason}` : null}
+                </span>
                 <button
                   type="button"
                   className="settings-mini settings-btn-danger"
@@ -211,6 +237,12 @@ export function VaultSettingsIndex({
       ) : null}
     </section>
   );
+}
+
+function withoutKey<T>(record: Record<VaultId, T>, key: VaultId) {
+  const next = { ...record };
+  delete next[key];
+  return next;
 }
 
 function draftsFromSource(source: VaultSource | undefined) {
@@ -339,6 +371,8 @@ export function VaultSettingsDetail({
     allVaults,
     registryRevision,
     noteCounts,
+    readState,
+    recovery: registryRecovery,
     refresh: refreshCollection,
   } = useVaultCollection();
   const vaultProjection = useVaultProjection();
@@ -382,28 +416,45 @@ export function VaultSettingsDetail({
   const [syncing, setSyncing] = useState(false);
   const [publishing, setPublishing] = useState(false);
   const [recoveryPending, setRecoveryPending] = useState(false);
+  // Set while this page's own Disconnect runs: the collection may drop the
+  // Vault before the request answers, and that is not "disconnected
+  // elsewhere".
+  const [disconnecting, setDisconnecting] = useState(false);
 
-  const applyVault = useCallback((next: VaultSummary) => {
+  /** Adopts a Vault record without touching the form: what a pause, resume
+   * or disconnect answers with. Those change the Vault's state, not its
+   * definition, so they must not throw away fields still being edited
+   * (#645). */
+  const applyVaultState = useCallback((next: VaultSummary) => {
     setVault(next);
-    setName(next.name);
-    setExclude(next.exclude_patterns.join(", "));
-    setArchive(next.archive_folder ?? "");
-    setIdentityName(next.commit_identity?.name ?? "");
-    setIdentityEmail(next.commit_identity?.email ?? "");
-    const drafts = draftsFromSource(next.source);
-    setDraftBehavior(drafts.behavior);
-    setRepoUrlDraft(drafts.repoUrl);
-    setBranchDraft(drafts.branch);
-    setSubdirDraft(drafts.subdirectory);
-    setPollMinutesDraft(drafts.pollMinutes);
-    setSignIn(next.credential_configured ? "token" : "none");
-    setCredToken("");
-    setPlaqueEditing(false);
     if (next.enabled && isRecoveryPending(next.vault_id)) {
       clearRecoveryPending(next.vault_id);
     }
     setRecoveryPending(!next.enabled && isRecoveryPending(next.vault_id));
   }, []);
+
+  /** Adopts a Vault record and resets the form to it: what opening the page
+   * and a saved edit answer with. */
+  const applyVault = useCallback(
+    (next: VaultSummary) => {
+      applyVaultState(next);
+      setName(next.name);
+      setExclude(next.exclude_patterns.join(", "));
+      setArchive(next.archive_folder ?? "");
+      setIdentityName(next.commit_identity?.name ?? "");
+      setIdentityEmail(next.commit_identity?.email ?? "");
+      const drafts = draftsFromSource(next.source);
+      setDraftBehavior(drafts.behavior);
+      setRepoUrlDraft(drafts.repoUrl);
+      setBranchDraft(drafts.branch);
+      setSubdirDraft(drafts.subdirectory);
+      setPollMinutesDraft(drafts.pollMinutes);
+      setSignIn(next.credential_configured ? "token" : "none");
+      setCredToken("");
+      setPlaqueEditing(false);
+    },
+    [applyVaultState],
+  );
 
   // The Vault record and its note count come from the collection client; only
   // this Vault's own last-change time is read here, because nothing else in
@@ -471,6 +522,23 @@ export function VaultSettingsDetail({
     return (
       <div className="settings-main">
         <p className="settings-muted">Loading Vault…</p>
+      </div>
+    );
+
+  // The collection no longer lists the Vault this page was showing: another
+  // tab or an agent disconnected it. A known list is evidence; a collection
+  // still loading, never read (#333), or read from an unreadable registry
+  // (#150, which the index beside this page reports) is not. Nothing is left
+  // to save, so the form goes with it (#645).
+  const collectionKnown =
+    readState !== "loading" && readState !== "error" && !registryRecovery;
+  if (collectionKnown && !summary && !disconnecting)
+    return (
+      <div className="settings-main settings-vault-detail">
+        <StateBlock
+          title="Vault Disconnected"
+          description={`${vault.name} was disconnected elsewhere, from another tab or by an assistant, so there is nothing left here to save. Its notes and folder are untouched.`}
+        />
       </div>
     );
 
@@ -569,7 +637,18 @@ export function VaultSettingsDetail({
   const mutate = async (
     path: string,
     init: RequestInit,
-    conflictMessage = ACTION_CONFLICT_MESSAGE,
+    {
+      conflictMessage = ACTION_CONFLICT_MESSAGE,
+      success,
+      resetForm = false,
+    }: {
+      conflictMessage?: string;
+      /** What the page says once the server accepted the request. */
+      success: string;
+      /** Only a saved edit resets the form to the answer; an action that
+       * changes the Vault's state keeps what is being typed (#645). */
+      resetForm?: boolean;
+    },
   ) => {
     setMessage(null);
     const { ok, payload: raw } = await requestJson(path, init);
@@ -581,17 +660,21 @@ export function VaultSettingsDetail({
     };
     if (!ok) {
       if (payload.code === "registry_revision_conflict") {
-        await refreshRevision();
+        // A conflict can be a disconnect elsewhere: re-reading the
+        // collection lets the page say so instead of offering a Save that
+        // cannot succeed (#645).
+        await Promise.all([refreshRevision(), refreshCollection()]);
         setFailure(conflictMessage);
       } else {
         setFailure(failureText(raw, "This Vault could not be changed."));
       }
       return false;
     }
-    if (payload.vault) applyVault(payload.vault);
+    if (payload.vault)
+      (resetForm ? applyVault : applyVaultState)(payload.vault);
     if (payload.registry_revision !== undefined)
       setRevision(payload.registry_revision);
-    setMessage("Saved.");
+    setMessage(success);
     return true;
   };
 
@@ -604,7 +687,11 @@ export function VaultSettingsDetail({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(editVaultBody(source, revision, false)),
       },
-      SAVE_CONFLICT_MESSAGE,
+      {
+        conflictMessage: SAVE_CONFLICT_MESSAGE,
+        success: "Saved.",
+        resetForm: true,
+      },
     );
   };
 
@@ -615,6 +702,7 @@ export function VaultSettingsDetail({
   const runAction = async (
     path: (expectedRevision: number) => string,
     init: RequestInit,
+    success: string,
   ) => {
     setMessage(null);
     const fresh = await fetchRegistryRevision();
@@ -623,7 +711,7 @@ export function VaultSettingsDetail({
       return false;
     }
     setRevision(fresh);
-    return mutate(path(fresh), init);
+    return mutate(path(fresh), init, { success });
   };
 
   /** Issue #121's round trip: accepting an identity change runs pause, edit
@@ -674,10 +762,13 @@ export function VaultSettingsDetail({
       vault?: VaultSummary;
       registry_revision?: number;
       message?: string;
+      retired_checkout?: RetiredCheckout;
     };
     if (!editResult.ok || editPayload.registry_revision === undefined) {
       const rollback = await recoverPausedVault(vaultId);
       if (rollback.ok) {
+        if (rollback.registryRevision !== undefined)
+          setRevision(rollback.registryRevision);
         if (rollback.vault) applyVault(rollback.vault);
         else
           setVault((current) =>
@@ -715,23 +806,25 @@ export function VaultSettingsDetail({
     };
     if (!enableResult.ok) {
       setRecoveryPending(true);
+      const kept = retiredCheckoutNote(editPayload.retired_checkout);
       setFailure(
-        "This Vault changed but Hatchdoor could not turn it back on. It is paused and hidden until you bring it back below.",
+        `This Vault changed but Hatchdoor could not turn it back on. It is paused and hidden until you bring it back below.${kept ? ` ${kept}` : ""}`,
       );
       setBusy(false);
       return;
     }
     clearRecoveryPending(vaultId);
     setRecoveryPending(false);
+    // Every step's revision is adopted, the final enable's included, or the
+    // next Save carries the edit step's and is refused as a conflict (#645).
+    if (enablePayload.registry_revision !== undefined)
+      setRevision(enablePayload.registry_revision);
     if (enablePayload.vault) applyVault(enablePayload.vault);
-    else {
+    else
       setVault((current) =>
         current ? { ...current, enabled: true } : current,
       );
-      if (enablePayload.registry_revision !== undefined)
-        setRevision(enablePayload.registry_revision);
-    }
-    setMessage("Saved.");
+    setMessage(savedMessage(editPayload.retired_checkout));
     setBusy(false);
   };
 
@@ -762,7 +855,9 @@ export function VaultSettingsDetail({
     const result = await recoverPausedVault(vaultId);
     if (result.ok) {
       setRecoveryPending(false);
-      if (result.vault) applyVault(result.vault);
+      if (result.registryRevision !== undefined)
+        setRevision(result.registryRevision);
+      if (result.vault) applyVaultState(result.vault);
       setMessage("This Vault is back.");
     } else {
       setFailure(result.message);
@@ -784,6 +879,23 @@ export function VaultSettingsDetail({
       );
     // No re-read here: the refresh publishes the new record and the effect
     // above adopts it, same as any other writer's change.
+    await refreshCollection();
+    setSyncing(false);
+  };
+
+  // A Vault with no Git console still has a Try again when its status
+  // offers one, such as a Local Vault whose folder was missing or could not
+  // be read: the server looks at the folder again on the spot (#641).
+  const retryFolder = async () => {
+    setSyncing(true);
+    setMessage(null);
+    const { ok, payload } = await requestJson(
+      `/api/v1/vaults/${vaultId}/retry`,
+      { method: "POST" },
+    );
+    if (ok) setMessage("Hatchdoor checked this Vault's folder again.");
+    else
+      setFailure(failureText(payload, "Could not check this Vault's folder."));
     await refreshCollection();
     setSyncing(false);
   };
@@ -823,6 +935,7 @@ export function VaultSettingsDetail({
       ? "Sync now"
       : "Commit now";
   const conditionHelp = vaultConditionHelp(vault, paused);
+  const folderRetry = !paused && !consoleVisible && vault.capabilities.retry;
   const healthySentence = remoteBacked
     ? "This Vault's Git sync is healthy."
     : "This Vault's Git history is up to date.";
@@ -924,6 +1037,19 @@ export function VaultSettingsDetail({
           <>
             {" "}
             <ContextualHelpLink to={conditionHelp} />
+          </>
+        ) : null}
+        {folderRetry ? (
+          <>
+            {" "}
+            <button
+              type="button"
+              className="settings-mini"
+              disabled={syncing}
+              onClick={() => void retryFolder()}
+            >
+              Try again
+            </button>
           </>
         ) : null}
       </p>
@@ -1241,6 +1367,7 @@ export function VaultSettingsDetail({
               (expected) =>
                 `/api/v1/vaults/${vaultId}/${paused ? "enable" : "disable"}?expected_registry_revision=${expected}`,
               { method: "POST" },
+              paused ? "This Vault is back on." : "This Vault is paused.",
             )
           }
           type="button"
@@ -1251,7 +1378,11 @@ export function VaultSettingsDetail({
           className="settings-btn"
           disabled={paused}
           onClick={() =>
-            void mutate(`/api/v1/vaults/${vaultId}/refresh`, { method: "POST" })
+            void mutate(
+              `/api/v1/vaults/${vaultId}/refresh`,
+              { method: "POST" },
+              { success: "Rebuilding this Vault's search index." },
+            )
           }
           type="button"
         >
@@ -1261,14 +1392,17 @@ export function VaultSettingsDetail({
           className="settings-btn settings-btn-danger"
           disabled={busy}
           onClick={async () => {
+            setDisconnecting(true);
             if (
               await runAction(
                 (expected) =>
                   `/api/v1/vaults/${vaultId}?expected_registry_revision=${expected}`,
                 { method: "DELETE" },
+                "This Vault was disconnected.",
               )
             )
               onDisconnect();
+            else setDisconnecting(false);
           }}
           type="button"
         >

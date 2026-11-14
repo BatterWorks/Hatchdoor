@@ -8,7 +8,11 @@ import {
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import type { HeldDraft } from "../../lib/writeDrafts";
+import {
+  loadNoteDraft,
+  saveNoteDraft,
+  type HeldDraft,
+} from "../../lib/writeDrafts";
 import type { VaultSummary } from "../../types";
 import { UnsavedDrafts } from "./UnsavedDrafts";
 
@@ -62,7 +66,11 @@ describe("UnsavedDrafts (#151)", () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
       jsonResponse({
         vault_id: v.vault_id,
-        note: { content_hash: "fresh-hash" },
+        note: {
+          slug: "orphaned",
+          relative_path: "Notes/Orphaned",
+          content_hash: "fresh-hash",
+        },
       }),
     );
     const onDiscard = vi.fn();
@@ -86,13 +94,64 @@ describe("UnsavedDrafts (#151)", () => {
       expect(onDiscard).toHaveBeenCalledWith("note:orphaned"),
     );
     const stored = window.localStorage.getItem(
-      "hatchdoor:draft:note:vault-1:orphaned",
+      "hatchdoor:draft:note-path:vault-1:Notes/Orphaned",
     );
     expect(stored).toContain("some unsaved text");
     // The draft's own baseContentHash survives restore — never the
     // destination note's freshly fetched hash — so the existing stale-draft
     // comparison in NotePage still fires correctly (#151 spec review).
     expect(stored).toContain('"baseContentHash":"abc"');
+  });
+
+  it("keeps the held draft when preserving a destination draft exhausts storage", async () => {
+    const v = vault("vault-1", "Alpha");
+    saveNoteDraft(v.vault_id, "Notes/Orphaned", {
+      vaultId: v.vault_id,
+      relativePath: "Notes/Orphaned",
+      content: "destination edit",
+      baseContentHash: "another-base",
+      savedAt: 1,
+    });
+    const store = Storage.prototype.setItem;
+    vi.spyOn(Storage.prototype, "setItem").mockImplementation(function (
+      this: Storage,
+      key,
+      value,
+    ) {
+      if (key.startsWith("hatchdoor:heldDraft:"))
+        throw new DOMException("full", "QuotaExceededError");
+      store.call(this, key, value);
+    });
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse({
+        note: { slug: "orphaned", relative_path: "Notes/Orphaned" },
+      }),
+    );
+    const onDiscard = vi.fn();
+    render(
+      <MemoryRouter>
+        <UnsavedDrafts
+          drafts={[noteDraft]}
+          vaults={[v]}
+          onDiscard={onDiscard}
+        />
+      </MemoryRouter>,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Restore" }));
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "Restore" }),
+      ).not.toBeDisabled(),
+    );
+    expect(onDiscard).not.toHaveBeenCalled();
+    expect(
+      await screen.findByText(
+        "This draft could not be written. It is still held here.",
+      ),
+    ).toBeInTheDocument();
+    expect(loadNoteDraft(v.vault_id, "Notes/Orphaned")?.content).toBe(
+      "destination edit",
+    );
   });
 
   it("offers a different Vault or a new note when the destination has no such note", async () => {
@@ -246,5 +305,91 @@ describe("UnsavedDrafts (#151)", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Restore" }));
     expect(await screen.findByText(/not answering right now/)).toBeVisible();
+  });
+
+  it("says a note too large to open is too large, not worth a retry (#636)", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse({ code: "note_too_large" }, 413),
+    );
+    render(
+      <MemoryRouter>
+        <UnsavedDrafts
+          drafts={[noteDraft]}
+          vaults={[vault("vault-1", "Alpha")]}
+          onDiscard={vi.fn()}
+        />
+      </MemoryRouter>,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Restore" }));
+    expect(await screen.findByText(/too large for Hatchdoor/)).toBeVisible();
+  });
+
+  // #627: a draft held by path names a file. A root note's path can equal a
+  // namesake's slug, so restore asks who is at the path, never the slug.
+  it("looks a path-held draft up by its path, not as a slug", async () => {
+    const v = vault("vault-1", "Alpha");
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation(
+        async (input: RequestInfo | URL, init?: RequestInit) => {
+          const url = String(input);
+          if (url.includes("/resolve-batch")) {
+            const body = JSON.parse(String(init?.body)) as {
+              note_link_targets: string[];
+            };
+            return jsonResponse({
+              vault_id: "vault-1",
+              results: [],
+              note_link_results: body.note_link_targets.map((target) => ({
+                target,
+                slug: null,
+                archived: false,
+              })),
+            });
+          }
+          return jsonResponse({
+            note: { slug: "todo", relative_path: "x/todo" },
+          });
+        },
+      );
+    const onRestoreCreateDraft = vi.fn().mockResolvedValue(true);
+
+    render(
+      <MemoryRouter>
+        <UnsavedDrafts
+          drafts={[
+            {
+              id: "note-path:vault-1:todo:1",
+              kind: "note",
+              slug: "todo",
+              relativePath: "todo",
+              content: "typed into the root todo",
+              baseContentHash: "h",
+              savedAt: Date.now(),
+            },
+          ]}
+          vaults={[v]}
+          onRestoreCreateDraft={onRestoreCreateDraft}
+          onDiscard={vi.fn()}
+        />
+      </MemoryRouter>,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Restore" }));
+    await screen.findByText(/has no note at/);
+    expect(
+      fetchMock.mock.calls.some(([input]) => String(input).includes("/notes/")),
+    ).toBe(false);
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "restore it as a new note here" }),
+    );
+    expect(onRestoreCreateDraft).toHaveBeenCalledWith(
+      "vault-1",
+      "",
+      "todo",
+      "typed into the root todo",
+    );
   });
 });

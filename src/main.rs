@@ -1,5 +1,5 @@
 use dotenvy::dotenv;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 use hatchdoor::config::{init_logging, version_string};
 use hatchdoor::embed::FastembedEmbedder;
@@ -8,6 +8,7 @@ use hatchdoor::server::run_server;
 enum RunMode {
     Serve,
     PrefetchEmbedder,
+    FetchModel,
     Healthcheck,
     Unknown(String),
 }
@@ -16,6 +17,7 @@ fn parse_run_mode(args: &[String]) -> RunMode {
     match args.get(1).map(String::as_str) {
         None => RunMode::Serve,
         Some("--prefetch-embedder") => RunMode::PrefetchEmbedder,
+        Some(hatchdoor::model_setup::FETCH_MODEL_FLAG) => RunMode::FetchModel,
         Some("--healthcheck") => RunMode::Healthcheck,
         Some(other) => RunMode::Unknown(other.to_string()),
     }
@@ -32,11 +34,34 @@ fn run_prefetch() {
     }
 }
 
-#[tokio::main]
-async fn main() {
+fn main() {
     dotenv().ok();
+    // FastEmbed reads its model cache from `HF_HOME` ahead of the folder
+    // Hatchdoor gives it, which split the download, the digest check and the
+    // load across two caches (#643). Hatchdoor keeps its models in its own
+    // models folder, so the variable is dropped here, while this is still the
+    // only thread and changing the environment is sound.
+    let ignored_hf_home = std::env::var_os("HF_HOME");
+    if ignored_hf_home.is_some() {
+        // SAFETY: no other thread exists yet: the Tokio runtime is built
+        // below, and neither `dotenv` nor anything before it starts one.
+        unsafe { std::env::remove_var("HF_HOME") };
+    }
     init_logging();
+    if let Some(path) = ignored_hf_home {
+        warn!(
+            hf_home = %path.to_string_lossy(),
+            "HF_HOME is set and ignored: Hatchdoor keeps its search models in its own models folder"
+        );
+    }
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("start the Tokio runtime")
+        .block_on(run())
+}
 
+async fn run() {
     let args: Vec<String> = std::env::args().collect();
     match parse_run_mode(&args) {
         RunMode::Serve => {
@@ -44,6 +69,12 @@ async fn main() {
             run_server().await
         }
         RunMode::PrefetchEmbedder => run_prefetch(),
+        // The model download the server runs and watches during setup
+        // (#642), never started by hand.
+        RunMode::FetchModel => std::process::exit(hatchdoor::model_setup::run_fetch_child(
+            &args[2..],
+            std::io::stdout(),
+        )),
         RunMode::Healthcheck => run_healthcheck(),
         RunMode::Unknown(flag) => {
             error!("Unknown flag: {flag}");
@@ -105,6 +136,16 @@ mod tests {
     }
 
     #[test]
+    fn cli_recognises_fetch_model_flag() {
+        let args = vec![
+            "hatchdoor".to_string(),
+            "--fetch-model".to_string(),
+            "nomic".to_string(),
+        ];
+        assert!(matches!(parse_run_mode(&args), RunMode::FetchModel));
+    }
+
+    #[test]
     fn cli_defaults_to_serve_mode() {
         let args = vec!["hatchdoor".to_string()];
         assert!(matches!(parse_run_mode(&args), RunMode::Serve));
@@ -124,10 +165,14 @@ mod tests {
     #[test]
     fn health_probe_reaches_an_ipv6_loopback_listener_when_available() {
         if let Err(error) = assert_health_probe_reaches_listener("::1") {
+            // A host without IPv6 answers in one of three ways; a kernel
+            // built or booted without it reports the address family itself
+            // as unsupported, which Rust has no `ErrorKind` for.
             if matches!(
                 error.kind(),
                 std::io::ErrorKind::AddrNotAvailable | std::io::ErrorKind::Unsupported
-            ) {
+            ) || error.raw_os_error() == Some(libc::EAFNOSUPPORT)
+            {
                 return;
             }
             panic!("IPv6 loopback listener failed unexpectedly: {error}");

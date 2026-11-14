@@ -31,8 +31,14 @@ type EventSourceListener = (event: MessageEvent<string>) => void;
 
 class MockEventSource {
   static instances: MockEventSource[] = [];
+  static readonly CONNECTING = 0;
+  static readonly OPEN = 1;
+  static readonly CLOSED = 2;
 
   readonly url: string;
+  /** Writable so a test can stand for a browser that gave up reconnecting
+   * before it emits `error`. */
+  readyState = MockEventSource.CONNECTING;
   private listeners = new Map<string, EventSourceListener[]>();
 
   constructor(url: string | URL) {
@@ -54,7 +60,9 @@ class MockEventSource {
     );
   }
 
-  close() {}
+  close() {
+    this.readyState = MockEventSource.CLOSED;
+  }
 
   emit(type: string, data: string) {
     const event = new MessageEvent(type, { data });

@@ -79,7 +79,10 @@ still tagged with a layer no marker claims), and disagreeing layer
 descriptions. Read-only to start; whether it becomes agent-callable as
 routine wiki maintenance, a Web UI diagnostics panel, or both is still open.
 
-_Horizon: unversioned ("at some point"). No implementation started._
+_Horizon: partly shipped in **v2.10.0**: the read-only MCP tool `find_link_problems`
+([#575](https://github.com/BatterWorks/Hatchdoor/issues/575)) pages through one Vault's
+broken or ambiguous note links, isolated notes and dead ends. Layer checks, a matching
+HTTP endpoint and a Web UI panel are still unversioned ("at some point")._
 
 ### Onboarding experience
 

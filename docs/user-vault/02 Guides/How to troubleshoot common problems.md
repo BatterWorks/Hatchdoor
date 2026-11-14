@@ -4,7 +4,7 @@ tags: [type/how-to, topic/troubleshooting]
 
 # How to troubleshoot common problems
 
-Find what you are seeing in the list below and jump to its section. Each section says what is going on, then how to fix it. None of these problems lose notes: your notes are plain files in a folder, and Hatchdoor refuses a change rather than half-make it.
+Find what you are seeing in the list below and jump to its section. Each section says what is going on, then how to fix it. Your notes are plain files in a folder. Read the reported error before changing files or permissions.
 
 - Hatchdoor stops right after starting, or the container keeps restarting: [[#Hatchdoor won't start]]
 - The browser says "Vaults Unavailable": [[#The workspace says "Vaults Unavailable"]]
@@ -21,15 +21,16 @@ Find what you are seeing in the list below and jump to its section. Each section
 - A Vault seems to have stopped syncing: [[#"Is this Vault still syncing on schedule?"]]
 - Search finds nothing, or the wrong notes: [[#Search returns nothing, or not what you expected]]
 - A saved query shows a message instead of a table: [[#A saved query shows a message instead of a table]]
+- Hatchdoor shows an empty box or an error inside a dashboard or a Home Assistant panel: [[#Hatchdoor won't show inside another page]]
 
 ## Hatchdoor won't start
 
-On the very first start this is expected. Hatchdoor refuses to run until the browser has a password (the web token), so it makes one, prints it, and stops. The log line starts `HOST=0.0.0.0 is non-loopback but HATCHDOOR_WEB_BEARER_TOKEN is unset: refusing to start unauthenticated on a public interface` and ends with the exact line to paste into `.env`.
+On the very first start this is expected. Hatchdoor refuses to run until the browser has a password (the web token), so it makes one, saves it in its state folder, and stops. The log line starts `HOST=0.0.0.0 is non-loopback but HATCHDOOR_WEB_BEARER_TOKEN is unset: refusing to start unauthenticated on a public interface` and names the file that holds the token, `/data/state/new-web-token.env` inside the container.
 
-Fix: show the newest token with `docker compose logs hatchdoor | grep HATCHDOOR_WEB_BEARER_TOKEN | tail -1`, paste the `HATCHDOOR_WEB_BEARER_TOKEN=...` part into `.env`, then run `docker compose up -d` again.
+Fix: with the shipped `compose.yaml` that file is `data/state/new-web-token.env` next to it. Add its line to `.env` with `sudo cat data/state/new-web-token.env >> .env`, then run `docker compose up -d` again.
 
-> [!warning]
-> Docker restarts Hatchdoor after each refusal, and every attempt prints a different token. Always take the last one in the log, not the first you see.
+> [!note]
+> Docker restarts Hatchdoor after each refusal. Every attempt keeps the token already saved in the file, so it does not matter when you copy it. If the log says Hatchdoor could not save a token, the state folder is not writable by user `65532`: see step 3 of [[Install Hatchdoor with Docker Compose]], or set any long random value, such as the output of `openssl rand -hex 32`, as `HATCHDOOR_WEB_BEARER_TOKEN` in `.env` yourself.
 
 If the log says `HATCHDOOR_MCP_ENABLED is set but HATCHDOOR_MCP_BEARER_TOKEN is missing`, you turned on agent access in `.env` without giving it a password. Either add `HATCHDOOR_MCP_BEARER_TOKEN` to `.env`, or remove `HATCHDOOR_MCP_ENABLED` from `.env` and turn agent access on in **Settings** instead (see [[Connect your agent]]), which is the usual way.
 
@@ -53,14 +54,14 @@ First check that agent access is on in **Settings** → **Agent access (MCP)**, 
 
 - **`404 Not Found` on `/mcp`, with an empty body**: MCP is disabled. Turn on **Let assistants connect (MCP)** in **Settings** → **Agent access (MCP)**. Read the body before acting on a `404`: an empty body means this, and a body with text means the next entry.
 - **`404 Not Found` whose body reads `Not Found: Session not found`**: MCP is on and the client got in, but the session it is quoting doesn't exist. Either it was never issued, or it was issued before Hatchdoor last restarted. The remedy belongs to the client: it has to run `initialize` again and use the session that comes back.
-- **`422 Unprocessable Entity`, "Unexpected message, expect initialize request"**: the client sent an ordinary call with no session. The message says what the server expected and not what to do. The remedy is the one above: run `initialize` again.
+- **`400 Bad Request`, "Bad Request: Session ID is required"**: the client sent an ordinary call with no session. The remedy is the one above: run `initialize` again.
 - **`401`, JSON-RPC error `-32001`, "Missing or invalid MCP bearer token"**: the client's `Authorization: Bearer <token>` header doesn't match the current MCP password. Generate a new one or copy it again from Settings. The client and Settings must hold the same value.
 - **A write tool (`create_note`, `edit_vault`, etc.) returns "MCP write tools are disabled by HATCHDOOR_MCP_WRITE_ENABLED"**: MCP is connected and reading fine, but **Let assistants change notes** is off. That switch is separate from the one that lets an agent connect. [[Search and change notes with your agent]] explains why.
 
-A sixth is less common. **`403 Forbidden`, "Forbidden MCP origin"**: the request carried an `Origin` header that is not on the allow-list (`HATCHDOOR_MCP_ALLOWED_ORIGINS`). This normally affects a browser-based MCP client and not a command-line agent.
+Two more are less common. **`403 Forbidden`, "Forbidden MCP origin"**: the request carried an `Origin` header that is not on the allow-list (`HATCHDOOR_MCP_ALLOWED_ORIGINS`). This normally affects a browser-based MCP client and not a command-line agent. **`429 Too Many Requests` on `initialize`**: the MCP password already holds 32 open sessions, or opened 60 in the last minute. Something is reconnecting in a loop, or many agents share the password. Sessions free up as their agents close them or go quiet for five minutes; the `Retry-After` header says when to try again.
 
 > [!note]
-> MCP sessions are held in memory only, so restarting Hatchdoor ends every one of them. A client holding a session finds out on its next call, as the `Session not found` or the `422` above, and has to re-initialize. No Hatchdoor setting keeps sessions across a restart, so restart or reconnect a client that keeps retrying the same failing call. Clients that use no session are unaffected.
+> MCP sessions are held in memory only, so restarting Hatchdoor ends every one of them. A client holding a session finds out on its next call, as the `Session not found` or the `400` above, and has to re-initialize. No Hatchdoor setting keeps sessions across a restart, so restart or reconnect a client that keeps retrying the same failing call. Clients that use no session are unaffected.
 
 ## An agent can't download or upload a file
 
@@ -77,7 +78,13 @@ If the agent cannot reach the link's address at all, or a download saves a small
 
 The model downloads from Hugging Face, so this is almost always a network problem between the computer running Hatchdoor and huggingface.co. In the browser, the search panel shows **Could Not Load** with the reason, such as a fetch error for one model file, and a **Retry setup** button. Fix whatever blocked the download, then press **Retry setup**. While Keyword results are on screen, that block shrinks to one line saying the search model could not be loaded, with no button. Clear the search box or switch **Mode** to **Semantic** to get the block and **Retry setup** back.
 
-An agent sees the same through `get_model_setup_status`, and `GET /api/startup-status` reports `"failed"` with the same message. `POST /api/model/retry` starts the download again.
+An agent sees the same through `get_model_setup_status`. On an instance whose model was already chosen, its other tools answer that setup failed and ask for **Retry setup** in the web app, which keeps that model, and an agent that connects then reads the same in its opening instructions. `GET /api/startup-status` reports `"failed"` with the same message. `POST /api/model/retry` starts the download again.
+
+A download that stops receiving data, as behind a Wi-Fi login page, a dropped connection or a proxy that hangs, is stopped after 60 seconds, and one still running after two hours is stopped too. The reason then says the download stalled or did not finish in time. **Retry setup** continues from the files already fetched, so a slow connection gets there in a few tries. While a download is moving, `GET /api/startup-status` shows `"step": "download"` with the bytes so far, and `"step": "load"` once the files are in and the model is loading, which can take many minutes on a slow disk.
+
+If pressing **Accept terms and set up Gemma**, **Use Nomic instead** or **Retry setup** shows a red message instead of starting the download, the message says why. "Model setup could not be started." usually means the models folder is full or read-only, and the log has the exact error. "Could not reach Hatchdoor" means the request never arrived: check the connection, then press the button again.
+
+Before every load, Hatchdoor checks each model file against a fingerprint it ships with. A file that does not match, because a sync tool, a restore or a hand edit changed it, is deleted and downloaded again. A models folder that was damaged therefore shows up as a download, and as a failed setup if Hugging Face cannot be reached.
 
 Two related, more specific errors:
 
@@ -90,7 +97,9 @@ Work down this list. Most of the time it is the first or second item.
 
 - **The Vault is paused.** A paused Vault disappears from the sidebar and search but keeps all its notes. Look for it in **Settings**, where every Vault is listed, and resume it there. See [[How to manage multiple Vaults#Pause and resume a Vault]].
 - **The Vault is still indexing.** A newly added Vault, or one with many new notes, takes a while to read. Notes appear in the sidebar first, and search by meaning catches up after. See the next section.
-- **The file is not a note.** Only files ending in `.md` are notes. Hidden folders such as `.obsidian`, `.trash` and `.hatchdoor-trash` are left out, as is anything matching the Vault's **Ignore these files and folders** setting.
+- **The file is not a note.** Only files ending in `.md` are notes, in any case, so `Report.MD` counts. Hidden folders such as `.git`, `.obsidian`, `.trash` and `.hatchdoor-trash` are left out, as is anything matching the Vault's **Ignore these files and folders** setting. When a folder holds both `Report.md` and `Report.MD`, only `Report.md` is listed.
+- **Hatchdoor may not open its folder, or its name is not valid UTF-8.** A folder Hatchdoor's user has no permission to read is skipped, and so is a file or folder whose name is not valid UTF-8 text, such as one copied from an old system in another encoding. The server log names each one with `Skipping`. Give Hatchdoor's user read access to the folder, or rename the file. A note whose *contents* are not UTF-8 is still listed and found by search, but opening it answers `note_unreadable`: re-save it as UTF-8.
+- **The note is larger than 8 MiB.** Hatchdoor lists it but will not open or edit it, nor read it for search: an agent's `get_note` is refused with `note_too_large`, an edit, move or delete with `invalid_write_input`, and the server log names the note each time it indexes. Split it into smaller notes in another editor, or move or delete it from your file manager.
 - **The note is in a layer.** A folder with a `.hatchdoor-layer` file in it is left out of ordinary search on purpose. Its notes still appear in the sidebar. See [[The layer system]].
 - **The note is in a folder Hatchdoor cannot see.** Hatchdoor only sees the folders shared with it at install time. See [[Connect your first Vault#Add a folder Hatchdoor cannot see yet]].
 - **You edited it outside Hatchdoor a moment ago.** An edit made in another app can take a few seconds to show up, or about a minute when your notes are in a Windows folder used through Docker Desktop.
@@ -117,15 +126,17 @@ These are normal, not faults:
 
 Anything reporting `unavailable` carries a matching error field (`activation_error`, `search_error`, `git_error` or `watcher_error`) with an error code and a message. Read it before guessing at a cause. [[Vault lifecycle states]] explains every value in depth.
 
+If the error names a damaged SQLite cache, Hatchdoor quarantines it and rebuilds every active Vault from Markdown automatically, without changing the note files. `cache_rebuilding` means that rebuild has been queued; `cache_recovery_failed` means recovery itself failed and is being retried. Check the message for a permissions or disk-space problem. The quarantined files stay beside the cache with `.corrupt-...` in their names.
+
 ## Permission denied reading or writing the Vault
 
 Hatchdoor runs as its own restricted user, number `65532`, not as you. Your notes folder has to be readable by that user, and writable too if you want to edit notes in the browser or let an agent change them. A folder only your own account can open shows up as this error.
 
-In detail: `local_content` reports `unavailable` with an error code of `vault_path_unreadable` or `vault_path_unavailable`, and the message includes the system's own error, such as `Permission denied (os error 13)`. Give user `65532` access to the folder, for example with `chown` or `chmod` on Linux, as in step 3 of [[Install Hatchdoor with Docker Compose]], then press **Try again** on the Vault's page.
+In detail: `local_content` reports `unavailable` with an error code of `vault_path_unreadable` or `vault_path_unavailable`, and the message includes the system's own error, such as `Permission denied (os error 13)`. Give user `65532` access to the folder, for example with `chown` or `chmod` on Linux, as in step 3 of [[Install Hatchdoor with Docker Compose]], then press **Try again** on the Vault's page. If you don't, Hatchdoor looks at the folder again by itself within a minute.
 
-If the message says `No such file or directory (os error 2)` instead, the folder is not there at all, as seen from inside the container: it was moved or renamed, or the mount in `compose.yaml` no longer points at it. Put the folder back, or fix the mount, then run `docker compose up -d` so Hatchdoor starts again with the folder in place.
+If the message says `No such file or directory (os error 2)` instead, the folder is not there at all, as seen from inside the container: it was moved or renamed, or the mount in `compose.yaml` no longer points at it. If the folder was moved, put it back and press **Try again**, or wait a minute for Hatchdoor to find it. If the mount is wrong, fix it in `compose.yaml` and run `docker compose up -d`, because a running container cannot see a new mount. While the folder is missing, the Vault shows nothing, not even notes Hatchdoor read before it went away.
 
-If you can read and search notes but the edit controls are missing, `local_content` reports `read_only`: user `65532` can read the folder but not write to it. That is a read-only Vault and not an error. Give that user write access the same way if you want to edit.
+If you can read and search notes but the edit controls are missing, `local_content` reports `read_only`: user `65532` can read the folder but not write to it. That is a read-only Vault and not an error. Give that user write access the same way if you want to edit. The edit controls come back within a minute, and a folder made read-only while Hatchdoor runs turns read-only on screen just as quickly.
 
 ## Editing a note fails but creating one works
 
@@ -157,18 +168,25 @@ One failure deserves its own treatment: `write_recovery_required`. It means the 
 
 Read the failure from the Vault's Git console first. It is headed **Sync** on a Vault with a remote and **History** on one without, and its button reads **Sync now** or **Commit now** to match. Each failure has its own fix:
 
-- **Authentication failed**: the stored HTTPS token was rejected by the remote. Enter it again under **Sign-in** on the Vault's page. See [[How to set up a Git-backed Vault]].
+- **Authentication failed** (`managed_git_authentication_failed`): the remote rejected the stored HTTPS token, with a 401 or a 403. Hatchdoor sends the token once per attempt and then stops: it does not retry on its own, so an expired token never turns into a stream of failed logins your Git host might block. Save a new token under **Sign-in** on the Vault's page, then press **Try again**. See [[How to set up a Git-backed Vault]]. A remote that redirects to a different host is reported the same way, because Hatchdoor sends the token only to the host in the Vault's repository URL. Put the address the redirect points at in the URL instead.
+- **Branch not found** (`managed_git_branch_not_found`): the remote has no branch with the name set on the Vault, often a typo such as `mian`. Hatchdoor tries once and then waits rather than downloading the repository again on every retry. Correct the branch name, or create the branch on your Git host, then press **Try again**. A name Git itself does not allow, such as `a..b`, is refused when you save the Vault.
 - **Clone/fetch failed, or the remote is unreachable**: a network or DNS problem, or the repository URL itself is wrong. Check that the URL resolves from the machine the container runs on, which may differ from your own. A remote that stops answering is reported the same way: Hatchdoor gives up after 15 seconds trying to connect or 120 seconds without data, and retries on its own. An interrupted clone needs no cleanup: the next attempt removes what it left behind and clones again.
 - **The checkout could not be installed**: the clone itself worked, but Hatchdoor could not move it into place. The message says why, with the underlying error. A common cause is a filesystem that cannot swap two files in one step, described in [[Install Hatchdoor with Docker Compose#If your notes are in a Windows folder, on ZFS or on a FUSE mount]].
 - **The push was rejected by the remote** (`managed_git_push_rejected`): Hatchdoor reached the remote and sent its commits, and the remote refused them, because of a protected branch, a server-side hook or a quota. The message carries the remote's own reason. Nothing landed on the remote, and nothing local was lost. Change the remote's rules or point the Vault at a branch it may push to, then press **Try again**.
 - **A conflict with the remote** (`managed_git_conflict`): the same notes changed on both sides. Hatchdoor puts the checkout back exactly as it was before the merge, with no conflict markers left in your notes, and lists the conflicting files. The failure stays on the Vault's status while Hatchdoor keeps committing your saves locally, until a sync succeeds. Hatchdoor never chooses a winner. Publish its side to a branch on the remote and merge it there. See [[#Resolving a sync conflict]].
+- **A conflict over a note Git ignores** (also `managed_git_conflict`, on a Two-way or Pull-only Vault): the listed files sit where the checkout's `.gitignore`, `.git/info/exclude` or `core.excludesFile` says Git should not look. Hatchdoor writes notes there but never commits them, so they exist only on the server. The remote now holds a file at the same path, or a file named like the ignored folder, or a folder named like the ignored file, and taking it would destroy your note, so the sync stops before writing anything. Publishing a recovery branch does not help here, because the ignored note is never committed to it. Move or rename the listed notes out of the remote's way, or remove the remote's file, or, on a Two-way Vault, stop ignoring that path so Hatchdoor commits the note and the conflict becomes an ordinary one, then press **Try again**.
 - **Files changed by hand in the checkout** (`managed_git_dirty_working_copy`, shown as **sync stopped** in the sidebar). Files in the Vault's repository changed outside Hatchdoor where it will not commit them for you: outside the Vault's own folder, or any local change at all on a Pull-only Vault. The Vault's page lists them. Your notes keep saving to disk. Only commit and sync wait. Commit, revert or remove those files with Git in that checkout, then press **Try again**.
 - **An unfinished merge in the checkout** (`managed_git_operation_in_progress`): the checkout is part-way through a merge (or a rebase, cherry-pick or revert), usually because someone is resolving one by hand or Hatchdoor was stopped mid-sync. Hatchdoor refuses to commit or sync it, because doing so would record conflict markers, and leaves it exactly as found. The Vault's page lists the files that still have conflicts. Finish or abort the operation with Git in that checkout (`git merge --abort` undoes an interrupted merge), then press **Try again**. A Vault using **Local history** reports the same situation as `existing_git_local_history_manual_recovery_required` and needs the same fix.
+- **Files with unreadable names** (`managed_git_unsupported_file_names`, or `existing_git_local_history_unsupported_file_names` for **Local history**): a file in the Vault has a name that is not valid UTF-8 text, usually one copied from an old system using another character set. Hatchdoor commits and syncs everything else and leaves only those files out, and the Vault's page lists them with each unreadable byte written as `\xNN`, as in `caf\xe9.md`. They are still on disk. Until they are renamed, the Vault reports this after every commit, so Hatchdoor commits your other saves at most once every five minutes rather than after each one. Rename them, then press **Try again**.
+- **The repository is missing** (`existing_git_local_history_repository_missing`, on a **Local history** Vault): the Vault's folder, or the checkout it sits in, no longer has a usable `.git`: it is gone, perhaps after a restore that left it out, or empty, or a `.git` file pointing at a folder that no longer exists. Hatchdoor commits only into the Vault's own repository, so it commits nothing, even when a repository further up holds the folder, and does not retry. Your notes are untouched. Put the `.git` folder back from a backup, or run `git init` in that folder to start a new history, then press **Try again**.
+- **Changing the repository refused** (`checkout_set_aside_failed`, "Nothing changed"): a new repository URL, branch or folder on a managed checkout first commits the old checkout's notes and moves it aside, and that failed. The message gives the reason, most often files changed by hand outside the Vault folder, which a Vault commit never takes. Nothing moved and the Vault keeps its old setup. Clear the reason the message names, then save again.
 - **Local commits ahead on a Pull-only Vault**: the checkout has commits the remote doesn't, and a Pull-only Vault never pushes. Hatchdoor did not make them: such a Vault refuses every write, so you committed them yourself, by hand or before you switched the Vault to Pull-only. Hatchdoor reports that local history and the remote have diverged, and it neither pushes your commits nor discards them. Switch the Vault to **Two-way** if you want them pushed. A Pull-only Vault is meant to be read from, not committed to.
 
 ### Resolving a sync conflict
 
 When a sync stops on a conflict, Hatchdoor's side exists only in its own checkout on the server. You resolve it on your Git host instead, from a branch Hatchdoor publishes there.
+
+If the listed files are notes in a path Git ignores, a recovery branch cannot help, because those notes are never committed to it. See **A conflict over a note Git ignores** under [[#Git sync is failing]].
 
 1. On the Vault's page, press **Publish my side to a branch**. Hatchdoor commits any pending saves and pushes them to `hatchdoor-recovery/<branch>/<vault id>` on the Vault's remote. The page shows the branch name with a **Copy** button and, for an HTTPS remote, a link to it.
 2. On your Git host, or in any clone, merge that branch into the Vault's own branch and resolve the listed files there, the way you would any other merge.
@@ -210,6 +228,8 @@ In the browser, switch **Mode** to **Keyword** when you are looking for an exact
 
 If a search is what you want, remember that search looks only at the **default surface** unless you ask for more. If the note you expected lives under a [[The layer system|layer]], it won't appear in an ordinary search. [[How to organize a Vault with layers]] explains how to search across layers on purpose. If a Vault's `search` status is `browsable` rather than `ready` (see above), semantic search over it isn't available yet, but keyword search and browsing already work.
 
+A keyword search that reports a time limit exceeded its 750 ms SQLite budget. Try fewer terms. Repeating a word does not help: Keyword mode ignores duplicates, uses only the first 8,192 bytes and stops at 64 distinct terms. `get_frontmatter` reporting `invalid_frontmatter` can also mean the YAML block exceeds 16,384 bytes; shorten it in the note itself. The note remains readable.
+
 ## A saved query shows a message instead of a table
 
 A fenced `base` block is drawn as a table only when Hatchdoor understands all of it. It supports part of Obsidian's Bases syntax, listed in [[Supported Markdown reference]], and refuses the rest, because a filter applied halfway gives a wrong list that looks like a right one.
@@ -223,6 +243,14 @@ A fenced `base` block is drawn as a table only when Hatchdoor understands all of
 - **"Showing the first N notes"** means rows were held back by the `limit` the block sets. **"Truncated:"** means Hatchdoor's own ceiling of 500 rows held them back and more notes qualify.
 
 If a table looks out of date right after you edit another note, the Vault's index may still be catching up (see the `search` status above). The saved query reads its rows from that index, and it is worked out again every time you open the note.
+
+## Hatchdoor won't show inside another page
+
+Hatchdoor refuses to be shown inside a frame on another page, such as a dashboard tile (Homarr, Heimdall), a Home Assistant iframe panel or a web page of your own. The browser shows an empty box or a message such as "refused to connect" in its place. This is on purpose, and there is no setting to turn it off.
+
+The reason is a trick called clickjacking. A malicious page can load your Hatchdoor in an invisible frame and line up its buttons under something you think you are clicking, so you change or delete notes without seeing it. That works best on an instance with no web token, such as one reached on `127.0.0.1`, which a page in your own browser can reach too. Every answer Hatchdoor sends now carries `X-Frame-Options: DENY` and `Content-Security-Policy: frame-ancestors 'none'`, which tell the browser never to draw it inside another page.
+
+Fix: open Hatchdoor in its own tab or window, or make the dashboard tile a link instead of an embedded frame. On a phone or tablet, installing it as an app from the browser menu gives it its own window.
 
 ---
 

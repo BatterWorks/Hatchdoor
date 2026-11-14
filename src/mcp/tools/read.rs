@@ -107,6 +107,17 @@ struct ScopeArgs {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct LinkFindingsArgs {
+    vault_id: String,
+    kind: crate::vault_read::LinkFindingKind,
+    #[serde(default)]
+    limit: Option<usize>,
+    #[serde(default)]
+    cursor: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SearchArgs {
     scope: String,
     query: String,
@@ -463,6 +474,8 @@ pub(super) async fn get_tree_tool(
         folder: args.folder,
         max_depth: clamp_tree_max_depth(args.max_depth),
         include_notes: args.include_notes,
+        // An agent gets no canvases in its tree (ADR-53).
+        include_files: false,
     };
     match VaultReads::new(&state)
         .read(move |core| core.trees(scope, tree_scope))
@@ -528,6 +541,23 @@ where
         .await
     {
         Ok(projection) => Ok(tool_result(&projection)),
+        Err(error) => read_failure(error),
+    }
+}
+
+pub(super) async fn find_link_problems_tool(
+    state: AppState,
+    arguments: Value,
+) -> Result<Value, JsonRpcFailure> {
+    let args: LinkFindingsArgs = parse("find_link_problems", arguments)?;
+    let vault_id = scoped_vault_id(&args.vault_id)?;
+    match VaultReads::new(&state)
+        .read(move |core| {
+            core.find_link_problems(vault_id, args.kind, args.limit, args.cursor.as_deref())
+        })
+        .await
+    {
+        Ok(projection) => Ok(tool_result::<results::FindLinkProblemsResult>(&projection)),
         Err(error) => read_failure(error),
     }
 }
@@ -685,16 +715,21 @@ struct FetchedAttachment {
 /// contained-resource seam — the same Vault gate, containment check, extension
 /// allow-list, and browse surface the `/assets/{*path}` route answers on, so a
 /// path one surface refuses is refused identically by the other.
+///
+/// `max_base64_bytes` is the base64 cap for this call: the config's
+/// [`McpConfig::base64_limit`] standalone, and less inside a `batch` whose
+/// reply has already spent part of its budget (#632). A file over it is
+/// refused with `attachment_too_large_for_base64` before any byte is read.
 pub(super) async fn get_attachment_tool(
     state: AppState,
     arguments: Value,
     config: &McpConfig,
+    max_base64_bytes: u64,
 ) -> Result<Value, JsonRpcFailure> {
     let args: GetAttachmentArgs = parse("get_attachment", arguments)?;
     let vault_id = scoped_vault_id(&args.vault_id)?;
     let relative_path = super::non_empty_argument("relative_path", args.relative_path)?;
     let encoding = args.encoding.unwrap_or(AttachmentEncoding::Url);
-    let max_base64_bytes = config.max_base64_bytes;
 
     // Resolution, the size check, and the read are all blocking filesystem
     // work; they happen in one offloaded trip rather than on a tokio worker.
@@ -846,7 +881,7 @@ pub(super) async fn attachment_import_config_tool(
             results::AttachmentImportMethod::McpBase64 {
                 tool: "import_attachment",
                 role: "fallback",
-                max_bytes: config.max_base64_bytes,
+                max_bytes: config.base64_limit(),
                 recommended_for: "fallback when an out-of-band HTTP request is not possible; universal, works with any MCP client, but size-limited",
                 usage: "Call import_attachment with this vault_id, base64-encoded `content`, and a Vault-relative `target_relative_path`.",
             },
@@ -999,13 +1034,19 @@ pub(super) fn search_docs_tool(arguments: Value) -> Result<Value, JsonRpcFailure
 /// without a `vault_id`: the shared registry generates the immutable ID
 /// atomically when the expected registry revision commits; every control of
 /// an existing Vault takes exactly one `vault_id`.
+///
+/// `create_vault` and `edit_vault` reach the core through
+/// `within_vault_mount`: an agent may name a folder on this machine only
+/// inside `VAULT_PATH` (ADR-54).
 pub(super) async fn create_vault_tool(
     state: AppState,
     arguments: Value,
 ) -> Result<Value, JsonRpcFailure> {
     let request: CreateVaultRequest = parse("create_vault", arguments)?;
     management_result::<results::CreateVaultResult>(
-        VaultCollectionManagement::new(&state).create(request).await,
+        VaultCollectionManagement::within_vault_mount(&state)
+            .create(request)
+            .await,
     )
 }
 
@@ -1026,7 +1067,7 @@ pub(super) async fn edit_vault_tool(
         archive_folder: args.archive_folder,
         commit_identity: args.commit_identity,
     };
-    let core = VaultCollectionManagement::new(&state);
+    let core = VaultCollectionManagement::within_vault_mount(&state);
     let result = match management_vault_id(&args.vault_id) {
         Ok(vault_id) => core.edit(vault_id, request).await,
         Err(error) => Err(error),
@@ -1099,9 +1140,11 @@ pub(super) async fn retry_vault_tool(
 ) -> Result<Value, JsonRpcFailure> {
     let args: VaultIdArgs = parse("retry_vault", arguments)?;
     let core = VaultCollectionManagement::new(&state);
-    management_result::<results::RetryVaultResult>(
-        management_vault_id(&args.vault_id).and_then(|vault_id| core.retry(vault_id)),
-    )
+    let result = match management_vault_id(&args.vault_id) {
+        Ok(vault_id) => core.retry(vault_id).await,
+        Err(error) => Err(error),
+    };
+    management_result::<results::RetryVaultResult>(result)
 }
 
 /// Admits one recovery-branch publish (ADR-30); the outcome is read back
@@ -1129,9 +1172,11 @@ pub(super) async fn refresh_vault_tool(
 ) -> Result<Value, JsonRpcFailure> {
     let args: VaultIdArgs = parse("refresh_vault", arguments)?;
     let core = VaultCollectionManagement::new(&state);
-    management_result::<results::RefreshVaultResult>(
-        management_vault_id(&args.vault_id).and_then(|vault_id| core.refresh(vault_id)),
-    )
+    let result = match management_vault_id(&args.vault_id) {
+        Ok(vault_id) => core.refresh(vault_id).await,
+        Err(error) => Err(error),
+    };
+    management_result::<results::RefreshVaultResult>(result)
 }
 
 #[derive(Debug, Deserialize)]
@@ -1342,9 +1387,10 @@ pub(super) fn read_tools_list() -> Vec<Value> {
         ),
         json!({"name":"get_frontmatter", "description":"Read one exact Note's frontmatter metadata — tags, aliases, and properties — from its authoritative Vault Markdown directory, without returning the Markdown body. A note without a frontmatter block returns an empty/default projection rather than an error. Also returns the note's content_hash — the same string get_note reports — so a hash-protected write can be prepared without reading the body.", "inputSchema":{"type":"object","properties":{"vault_id":vault_id_schema(),"slug":{"type":"string","minLength":1}},"required":["vault_id","slug"],"additionalProperties":false},"annotations":read_only_tool_annotations()}),
         json!({"name":"list_note_attachments", "description":"List the existing attachments one Note references, without returning the Note's full content. Every non-Markdown file the Note points at counts, not only the types get_attachment can fetch back.", "inputSchema":{"type":"object","properties":{"vault_id":vault_id_schema(),"slug":{"type":"string","minLength":1}},"required":["vault_id","slug"],"additionalProperties":false},"annotations":read_only_tool_annotations()}),
-        json!({"name":"get_attachment", "description":"Fetch one attachment's bytes, addressed by relative_path exactly as list_note_attachments reports it. Fetchable types are narrower than the set Hatchdoor manages: png, jpg, jpeg, gif, webp, svg, avif, bmp and pdf. A file of any other type - video, audio, data, an archive - is listed, moved, renamed and deleted like any other attachment but is refused here, so do not assume every path list_note_attachments returns can be fetched. encoding \"url\" (the default) returns an absolute HTTP download_url built on the server's configured public address if one is set, else on the address the client reached this MCP endpoint on, as reported by a reverse proxy's Forwarded or X-Forwarded-Proto/X-Forwarded-Host headers; encoding \"base64\" returns inline base64 content instead, for a client that cannot make an out-of-band HTTP request or cannot obtain the download URL's own credential, bounded by the same size limit as import_attachment's base64 path.", "inputSchema":{"type":"object","properties":{"vault_id":vault_id_schema(),"relative_path":{"type":"string","minLength":1},"encoding":{"type":"string","enum":["url","base64"],"default":"url"}},"required":["vault_id","relative_path"],"additionalProperties":false},"annotations":read_only_tool_annotations()}),
+        json!({"name":"get_attachment", "description":"Fetch one attachment's bytes, addressed by relative_path exactly as list_note_attachments reports it. Fetchable types are narrower than the set Hatchdoor manages: png, jpg, jpeg, gif, webp, svg, avif, bmp, pdf and canvas (an Obsidian canvas, returned as its JSON text). A file of any other type - video, audio, data, an archive - is listed, moved, renamed and deleted like any other attachment but is refused here, so do not assume every path list_note_attachments returns can be fetched. encoding \"url\" (the default) returns an absolute HTTP download_url built on the server's configured public address if one is set, else on the address the client reached this MCP endpoint on, as reported by a reverse proxy's Forwarded or X-Forwarded-Proto/X-Forwarded-Host headers; encoding \"base64\" returns inline base64 content instead, for a client that cannot make an out-of-band HTTP request or cannot obtain the download URL's own credential, bounded by the same size limit as import_attachment's base64 path.", "inputSchema":{"type":"object","properties":{"vault_id":vault_id_schema(),"relative_path":{"type":"string","minLength":1},"encoding":{"type":"string","enum":["url","base64"],"default":"url"}},"required":["vault_id","relative_path"],"additionalProperties":false},"annotations":read_only_tool_annotations()}),
         json!({"name":"get_attachment_import_config", "description":"Report how to upload an attachment into one Vault: the available methods (the HTTP endpoint and the base64 import_attachment tool), their size limits in bytes, the allowed file extensions, and whether uploads are currently possible at all. Call before uploading an attachment to that Vault.", "inputSchema":{"type":"object","properties":{"vault_id":vault_id_schema()},"required":["vault_id"],"additionalProperties":false},"annotations":read_only_tool_annotations()}),
         query_notes_tool_schema(),
+        find_link_problems_tool_schema(),
         find_text_tool_schema(),
         evaluate_saved_query_tool_schema(),
         json!({"name":"recently_modified", "description":collection_description("List recently modified Notes for one Vault or all enabled Vaults."), "inputSchema":{"type":"object","properties":{"scope":scope_schema(),"limit":{"type":"integer","minimum":1,"maximum":25,"default":5}},"required":["scope"],"additionalProperties":false},"annotations":read_only_tool_annotations()}),
@@ -1368,7 +1414,7 @@ pub(super) fn management_tools_list() -> Vec<Value> {
     vec![
         json!({
             "name": "create_vault",
-            "description": "Create a Vault definition with the shared revisioned collection contract. Read expected_registry_revision from list_vaults first; the create is rejected if the registry moved since. The registry assigns the immutable Vault ID after a successful create; use list_vaults to discover it.",
+            "description": "Create a Vault definition with the shared revisioned collection contract. Read expected_registry_revision from list_vaults first; the create is rejected if the registry moved since. The registry assigns the immutable Vault ID after a successful create; use list_vaults to discover it. A local or existing_git source must name a folder inside the Vault mount (VAULT_PATH), after symlinks and .. are resolved; any other folder is refused with vault_path_outside_mount, which is not retryable: only the maintainer can add such a folder, from the web app. A managed_git source is not affected.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1388,7 +1434,7 @@ pub(super) fn management_tools_list() -> Vec<Value> {
         }),
         json!({
             "name": "edit_vault",
-            "description": "Edit exactly one Vault definition with optimistic registry revision control. This replaces the definition wholesale rather than patching named fields: read the Vault from list_vaults, change what you mean to change, and send the rest back unchanged. name and source are required for that reason, and an omitted exclude_patterns, archive_folder, or commit_identity clears the stored value rather than preserving it. The one exception is https_credentials, whose explicit keep|remove|replace action exists so a secret never has to be resent to survive an edit.",
+            "description": "Edit exactly one Vault definition with optimistic registry revision control. This replaces the definition wholesale rather than patching named fields: read the Vault from list_vaults, change what you mean to change, and send the rest back unchanged. name and source are required for that reason, and an omitted exclude_patterns, archive_folder, or commit_identity clears the stored value rather than preserving it. The one exception is https_credentials, whose explicit keep|remove|replace action exists so a secret never has to be resent to survive an edit. An edit that moves a local or existing_git Vault to another folder must move it inside the Vault mount (VAULT_PATH), or it is refused with vault_path_outside_mount; a Vault the maintainer added outside the mount keeps its folder and stays editable in every other field, so send its path back unchanged.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1421,7 +1467,7 @@ pub(super) fn management_tools_list() -> Vec<Value> {
             "Disconnect exactly one Vault definition without deleting local files, checkouts, Git history, or credentials outside its registry record.",
         ),
         json!({"name":"sync_vault","description":"Request immediate managed-Git synchronization for exactly one eligible Vault.","inputSchema":{"type":"object","properties":{"vault_id":vault_id_schema()},"required":["vault_id"],"additionalProperties":false},"annotations":super::write_tool_annotations(false, true)}),
-        json!({"name":"retry_vault","description":"Retry an admitted managed-Git operation for exactly one eligible Vault.","inputSchema":{"type":"object","properties":{"vault_id":vault_id_schema()},"required":["vault_id"],"additionalProperties":false},"annotations":super::write_tool_annotations(false, true)}),
+        json!({"name":"retry_vault","description":"Retry exactly one Vault's failed operation now. On a Vault with Git it retries the sync or commit. On a plain local folder Vault it looks at the folder again: one that can be read again becomes active and is indexed, and one that still cannot is refused with retryable vault_unavailable and the reason.","inputSchema":{"type":"object","properties":{"vault_id":vault_id_schema()},"required":["vault_id"],"additionalProperties":false},"annotations":super::write_tool_annotations(false, true)}),
         json!({"name":"publish_recovery_branch","description":"Publish exactly one Two-way Vault's side of a sync conflict to its recovery branch, hatchdoor-recovery/<branch>/<vault_id> on the Vault's remote, so the conflict can be resolved on the Git host or in another clone. Only allowed while the Vault's capabilities.publish_recovery is true, which means its git_error is managed_git_conflict. Pending saves are committed first. The push only ever fast-forwards the recovery branch: it never force-pushes, never touches the configured branch, and never deletes a branch. If someone added commits to the recovery branch, the publish is refused rather than overwriting them. Returns once admitted (schedule queued, or coalesced with a request already pending); read the outcome from list_vaults, whose recovery_branch names the branch and the published commit, or carries an error explaining a refusal. Once the configured branch contains the resolution, the Vault's next sync resumes on its own and recovery_branch clears; the branch itself stays on the remote.","inputSchema":{"type":"object","properties":{"vault_id":vault_id_schema()},"required":["vault_id"],"additionalProperties":false},"annotations":super::write_tool_annotations(false, true)}),
         json!({"name":"refresh_vault","description":"Request one Vault's next index turn: Hatchdoor re-scans that Vault's Markdown and republishes the snapshot get_tree, get_graph, get_stats, recently_modified, search_notes and query_notes project from. Call this when one of those reads comes back with partial: true and a stale participant for the Vault. This is not sync_vault: it contacts no Git remote and works on any enabled Vault with usable local Markdown. It returns as soon as the turn is admitted, not when the turn finishes — schedule is queued, or coalesced when a turn for that Vault is already pending — so observe the outcome by re-reading a collection read's freshness fields rather than by this response.","inputSchema":{"type":"object","properties":{"vault_id":vault_id_schema()},"required":["vault_id"],"additionalProperties":false},"annotations":super::write_tool_annotations(false, true)}),
     ]
@@ -1487,6 +1533,26 @@ fn get_note_section_tool_schema() -> Value {
                 }
             },
             "required": ["vault_id", "slug", "headings"],
+            "additionalProperties": false
+        },
+        "annotations": read_only_tool_annotations()
+    })
+}
+
+/// One paged list of findings, not an automatic judgement about a Vault.
+fn find_link_problems_tool_schema() -> Value {
+    json!({
+        "name": "find_link_problems",
+        "description": collection_description("List one Vault's link findings. kind is broken_links, orphans or dead_ends. No score or repair. Each finding asks for a judgement: isolated notes can be useful and missing targets intentional. An orphan has no resolved links in or out, as in statistics. A note linking out but never linked to appears under neither orphans nor dead ends. Dead ends have no resolved outgoing links. Broken findings group missing or ambiguous wiki targets and missing Markdown note targets as written, with source notes. Code and attachment embeds are ignored. All readable layers participate. total counts findings; pass next_cursor as cursor to page. Works read-only and in batch."),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "vault_id": vault_id_schema(),
+                "kind": {"type": "string", "enum": ["broken_links", "orphans", "dead_ends"]},
+                "limit": {"type": "integer", "minimum": 1, "maximum": crate::vault_read::LINK_FINDINGS_MAX_LIMIT, "default": crate::vault_read::LINK_FINDINGS_DEFAULT_LIMIT},
+                "cursor": {"type": "string", "description": "The previous page's next_cursor. Omit for the first page."}
+            },
+            "required": ["vault_id", "kind"],
             "additionalProperties": false
         },
         "annotations": read_only_tool_annotations()
@@ -1596,7 +1662,7 @@ fn query_notes_tool_schema() -> Value {
 /// at, is not advertised in read-only mode, hence the reread advice beside
 /// it. The `collection_revision` sentence follows
 /// `VaultCollectionState::collection_revision`.
-const COLLECTION_FRESHNESS: &str = "Every result says whether it is current, in participants[].state, one entry per Vault read: fresh, stale, not_searchable (semantic search only: some or all of the notes searched in that Vault have no embeddings, because they are not embedded yet or sit in a demoted layer with layer embedding switched off; any hits it returned still count, and keyword search reaches every note) or unavailable (nothing read; see its error; under a one-Vault scope the read fails with that error instead). partial is true when any participant is not fresh. A stale participant is still answered, but its part may be behind its Markdown: usually it is a prior index generation served while a turn catches up. When a participant reports stale, call refresh_vault for that Vault (write mode only; read-only callers read again in a few seconds, since a turn is usually already queued). A write can take up to about five seconds to reach the index, so a read straight after one can report fresh without it. collection_revision does not answer any of this. It counts Vault collection status changes (a Vault added, edited, enabled, disabled or disconnected, or its index, Git, watcher or local-file status moving) and does not track note content: a note write does not advance it, and the index turn that follows moves it only through the Vault's index status.";
+const COLLECTION_FRESHNESS: &str = "Every result says whether it is current, in participants[].state, one entry per Vault read: fresh, stale, not_searchable (semantic search only: some or all of the notes searched in that Vault have no embeddings, because they are not embedded yet or sit in a demoted layer with layer embedding switched off; any hits it returned still count, and keyword search reaches every note) or unavailable (nothing read; see its error; under a one-Vault scope the read fails with that error instead). partial is true when any participant is not fresh. A stale participant is still answered, but its part may be behind its Markdown: usually it is a prior index generation served while a turn catches up. When a participant reports stale, call refresh_vault for that Vault (write mode only; read-only callers read again in a few seconds, since a turn is usually already queued). A successful Hatchdoor write marks its index stale before returning; outside edits can still look fresh until the watcher notices them. collection_revision does not answer any of this. It counts Vault collection status changes (a Vault added, edited, enabled, disabled or disconnected, or its index, Git, watcher or local-file status moving) and does not track note content: a note write does not advance it, and the index turn that follows moves it only through the Vault's index status.";
 
 fn collection_description(summary: &str) -> String {
     format!("{summary} {COLLECTION_FRESHNESS}")
@@ -1767,6 +1833,7 @@ mod tests {
             checked,
             [
                 "evaluate_saved_query",
+                "find_link_problems",
                 "find_text",
                 "get_graph",
                 "get_stats",

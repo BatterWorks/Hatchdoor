@@ -4,6 +4,7 @@ mod layers;
 mod link_style;
 mod links;
 mod markdown_links;
+mod note_file;
 mod paths;
 mod sections;
 #[cfg(test)]
@@ -15,22 +16,34 @@ pub use exclude::{DEFAULT_EXCLUDE_PATTERNS, ExcludeMatcher};
 pub use layers::{LayerDecl, LayerMap, MARKER_FILE_NAME};
 pub use link_style::{LinkPathForm, LinkStyle, VaultLinkStyle, count_link_forms, vault_link_style};
 #[cfg(test)]
+pub(crate) use note_file::grow_past_note_bound;
+#[cfg(all(test, unix))]
+pub(crate) use note_file::make_fifo;
+pub(crate) use note_file::{
+    BoundedReadError, MAX_NOTE_BYTES, note_file_name, open_without_blocking, read_bounded,
+    read_note_text, read_open_bounded,
+};
+#[cfg(test)]
 pub use paths::strip_md_extension;
 pub use paths::{
     content_snippet, is_servable_asset, normalize_link_target, normalize_title, slugify,
     split_wikilink_asset_body,
 };
-pub(crate) use sections::NoteSections;
+pub(crate) use paths::{is_note_path, walk_error_costs_only_itself};
+pub(crate) use sections::{NoteSections, body_start};
 pub use types::{
     ExplorerFolder, ExplorerNote, ModifiedNote, Note, NoteEntry, NoteLink, NoteLinks, NoteMetadata,
     NoteSummary, SearchHit, VaultIndex, VaultScanConfig,
 };
 pub use write::{
-    AttachmentInfo, AttachmentOutcome, NestedTag, NoteTarget, SectionMode, TagDelete,
+    AttachmentInfo, AttachmentOutcome, IntentLog, NestedTag, NoteTarget, SectionMode, TagDelete,
     TagDeleteError, TagDeleteNote, TagRename, TagRenameError, TagRenameNote, UnrewritableNote,
     UnsupportedTagNote, WriteError, WriteOutcome, allowed_attachment_extensions, append_note,
     archive_note, check_attachment_import_target, check_note_content_hash, create_note,
     delete_attachment, delete_note, delete_tag, edit_note, import_attachment_bytes,
     list_note_attachments, move_attachment, move_or_rename_note, note_exists_conflict, note_target,
     rename_attachment, rename_tag, replace_section, update_note, update_note_frontmatter,
+};
+pub(crate) use write::{
+    normalize_attachment_relative_path, normalize_note_relative_path, repair_interrupted_writes,
 };

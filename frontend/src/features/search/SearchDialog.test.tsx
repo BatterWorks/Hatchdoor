@@ -735,6 +735,21 @@ describe("SearchDialog surfaces the shrunk startup gate's state (#150)", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Retry setup" }));
     expect(props.onRetryModelSetup).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("shows why a retry did not start, as an alert under the retry action (#642)", () => {
+    renderDialog({
+      query: "",
+      startupStatus: { state: "failed", message: "The download stalled." },
+      modelSetupError:
+        "Could not reach Hatchdoor. Check the connection and try again.",
+    });
+
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "Could not reach Hatchdoor. Check the connection and try again.",
+    );
+    expect(screen.getByRole("button", { name: "Retry setup" })).toBeVisible();
   });
 
   it("gives a demo visitor a neutral sentence and no retry for a failed model (#339)", () => {
@@ -870,6 +885,71 @@ describe("SearchDialog result rows read cleanly (#530)", () => {
     expect(snippet?.textContent).not.toContain("tags:");
   });
 
+  it("drops a tilde block and a block that shows another block (#668)", () => {
+    renderDialog({
+      query: "fleet",
+      results: [
+        row({ content: "Before the fleet.\n~~~bash\nnpm ci\n~~~\nAfter." }),
+        row({
+          chunk_id: 2,
+          note_slug: "atlas",
+          note_title: "Atlas",
+          content:
+            "Before the fleet.\n````markdown\n```js\n# not a heading either\nconsole.log(1)\n```\n````\nAfter.",
+        }),
+      ],
+    });
+
+    const snippets = Array.from(
+      document.querySelectorAll(".result-snippet"),
+    ).map((el) => el.textContent ?? "");
+    expect(snippets).toHaveLength(2);
+    for (const snippet of snippets) {
+      expect(snippet.replace(/\s+/g, " ")).toBe("Before the fleet. After.");
+    }
+  });
+
+  it("drops a block in a list item or a callout and keeps inline code's words", () => {
+    renderDialog({
+      query: "fleet",
+      results: [
+        row({
+          content:
+            "The fleet:\n- Run:\n- ```js\n  console.log(1)\n  ```\n> [!note]\n> ~~~bash\n> npm ci\n> ~~~\nRun ```npm i``` now.",
+        }),
+      ],
+    });
+
+    const snippet = document.querySelector(".result-snippet")?.textContent;
+    expect(snippet?.replace(/\s+/g, " ")).toBe(
+      "The fleet: Run: > [!note] Run npm i now.",
+    );
+  });
+
+  it("keeps a line indented four spaces or by a tab, as the backend does", () => {
+    renderDialog({
+      query: "fleet",
+      results: [
+        row({ content: "The fleet.\n    ```\nkept one\n\t~~~\nkept two" }),
+      ],
+    });
+
+    const snippet = document.querySelector(".result-snippet")?.textContent;
+    expect(snippet).toContain("kept one");
+    expect(snippet).toContain("kept two");
+  });
+
+  it("cuts an unterminated block to the end of the snippet", () => {
+    renderDialog({
+      query: "fleet",
+      results: [row({ content: "The fleet.\n```sh\nrm -rf cache" })],
+    });
+
+    expect(document.querySelector(".result-snippet")?.textContent).toBe(
+      "The fleet.",
+    );
+  });
+
   it("drops comments from the snippet but keeps code that looks like one (#573)", () => {
     renderDialog({
       query: "fleet",
@@ -903,6 +983,21 @@ describe("SearchDialog result rows read cleanly (#530)", () => {
       "The fleet sails on, and finished == null stays.",
     );
     expect(snippet?.querySelector("mark:not(.search-match)")).toBeNull();
+  });
+
+  it("drops a highlight's colour emoji with its signs (#577)", () => {
+    renderDialog({
+      query: "fleet",
+      results: [
+        row({
+          content: "The ==🔴fleet sails== on past ==🟤brown== rocks.",
+        }),
+      ],
+    });
+
+    const snippet = document.querySelector(".result-snippet");
+    expect(snippet).toHaveTextContent("The fleet sails on past 🟤brown rocks.");
+    expect(snippet?.textContent).not.toContain("🔴");
   });
 
   it("omits the heading line when it only repeats the note's title", () => {

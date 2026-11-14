@@ -10,7 +10,6 @@
 // rather than the viewport. Images are rare enough per note for that to be
 // cheap.
 
-import { ensureSyntaxTree } from "@codemirror/language";
 import {
   RangeSetBuilder,
   StateEffect,
@@ -24,6 +23,8 @@ import {
   WidgetType,
   type DecorationSet,
 } from "@codemirror/view";
+
+import { treeGrew, treeSoFar } from "./focusState";
 
 /**
  * The page learnt where more embeds point (#544): the server's answers for
@@ -76,8 +77,8 @@ function imagesIn(
   resolve: (raw: string) => string,
 ): DecorationSet {
   const found: Array<{ at: number; src: string; alt: string }> = [];
-  const tree = ensureSyntaxTree(state, state.doc.length, 50);
-  tree?.iterate({
+  const tree = treeSoFar(state);
+  tree.iterate({
     enter: (node) => {
       if (node.name !== "Image") {
         return;
@@ -121,7 +122,9 @@ export function imageWidgets(resolve: (raw: string) => string): Extension {
   return StateField.define<DecorationSet>({
     create: (state) => imagesIn(state, resolve),
     update: (value, tr) =>
-      tr.docChanged || tr.effects.some((effect) => effect.is(assetsResolved))
+      tr.docChanged ||
+      tr.effects.some((effect) => effect.is(assetsResolved)) ||
+      treeGrew(tr)
         ? imagesIn(tr.state, resolve)
         : value,
     provide: (field) => EditorView.decorations.from(field),

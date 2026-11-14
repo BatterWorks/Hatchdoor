@@ -104,6 +104,8 @@ pub(crate) fn vault_read_error_response(error: VaultReadError) -> Response {
     let status = match error.code.as_str() {
         "vault_not_found" | "note_not_found" => StatusCode::NOT_FOUND,
         "vault_disabled" => StatusCode::CONFLICT,
+        // The status the asset route gives a file over its own bound.
+        "note_too_large" => StatusCode::PAYLOAD_TOO_LARGE,
         "vault_scan_config_invalid" => StatusCode::INTERNAL_SERVER_ERROR,
         "invalid_scope" | "invalid_query" | "invalid_search_query" | "invalid_layer_selection" => {
             StatusCode::BAD_REQUEST
@@ -423,8 +425,8 @@ pub async fn vault_scoped_asset_handler(
 ) -> Response {
     // Present only when the auth layer admitted this request on the MCP bearer
     // token (#176). That credential's ceiling for attachment bytes is
-    // `HATCHDOOR_MCP_MAX_BASE64_BYTES`, which `get_attachment`'s base64 encoding
-    // enforces; without this the `download_url` the same tool advertises would
+    // `HATCHDOOR_MCP_MAX_BASE64_BYTES`, which also bounds `get_attachment`'s base64
+    // encoding (held further to what one reply carries, #632); without this the `download_url` the same tool advertises would
     // be a way around it, up to this route's own far larger bound. A web-token
     // request carries no marker and keeps the route's bound.
     let mcp_max_bytes = mcp_read.map(|axum::Extension(read)| read.max_bytes);
@@ -503,6 +505,14 @@ mod tests {
             retryable: false,
         });
         assert_eq!(disabled.status(), StatusCode::CONFLICT);
+
+        let too_large = vault_read_error_response(VaultReadError {
+            code: "note_too_large".to_string(),
+            message: "too large".to_string(),
+            vault_id: None,
+            retryable: false,
+        });
+        assert_eq!(too_large.status(), StatusCode::PAYLOAD_TOO_LARGE);
 
         let unavailable = vault_read_error_response(VaultReadError {
             code: "vault_unavailable".to_string(),

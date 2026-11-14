@@ -5,12 +5,15 @@ use git2::{Repository, Signature};
 use super::config::{GitConfig, GitMode};
 use super::managed_task::ManagedGitOutcome;
 use super::message::WriteLedger;
-use crate::vault_work::VaultWorkError;
+use crate::vault_work::{VaultWorkError, VaultWorkErrorDetail};
 
-/// Result of the local commit phase: whether a new commit was created.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Result of the local commit phase: whether a new commit was created, and
+/// the changed files inside the Vault it left out because their names are not
+/// valid UTF-8, each written with its undecodable bytes as `\xNN` (#638).
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommitOutcome {
     pub committed: bool,
+    pub left_out: Vec<String>,
 }
 
 /// All errors are non-fatal to the server; they are recorded and surfaced.
@@ -32,6 +35,12 @@ pub enum GitError {
     Remote(String),
     /// Any other libgit2 failure.
     Other(String),
+    /// Everything else was committed; these files inside the Vault were left
+    /// out because their names are not valid UTF-8 (#638).
+    UnsupportedFileNames { files: Vec<String> },
+    /// The Vault's registered repository folder holds no Git repository,
+    /// so nothing was committed anywhere (#678).
+    RepositoryMissing(String),
 }
 
 impl std::fmt::Display for GitError {
@@ -52,6 +61,10 @@ impl std::fmt::Display for GitError {
             ),
             GitError::Remote(m) => write!(f, "git remote error: {m}"),
             GitError::Other(m) => write!(f, "git error: {m}"),
+            GitError::UnsupportedFileNames { files } => {
+                f.write_str(&super::left_out_message(files))
+            }
+            GitError::RepositoryMissing(m) => write!(f, "git repository missing: {m}"),
         }
     }
 }
@@ -111,23 +124,56 @@ pub fn validate_repo(config: &GitConfig) -> Result<(), GitError> {
     Ok(())
 }
 
-/// Local mode needs only a non-bare repository containing the vault. Branch and
-/// remote checks are deliberately remote-only: local history follows whatever
-/// branch the operator has checked out.
-pub fn validate_local_repo(config: &GitConfig) -> Result<(), GitError> {
-    let repo = Repository::discover(&config.vault_path).map_err(|e| {
-        GitError::Validation(format!("cannot open vault as git repo: {}", e.message()))
+/// Open the repository whose root is `config.repository_path`, and no other.
+/// It never searches upward: a Vault whose own `.git` is gone would otherwise
+/// find whatever repository encloses it, such as a home folder kept in a
+/// dotfiles repository, and commit its notes there (#678). An absent
+/// repository is `RepositoryMissing`; a bare one, or a registered folder
+/// that is not the repository's root, fails validation.
+fn open_local_repo(config: &GitConfig) -> Result<Repository, GitError> {
+    let repo = Repository::open_ext(
+        &config.repository_path,
+        git2::RepositoryOpenFlags::NO_SEARCH,
+        std::iter::empty::<&std::ffi::OsStr>(),
+    )
+    .map_err(|error| {
+        let detail = format!(
+            "no Git repository at {}: {}",
+            config.repository_path.display(),
+            error.message()
+        );
+        if error.code() == git2::ErrorCode::NotFound {
+            GitError::RepositoryMissing(detail)
+        } else {
+            GitError::Validation(detail)
+        }
     })?;
     let workdir = repo
         .workdir()
         .ok_or_else(|| GitError::Validation("repository is bare".to_string()))?;
+    if !same_path(workdir, &config.repository_path) {
+        return Err(GitError::Validation(format!(
+            "repository folder {} is not the repository root {}",
+            config.repository_path.display(),
+            workdir.display()
+        )));
+    }
+    Ok(repo)
+}
+
+/// Local mode needs only the Vault's own non-bare repository, containing the
+/// vault. Branch and remote checks are deliberately remote-only: local history
+/// follows whatever branch the operator has checked out.
+pub fn validate_local_repo(config: &GitConfig) -> Result<(), GitError> {
+    // `open_local_repo` has proven the repository's root is this folder.
+    open_local_repo(config)?;
     let vault_path = config.vault_path.canonicalize().map_err(|error| {
         GitError::Validation(format!(
             "cannot canonicalize Vault path {}: {error}",
             config.vault_path.display()
         ))
     })?;
-    let workdir = workdir.canonicalize().map_err(|error| {
+    let workdir = config.repository_path.canonicalize().map_err(|error| {
         GitError::Validation(format!("cannot canonicalize repository root: {error}"))
     })?;
     if !vault_path.starts_with(&workdir) {
@@ -152,8 +198,8 @@ pub fn validate_local_repo(config: &GitConfig) -> Result<(), GitError> {
 /// Builds its own `GitMode::Local` [`GitConfig`]: `remote`, `branch`,
 /// `username`, and `token` are placeholders that `validate_local_repo` and
 /// `commit_local` never read for that mode (see their doc comments), so a
-/// caller here needs only the Vault's resolved path and commit identity —
-/// not the full settings-derived `GitConfig` the retired single-Vault lane
+/// caller here needs only the Vault's registered repository folder, its
+/// resolved path and commit identity, not the full settings-derived `GitConfig` the retired single-Vault lane
 /// built from `HATCHDOOR_GIT_*` configuration.
 ///
 /// `ledger` is the Vault's pending batch of write records (issue #249): the
@@ -171,12 +217,14 @@ pub fn validate_local_repo(config: &GitConfig) -> Result<(), GitError> {
 /// cost, and it is why `WriteLedger::restore` puts a batch back ahead of
 /// anything recorded since rather than overwriting it.
 pub fn run_local_history_git_turn(
+    repository_path: PathBuf,
     vault_path: PathBuf,
     author_name: String,
     author_email: String,
     ledger: &WriteLedger,
 ) -> Result<ManagedGitOutcome, VaultWorkError> {
     let config = GitConfig {
+        repository_path,
         vault_path,
         mode: GitMode::Local,
         remote: String::new(),
@@ -188,14 +236,25 @@ pub fn run_local_history_git_turn(
         author_email,
     };
     validate_local_repo(&config).map_err(classify_local_history_error)?;
+    let mut left_out = Vec::new();
     let committed = ledger
         .commit_batch(|batch| {
             commit_local(&config, &[], |changed| {
                 batch.message(&config.vault_path, changed)
             })
-            .map(|outcome| outcome.committed)
+            .map(|outcome| {
+                left_out = outcome.left_out;
+                outcome.committed
+            })
         })
         .map_err(classify_local_history_error)?;
+    // Reported only after the rest committed, so one undecodable name never
+    // holds back every other note (#638).
+    if !left_out.is_empty() {
+        return Err(classify_local_history_error(
+            GitError::UnsupportedFileNames { files: left_out },
+        ));
+    }
     Ok(if committed {
         ManagedGitOutcome::Synchronized
     } else {
@@ -209,8 +268,10 @@ pub fn run_local_history_git_turn(
 /// automatic retry, everything else needs a human or the enclosing
 /// checkout's state to change first.
 ///
-/// Only `Validation`, `ManualRecovery` and `Other` are actually reachable
-/// from this function's callee pair. `ManualRecovery` comes from
+/// Only `Validation`, `RepositoryMissing`, `ManualRecovery` and `Other` are
+/// actually reachable from this function's callee pair. `RepositoryMissing`
+/// means the Vault's registered repository folder has no `.git` (#678); it
+/// needs a person to restore the repository, so it is not retried. `ManualRecovery` comes from
 /// `commit_local` refusing a checkout left mid-merge or with a conflicted
 /// index (#323). #185 deleted the fetch/integrate/push half of this module,
 /// and with it the merge-marker recovery `commit_local` used to run, so
@@ -229,6 +290,10 @@ fn classify_local_history_error(error: GitError) -> VaultWorkError {
         GitError::Validation(_) => (
             "existing_git_local_history_validation_failed",
             "this Vault's Git checkout failed validation",
+        ),
+        GitError::RepositoryMissing(_) => (
+            "existing_git_local_history_repository_missing",
+            "this Vault's Git repository is missing, so nothing was committed",
         ),
         GitError::Conflict { .. } => (
             "existing_git_local_history_conflict",
@@ -250,6 +315,17 @@ fn classify_local_history_error(error: GitError) -> VaultWorkError {
             "existing_git_local_history_git_error",
             "Git could not record this Vault's local history",
         ),
+        // Repository-relative names, never host paths, so they may reach the
+        // status in full.
+        GitError::UnsupportedFileNames { files } => {
+            tracing::warn!(%error, "Local history Git turn left files out");
+            return VaultWorkError::new(
+                "existing_git_local_history_unsupported_file_names",
+                error.to_string(),
+                false,
+            )
+            .with_detail(VaultWorkErrorDetail::AffectedPaths(files.clone()));
+        }
     };
     tracing::warn!(code, %error, "Local history Git turn failed");
     let retryable = matches!(error, GitError::Remote(_) | GitError::Other(_));
@@ -290,7 +366,12 @@ pub fn init_local_repo(
     let initialized = (|| {
         ensure_gitignore_entries(&config.vault_path, cache_db_path, settings_file_path)
             .map_err(|error| GitError::Other(format!("cannot write .gitignore: {error}")))?;
-        validate_local_repo(config)
+        // The repository was just created in the Vault folder, so that is
+        // the one to validate, whatever `repository_path` says.
+        validate_local_repo(&GitConfig {
+            repository_path: config.vault_path.clone(),
+            ..config.clone()
+        })
     })();
     if let Err(error) = initialized {
         let ignore_restore = match prior_ignore {
@@ -407,16 +488,14 @@ fn escape_gitignore_component(component: &str) -> String {
 /// existing edits commits that drift immediately, in both local and remote
 /// mode, rather than waiting for the next write (issue #56).
 pub fn has_uncommitted_changes(config: &GitConfig) -> Result<bool, GitError> {
-    let repo = Repository::discover(&config.vault_path)?;
+    let repo = open_local_repo(config)?;
     let mut opts = git2::StatusOptions::new();
     opts.include_untracked(true).recurse_untracked_dirs(true);
     let statuses = repo.statuses(Some(&mut opts))?;
     let vault_relative = vault_relative_path(&repo, config)?;
-    Ok(statuses.iter().any(|entry| {
-        entry
-            .path()
-            .is_ok_and(|path| status_path_is_in_vault(path, &vault_relative))
-    }))
+    Ok(statuses
+        .iter()
+        .any(|entry| super::status_bytes_in_vault(entry.path_bytes(), &vault_relative)))
 }
 
 fn same_path(a: &Path, b: &Path) -> bool {
@@ -424,7 +503,8 @@ fn same_path(a: &Path, b: &Path) -> bool {
     canon(a) == canon(b)
 }
 
-/// Stage only the Vault subtree and commit if it differs from HEAD. It never
+/// Stage only the Vault subtree and commit if it differs from HEAD, in the
+/// repository at `config.repository_path` and no other. It never
 /// contacts a remote, so callers hold the vault-write lock across this.
 /// Returns whether a commit was made.
 ///
@@ -441,9 +521,8 @@ pub fn commit_local(
     message: impl FnOnce(&[PathBuf]) -> String,
 ) -> Result<CommitOutcome, GitError> {
     let _ = paths;
-    let repo = Repository::discover(&config.vault_path)?;
-    let committed = commit_working_tree(&repo, config, message)?;
-    Ok(CommitOutcome { committed })
+    let repo = open_local_repo(config)?;
+    commit_working_tree(&repo, config, message)
 }
 
 /// Stage all Vault-subtree drift from a fresh in-memory index seeded at HEAD
@@ -454,7 +533,7 @@ fn commit_working_tree(
     repo: &Repository,
     config: &GitConfig,
     message: impl FnOnce(&[PathBuf]) -> String,
-) -> Result<bool, GitError> {
+) -> Result<CommitOutcome, GitError> {
     reject_unfinished_operation(repo)?;
     let mut index = repo.index()?;
     let head_commit = repo.head().ok().and_then(|head| head.peel_to_commit().ok());
@@ -465,13 +544,17 @@ fn commit_working_tree(
     } else {
         index.clear()?;
     }
-    let changed = stage_vault_drift(repo, &mut index, &vault_relative)?;
+    let (changed, left_out) = stage_vault_drift(repo, &mut index, &vault_relative)?;
     let tree_oid = index.write_tree_to(repo)?;
     let tree = repo.find_tree(tree_oid)?;
 
     if let Some(parent) = head_commit {
         if parent.tree()?.id() == tree_oid {
-            return Ok(false); // nothing staged differs from HEAD
+            // nothing staged differs from HEAD
+            return Ok(CommitOutcome {
+                committed: false,
+                left_out,
+            });
         }
         let sig = signature(config)?;
         repo.commit(
@@ -495,7 +578,10 @@ fn commit_working_tree(
         stage_vault_drift(repo, &mut worktree_index, &vault_relative)?;
         worktree_index.write()?;
     }
-    Ok(true)
+    Ok(CommitOutcome {
+        committed: true,
+        left_out,
+    })
 }
 
 /// Refuse to commit a checkout that is part-way through a merge, rebase,
@@ -533,7 +619,7 @@ fn reject_unfinished_operation(repo: &Repository) -> Result<(), GitError> {
     })
 }
 
-/// Return the Vault location relative to the discovered checkout. This is a
+/// Return the Vault location relative to its repository's root. This is a
 /// filesystem path, deliberately not a Git pathspec: a Vault name is
 /// operator-controlled and must never be interpreted as a wildcard.
 fn vault_relative_path(repo: &Repository, config: &GitConfig) -> Result<PathBuf, GitError> {
@@ -546,14 +632,10 @@ fn vault_relative_path(repo: &Repository, config: &GitConfig) -> Result<PathBuf,
     let workdir = workdir.canonicalize().map_err(|error| {
         GitError::Validation(format!("cannot canonicalize repository root: {error}"))
     })?;
-    let relative = vault_path.strip_prefix(&workdir).map_err(|_| {
-        GitError::Validation("Vault path is outside its discovered repository".to_string())
-    })?;
+    let relative = vault_path
+        .strip_prefix(&workdir)
+        .map_err(|_| GitError::Validation("Vault path is outside its repository".to_string()))?;
     Ok(relative.to_path_buf())
-}
-
-fn status_path_is_in_vault(status_path: &str, vault_relative: &Path) -> bool {
-    vault_relative.as_os_str().is_empty() || Path::new(status_path).starts_with(vault_relative)
 }
 
 fn has_staged_vault_changes(repo: &Repository, vault_relative: &Path) -> Result<bool, GitError> {
@@ -567,22 +649,24 @@ fn has_staged_vault_changes(repo: &Repository, vault_relative: &Path) -> Result<
         if found {
             return Ok(true);
         }
-        let path = entry.path().map_err(|error| {
-            GitError::Validation(format!("cannot read changed Git path as UTF-8: {error}"))
-        })?;
-        Ok(status_path_is_in_vault(path, vault_relative) && entry.status().intersects(staged))
+        Ok(
+            super::status_bytes_in_vault(entry.path_bytes(), vault_relative)
+                && entry.status().intersects(staged),
+        )
     })
 }
 
 /// Add or remove exactly the changed, non-ignored paths reported by Git inside
 /// the configured Vault. Working from status entries rather than a pathspec
 /// keeps special characters in the Vault directory literal. Returns the paths
-/// it staged, relative to the Vault root.
+/// it staged, relative to the Vault root, and the changed paths inside the
+/// Vault it left out because their names are not valid UTF-8, escaped and
+/// relative to the repository (#638).
 fn stage_vault_drift(
     repo: &Repository,
     index: &mut git2::Index,
     vault_relative: &Path,
-) -> Result<Vec<PathBuf>, GitError> {
+) -> Result<(Vec<PathBuf>, Vec<String>), GitError> {
     let mut options = git2::StatusOptions::new();
     options
         .include_untracked(true)
@@ -590,13 +674,15 @@ fn stage_vault_drift(
         .renames_head_to_index(false)
         .renames_index_to_workdir(false);
     let mut staged = Vec::new();
+    let mut left_out = Vec::new();
     for entry in repo.statuses(Some(&mut options))?.iter() {
-        let path = entry.path().map_err(|error| {
-            GitError::Validation(format!("cannot read changed Git path as UTF-8: {error}"))
-        })?;
-        if !status_path_is_in_vault(path, vault_relative) {
+        if !super::status_bytes_in_vault(entry.path_bytes(), vault_relative) {
             continue;
         }
+        let Ok(path) = entry.path() else {
+            left_out.push(super::escaped_path(entry.path_bytes()));
+            continue;
+        };
         let relative_path = Path::new(path);
         let worktree_path = repo
             .workdir()
@@ -614,7 +700,7 @@ fn stage_vault_drift(
                 .to_path_buf(),
         );
     }
-    Ok(staged)
+    Ok((staged, left_out))
 }
 
 #[cfg(test)]
@@ -630,23 +716,114 @@ mod tests {
     /// the Vault's absolute host path.
     #[test]
     fn a_local_history_failure_is_reported_without_the_host_path() {
-        let root = tempfile::tempdir().expect("not a repository");
-        let vault_path = root.path().join("vault");
-        fs::create_dir(&vault_path).expect("vault directory");
+        // A Vault folder outside its registered repository fails validation
+        // with both host paths in the internal error.
+        let root = tempfile::tempdir().expect("temp root");
+        let repository = root.path().join("repository");
+        Repository::init(&repository).expect("init repository");
+        let vault_path = root.path().join("elsewhere");
+        fs::create_dir(&vault_path).expect("Vault folder");
+        let config = GitConfig {
+            repository_path: repository.clone(),
+            ..base_config(&vault_path)
+        };
+
+        // The internal error carries a host path, so the check below would
+        // catch the client message repeating it.
+        let internal = validate_local_repo(&config)
+            .expect_err("a Vault outside its repository fails validation");
+        assert!(
+            internal.to_string().contains('/'),
+            "the internal error should carry a host path: {internal}"
+        );
 
         let error = run_local_history_git_turn(
+            repository,
             vault_path,
             "Hatchdoor".to_string(),
             "hatchdoor@example.test".to_string(),
             &WriteLedger::new(),
         )
-        .expect_err("no enclosing repository");
+        .expect_err("a Vault outside its repository fails validation");
 
         assert_eq!(error.code(), "existing_git_local_history_validation_failed");
         assert!(
             !error.message().contains('/'),
             "client-visible message leaks a host path: {}",
             error.message()
+        );
+    }
+
+    /// #678: a Local history Vault nested inside another repository that
+    /// loses its own `.git` used to find the outer repository by searching
+    /// upward and commit its notes there. The turn now fails, names the
+    /// missing repository, and leaves the outer one exactly as it was.
+    #[test]
+    fn a_local_history_vault_that_lost_its_repository_never_commits_into_the_enclosing_one() {
+        let root = tempfile::tempdir().expect("temp root");
+        let outer = root.path().join("outer");
+        let outer_repo = Repository::init(&outer).expect("init outer repository");
+        fs::write(outer.join("dotfile"), "outer content").expect("outer file");
+        commit_all(&outer_repo, "outer commit");
+        let outer_head = outer_repo.head().expect("outer head").target();
+
+        let inner = outer.join("inner");
+        Repository::init(&inner).expect("init the Vault's own repository");
+        fs::write(inner.join("Note.md"), "# note\n").expect("note");
+        run_local_history_git_turn(
+            inner.clone(),
+            inner.clone(),
+            "Test".to_string(),
+            "test@example.invalid".to_string(),
+            &WriteLedger::new(),
+        )
+        .expect("the Vault commits into its own repository");
+        fs::remove_dir_all(inner.join(".git")).expect("lose the Vault's .git");
+        fs::write(inner.join("Note.md"), "# note\n\nedited\n").expect("edit note");
+
+        let error = run_local_history_git_turn(
+            inner.clone(),
+            inner.clone(),
+            "Test".to_string(),
+            "test@example.invalid".to_string(),
+            &WriteLedger::new(),
+        )
+        .expect_err("a Vault without its repository must not commit");
+
+        assert_eq!(
+            error.code(),
+            "existing_git_local_history_repository_missing"
+        );
+        assert!(!error.retryable());
+        assert!(
+            error.message().contains("repository is missing"),
+            "{}",
+            error.message()
+        );
+        assert!(
+            !error.message().contains('/'),
+            "client-visible message leaks a host path: {}",
+            error.message()
+        );
+        assert_eq!(
+            outer_repo.head().expect("outer head").target(),
+            outer_head,
+            "the enclosing repository gained no commit"
+        );
+        assert!(
+            outer_repo
+                .index()
+                .expect("outer index")
+                .get_path(Path::new("inner/Note.md"), 0)
+                .is_none(),
+            "nothing of the Vault was staged in the enclosing repository"
+        );
+        assert!(
+            matches!(
+                has_uncommitted_changes(&base_config(&inner)),
+                Err(GitError::RepositoryMissing(_))
+            ),
+            "every Local history helper refuses the enclosing repository"
         );
     }
 
@@ -695,6 +872,7 @@ mod tests {
         assert!(marked.contains("<<<<<<<"), "merge left markers: {marked}");
 
         let error = run_local_history_git_turn(
+            root.path().to_path_buf(),
             vault.clone(),
             "Hatchdoor".to_string(),
             "hatchdoor@example.test".to_string(),
@@ -739,6 +917,7 @@ mod tests {
             .expect("stage outside file");
         operator_index.write().expect("preserve operator staging");
         let config = GitConfig {
+            repository_path: root.path().to_path_buf(),
             vault_path: root.path().join(vault_name),
             mode: GitMode::Local,
             remote: "origin".to_string(),
@@ -805,6 +984,7 @@ mod tests {
         operator_index.write().expect("preserve operator staging");
         fs::write(&note, "working tree content").expect("working content");
         let config = GitConfig {
+            repository_path: root.path().to_path_buf(),
             vault_path,
             mode: GitMode::Local,
             remote: "origin".to_string(),
@@ -844,6 +1024,53 @@ mod tests {
         );
     }
 
+    /// #638: one file name that is not valid UTF-8 is left out and named,
+    /// and every other change in the Vault still commits.
+    #[test]
+    fn an_undecodable_file_name_is_left_out_and_named_while_the_rest_commits() {
+        use std::os::unix::ffi::OsStrExt;
+        let root = tempfile::tempdir().expect("repository root");
+        let repo = Repository::init(root.path()).expect("init repository");
+        fs::write(root.path().join("README.md"), "root readme").expect("root readme");
+        commit_all(&repo, "initial commit");
+        let vault_path = root.path().join("notes");
+        fs::create_dir(&vault_path).expect("notes directory");
+        let odd = vault_path.join(std::ffi::OsStr::from_bytes(b"caf\xe9-latin1.md"));
+        if fs::write(&odd, "odd\n").is_err() {
+            // A filesystem that refuses non-UTF-8 names cannot hold the case.
+            return;
+        }
+        fs::write(vault_path.join("After.md"), "# after\n").expect("new note");
+
+        let error = run_local_history_git_turn(
+            root.path().to_path_buf(),
+            vault_path.clone(),
+            "Test".to_string(),
+            "test@example.invalid".to_string(),
+            &WriteLedger::new(),
+        )
+        .expect_err("the left-out file is reported");
+
+        assert_eq!(
+            error.code(),
+            "existing_git_local_history_unsupported_file_names"
+        );
+        assert!(!error.retryable());
+        assert!(
+            error.message().contains("notes/caf\\xe9-latin1.md"),
+            "{}",
+            error.message()
+        );
+        let head = repo.head().expect("head").peel_to_commit().expect("commit");
+        assert!(
+            head.tree()
+                .expect("tree")
+                .get_path(Path::new("notes/After.md"))
+                .is_ok(),
+            "the decodable note was committed"
+        );
+    }
+
     /// Issue #249: a Local-history commit is named by the writes it records,
     /// and an idle turn leaves the batch alone rather than swallowing it.
     #[test]
@@ -870,6 +1097,7 @@ mod tests {
         record_idea();
 
         let outcome = run_local_history_git_turn(
+            root.path().to_path_buf(),
             vault_path.clone(),
             "Test".to_string(),
             "test@example.invalid".to_string(),
@@ -892,6 +1120,7 @@ mod tests {
         fs::write(vault_path.join("By hand.md"), "# by hand\n").expect("outside edit");
         record_idea();
         run_local_history_git_turn(
+            root.path().to_path_buf(),
             vault_path.clone(),
             "Test".to_string(),
             "test@example.invalid".to_string(),
@@ -925,6 +1154,7 @@ mod tests {
         });
 
         let outcome = run_local_history_git_turn(
+            root.path().to_path_buf(),
             vault_path,
             "Test".to_string(),
             "test@example.invalid".to_string(),
@@ -967,6 +1197,7 @@ mod tests {
         fs::write(root.path().join("outside.md"), "manual outside work").expect("outside file");
 
         let outcome = run_local_history_git_turn(
+            root.path().to_path_buf(),
             vault_path.clone(),
             "Test".to_string(),
             "test@example.invalid".to_string(),
@@ -1006,6 +1237,7 @@ mod tests {
 
         // A second turn with nothing new to commit reports UpToDate.
         let second = run_local_history_git_turn(
+            root.path().to_path_buf(),
             vault_path,
             "Test".to_string(),
             "test@example.invalid".to_string(),
@@ -1034,6 +1266,7 @@ mod tests {
         fs::write(vault_path.join("Idea.md"), "v2 - manual edit").expect("manual edit");
 
         let outcome = run_local_history_git_turn(
+            root.path().to_path_buf(),
             vault_path,
             "Test".to_string(),
             "test@example.invalid".to_string(),
@@ -1063,16 +1296,13 @@ mod tests {
     fn run_local_history_git_turn_classifies_a_bare_repository_as_non_retryable() {
         // A bare repository has no working tree to version, so
         // `validate_local_repo`'s "repository is bare" check must reject it.
-        // Deliberately does not rely on "no repository at all" here: with
-        // `TMPDIR` redirected onto real disk (see repo docs), a plain
-        // non-repo tempdir can still land inside some ambient enclosing
-        // checkout and make `Repository::discover` succeed unexpectedly.
         let root = tempfile::tempdir().expect("bare repository directory");
         Repository::init_bare(root.path()).expect("init bare repository");
         let vault_path = root.path().join("notes");
         fs::create_dir(&vault_path).expect("notes directory");
 
         let error = run_local_history_git_turn(
+            root.path().to_path_buf(),
             vault_path,
             "Test".to_string(),
             "test@example.invalid".to_string(),
@@ -1085,6 +1315,7 @@ mod tests {
 
     fn base_config(vault: &Path) -> GitConfig {
         GitConfig {
+            repository_path: vault.to_path_buf(),
             vault_path: vault.to_path_buf(),
             mode: super::super::config::GitMode::Remote,
             remote: "origin".to_string(),

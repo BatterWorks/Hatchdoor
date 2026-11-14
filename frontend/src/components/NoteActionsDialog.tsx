@@ -59,6 +59,21 @@ export function NoteActionsDialog({
 }) {
   const backdropRef = useRef<HTMLDivElement>(null);
 
+  // Focus goes back to whatever opened the dialog when it closes, as in
+  // `SettingsModal` (#648). Read once at mount, before the effect below moves
+  // focus inside: that effect re-runs when `kind` or `onClose` changes, and by
+  // then the focused element is the dialog's own.
+  useEffect(() => {
+    const opener =
+      document.activeElement instanceof HTMLElement &&
+      document.activeElement !== document.body
+        ? document.activeElement
+        : null;
+    return () => {
+      if (opener?.isConnected) opener.focus();
+    };
+  }, []);
+
   useEffect(() => {
     const root = backdropRef.current;
     if (!root) {

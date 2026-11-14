@@ -20,10 +20,21 @@ The first two decide who can reach Hatchdoor and what they can do. The third let
 
 ## Web bearer token
 
-The web token guards the browser and the HTTP API: Settings, model setup, and every `/api/v1/vaults/...` route when a token is configured. Hatchdoor reads it from `Authorization: Bearer <token>`, or from an `access_token` query parameter where a header cannot be set, as in an `<img>` tag that points at an attachment. It compares tokens in constant time, so the time an answer takes reveals nothing about how much of a guessed token was right.
+The web token guards the browser and the HTTP API: Settings, model setup, and every `/api/v1/vaults/...` route when a token is configured. Hatchdoor reads it from `Authorization: Bearer <token>` (the word `Bearer` in any case, followed by any number of spaces), or from an `access_token` query parameter where a header cannot be set, as in an `<img>` tag that points at an attachment. The query parameter works only for a `GET` of an attachment (`/api/v1/vaults/{vault_id}/assets/...`), a note download (`/api/v1/vaults/{vault_id}/notes/{slug}/download`) and the live update stream (`/api/v1/vaults/events`). Every other route answers `401` to it, so a link that leaks with the token in it, through browser history, a proxy log or a screenshot, can fetch a file but cannot change a note or reveal a token. It compares tokens in constant time, so the time an answer takes reveals nothing about how much of a guessed token was right.
 
 > [!warning]
-> With a `HOST` that is not a loopback address and no web token, Hatchdoor refuses to start. It generates a token, prints it, and asks you to add it to `.env`. You cannot skip this check. [[Install Hatchdoor with Docker Compose]] shows what it looks like.
+> With a `HOST` that is not a loopback address and no web token, Hatchdoor refuses to start. It generates a token, saves it in `new-web-token.env` in its state folder (`data/state` with the shipped `compose.yaml`), and asks you to add that line to `.env`. The token never appears in the log, so it does not linger in `docker compose logs` or anywhere logs are shipped. You cannot skip this check. [[Install Hatchdoor with Docker Compose]] shows what it looks like.
+
+### Running without a web token
+
+On a loopback address (`HOST=127.0.0.1`, the default outside Docker) the web token is optional. Without one, the browser and `curl` on the same computer reach everything with no password. A web page you visit in that browser must not, so Hatchdoor checks two headers on every request instead:
+
+- **The address the request was sent to (`Host`).** It must be `localhost`, `127.0.0.1` or `[::1]`, on any port, or the host of **Public address** (`HATCHDOOR_PUBLIC_URL`). Anything else gets `403`. This stops DNS rebinding, where a website points its own name at `127.0.0.1` and so becomes able to read and write your Vaults from your browser.
+- **The page that sent a change.** A request that changes something (anything but a read) is refused with `403` when its `Origin` is another website. Hatchdoor's own page, an origin on `HATCHDOOR_MCP_ALLOWED_ORIGINS` and Public address are accepted. With no `Origin`, a `Sec-Fetch-Site: cross-site` header is refused too. `curl` sends neither and is unaffected.
+
+Neither check stops a website from showing Hatchdoor inside an invisible frame and lining its buttons up under something you think you are clicking (clickjacking): the clicks happen on Hatchdoor's own page, so they pass both checks. Every response therefore carries `X-Frame-Options: DENY` and `Content-Security-Policy: frame-ancestors 'none'`, with or without a web token, and the browser refuses to draw Hatchdoor inside any other page. A side effect is that Hatchdoor cannot be embedded in a dashboard or a Home Assistant panel; see [[How to troubleshoot common problems#Hatchdoor won't show inside another page]].
+
+Behind a proxy that forwards your own domain name to a token-less loopback Hatchdoor, set Public address to that address, or set a web token. Neither check runs once a web token is set, or in demo mode, and `/mcp` keeps its own Origin check described below.
 
 ## MCP bearer token
 
@@ -36,6 +47,8 @@ Two switches apply on top of the token, each on its own:
 
 - **`HATCHDOOR_MCP_ENABLED`**: off by default. While it is off, `/mcp` returns `404`, as if the endpoint did not exist.
 - **`HATCHDOOR_MCP_WRITE_ENABLED`**: off by default, even when MCP is on. It separates an agent that can only read from one that can also create, edit, move or delete notes. [[MCP tools reference]] lists the tools each switch allows.
+
+Even with writes on, an agent can add or move a Vault only to a folder inside the Vault mount (`VAULT_PATH`). A note can hold text written to steer an agent, and without this limit such a note could get a folder like `/etc` or a home folder registered as a Vault and then read and changed through the note tools. A folder outside the mount can still be added from **Settings** in the web app, and an agent can then work in it like any other Vault.
 
 MCP also checks the request's `Origin` header against an allow-list (`HATCHDOOR_MCP_ALLOWED_ORIGINS`) as a defense against DNS-rebinding attacks, and validates the `MCP-Protocol-Version` header. Neither is a secret. Both run before the token check on every request.
 
@@ -54,7 +67,7 @@ These checks exist only on a deployment with a web token. With none, both routes
 
 On the download route the MCP token is held to the **same limits it has over `/mcp`**, so the URL is no way around them:
 
-- **Size.** It can read up to `HATCHDOOR_MCP_MAX_BASE64_BYTES` (5 MiB by default), the same ceiling `get_attachment`'s base64 encoding enforces, and not the route's own, much larger limit. An attachment over that returns `413`. Lower the setting and both paths follow.
+- **Size.** It can read up to `HATCHDOOR_MCP_MAX_BASE64_BYTES` (5 MiB by default), the setting `get_attachment`'s base64 encoding is held to, and not the route's own, much larger limit. Base64 also stops at about 5.95 MiB, what one MCP reply can carry, so above that the URL is the only way to fetch a file, and still no further than the setting. An attachment over that returns `413`. Lower the setting and both paths follow.
 - **Rate.** The request spends the same per-token quota and concurrency budget an MCP tool call spends, drawn from the same counter, and gets `429` with `Retry-After` when it runs out. Fetching through the URL does not give a second allowance.
 
 A request with the **web** token is held to neither limit. It comes from the browser, which already has the whole Vault.

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { attachmentEmbedPath } from "./attachmentDrop";
+import { parseNoteEmbedHref } from "./noteEmbeds";
 import { resolveAssetHref, rewriteWikilinks } from "./wikilinks";
 
 const VAULT_ID = "vault-1";
@@ -140,6 +141,24 @@ describe("rewriteWikilinks asset resolution", () => {
     );
   });
 
+  // #579, ADR-53: a canvas is not drawn, so linked or embedded it is a link
+  // to the file, which the asset route sends as a download.
+  it("turns a canvas link and a canvas embed into a link to the file", () => {
+    const assets = new Map([["Plan.canvas", "Boards/Plan.canvas"]]);
+
+    expect(
+      rewriteWikilinks(
+        VAULT_ID,
+        "[[Plan.canvas]] and ![[Plan.canvas|the board]]",
+        "Notes/Some note.md",
+        new Map(),
+        assets,
+      ),
+    ).toBe(
+      "[Plan\\.canvas](/api/v1/vaults/vault-1/assets/Boards/Plan.canvas) and [the board](/api/v1/vaults/vault-1/assets/Boards/Plan.canvas)",
+    );
+  });
+
   it("keeps the anchor suffix when the target resolves", () => {
     const assets = new Map([["Plan.pdf", "98_Attachments/Plan.pdf"]]);
 
@@ -169,7 +188,35 @@ describe("rewriteWikilinks asset resolution", () => {
   });
 });
 
-describe("rewriteWikilinks with note embeds (#573)", () => {
+describe("rewriteWikilinks with block links (#578)", () => {
+  const other = { slug: "other-note", archived: false };
+  const link = (markdown: string, target: string) =>
+    rewriteWikilinks(VAULT_ID, markdown, "Home.md", new Map([[target, other]]));
+
+  it("points a block link at the block's anchor", () => {
+    expect(link("[[Other note#^abc]]", "Other note#^abc")).toBe(
+      "[Other note](/v/vault-1/n/other-note#^abc)",
+    );
+    expect(link("[[Other note^abc|see]]", "Other note^abc")).toBe(
+      "[see](/v/vault-1/n/other-note#^abc)",
+    );
+    expect(link("[[#^abc]]", "#^abc")).toContain(
+      "(/v/vault-1/n/other-note#^abc)",
+    );
+  });
+
+  it("leaves a heading link as it was", () => {
+    expect(link("[[Other note#Some Heading]]", "Other note#Some Heading")).toBe(
+      "[Other note](/v/vault-1/n/other-note#some-heading)",
+    );
+    // A heading that happens to be named like the block id is another place.
+    expect(link("[[Other note#abc]]", "Other note#abc")).toBe(
+      "[Other note](/v/vault-1/n/other-note#abc)",
+    );
+  });
+});
+
+describe("rewriteWikilinks with note embeds (#573, #699)", () => {
   const other = { slug: "other-note", archived: false };
   const embed = (
     markdown: string,
@@ -184,30 +231,45 @@ describe("rewriteWikilinks with note embeds (#573)", () => {
       new Map(assets),
     );
 
-  it("draws an embedded note as a link to it, not an image", () => {
+  it("marks an embedded note for the renderer to draw, not an image (#699)", () => {
     const output = embed("![[Other note]]", [["Other note", other]]);
-    expect(output).toBe("[Other note](/v/vault-1/n/other-note)");
-    expect(output.startsWith("!")).toBe(false);
+    expect(output).toBe("[Other note](/__embed__/other-note)");
+    expect(parseNoteEmbedHref("/__embed__/other-note")).toEqual({
+      slug: "other-note",
+      archived: false,
+      anchor: "",
+    });
   });
 
-  it("links a heading embed to the heading and a block embed to the note", () => {
+  it("carries a heading embed's and a block embed's anchor", () => {
     expect(
       embed("![[Other note#Some Heading]]", [
         ["Other note#Some Heading", other],
       ]),
-    ).toBe("[Other note](/v/vault-1/n/other-note#some-heading)");
+    ).toBe("[Other note](/__embed__/other-note#some-heading)");
     expect(
       embed("![[Other note#^abc123]]", [["Other note#^abc123", other]]),
-    ).toBe("[Other note](/v/vault-1/n/other-note)");
+    ).toBe("[Other note](/__embed__/other-note#^abc123)");
+    expect(
+      embed("![[Other note^abc123]]", [["Other note^abc123", other]]),
+    ).toBe("[Other note](/__embed__/other-note#^abc123)");
+    // The Markdown parser hands the renderer the destination percent-encoded.
+    expect(parseNoteEmbedHref("/__embed__/other-note#%5Eabc123")?.anchor).toBe(
+      "^abc123",
+    );
   });
 
-  it("labels and routes an embed the way the same wikilink is", () => {
+  it("labels an embed the way the same wikilink is and keeps an archived slug whole", () => {
     const archived = { slug: "Old/Other note.md", archived: true };
-    expect(embed("![[Old/Other note]]", [["Old/Other note", archived]])).toBe(
-      embed("[[Old/Other note]]", [["Old/Other note", archived]]),
+    const output = embed("![[Old/Other note]]", [["Old/Other note", archived]]);
+    expect(output).toBe(
+      "[Old/Other note](/__embed__/Old/Other%20note.md?archived)",
     );
+    expect(
+      parseNoteEmbedHref("/__embed__/Old/Other%20note.md?archived"),
+    ).toEqual({ slug: "Old/Other note.md", archived: true, anchor: "" });
     expect(embed("![[Other note|alias]]", [["Other note", other]])).toBe(
-      "[alias](/v/vault-1/n/other-note)",
+      "[alias](/__embed__/other-note)",
     );
   });
 
@@ -224,12 +286,12 @@ describe("rewriteWikilinks with note embeds (#573)", () => {
         [["Other note.md", other]],
         [["Other note.md", "Other note.md"]],
       ),
-    ).toBe("[Other note\\.md](/v/vault-1/n/other-note)");
+    ).toBe("[Other note\\.md](/__embed__/other-note)");
   });
 
   it("finds a note whose name ends like an extension when no file matches", () => {
     expect(embed("![[Release 2.8]]", [["Release 2.8", other]])).toBe(
-      "[Release 2\\.8](/v/vault-1/n/other-note)",
+      "[Release 2\\.8](/__embed__/other-note)",
     );
   });
 
@@ -328,6 +390,12 @@ describe("rewriteWikilinks with Markdown note links (ADR-28)", () => {
       rewrite("[a](Install.md#First%20Run) [b](Install.md#first-run)"),
     ).toBe(
       "[a](/v/vault-1/n/install#first-run) [b](/v/vault-1/n/install#first-run)",
+    );
+  });
+
+  it("points a block link at the block's anchor (#578)", () => {
+    expect(rewrite("[a](Install.md#^abc) [b](Install.md#%5Eabc)")).toBe(
+      "[a](/v/vault-1/n/install#^abc) [b](/v/vault-1/n/install#^abc)",
     );
   });
 

@@ -19,12 +19,17 @@ use crate::vault_registry::VaultId;
 use crate::vault_runtime::{IndexedAssets, VaultCapabilities, VaultCollectionRuntime};
 
 mod assets;
+mod link_findings;
 mod query;
 mod saved_query;
 mod sections;
 mod text_match;
 
 pub(crate) use assets::{AssetPathError, AssetReadError, ResolvedAsset, encode_relative_path};
+pub use link_findings::{
+    LINK_FINDINGS_DEFAULT_LIMIT, LINK_FINDINGS_MAX_LIMIT, LinkFinding, LinkFindingKind,
+    LinkFindingsResponse,
+};
 pub use query::{NoteQuery, NoteQueryCondition, NoteQueryResponse, NoteQueryRow, PropertyOperator};
 pub use saved_query::{
     SavedQueriesResponse, SavedQueryColumn, SavedQueryEmpty, SavedQueryEvaluation,
@@ -193,6 +198,7 @@ impl VaultReadError {
             // Exact reads of one Note's contents.
             | "note_not_found"
             | "note_unreadable"
+            | "note_too_large"
             | "invalid_frontmatter"
             // One addressed saved query (#277), reported by MCP's
             // `evaluate_saved_query`; no HTTP route evaluates a single one.
@@ -205,11 +211,14 @@ impl VaultReadError {
             // A text match (ADR-46), reported by MCP's `find_text`; no HTTP
             // route runs one, so the HTTP adapter gives it no status yet.
             | "invalid_text_match"
+            | "invalid_link_findings_cursor"
             // A section read (#502), reported by MCP's `get_note_section`;
             // no HTTP route runs one either.
             | "invalid_heading_selection"
             // `note_attachments` reads the Note through the write module's
-            // attachment lister, whose only failure on a read is I/O.
+            // attachment lister, which fails on I/O, or as a conflict when an
+            // attachment stops being a regular file mid-listing (#736); that
+            // one reaches the caller as a retryable `vault_unavailable`.
             | "write_failed" => self.code.as_str(),
             _ => "vault_unavailable",
         }
@@ -402,6 +411,23 @@ pub struct VaultExplorerFolder {
     pub truncated: bool,
     pub folders: Vec<VaultExplorerFolder>,
     pub notes: Vec<VaultExplorerNote>,
+    /// The files in this folder that are listed without being notes: its
+    /// Obsidian canvases, for the web explorer to offer as downloads
+    /// (ADR-53). Present only on a read that asked for them with
+    /// [`TreeScope::include_files`], which the agent surface never does, so
+    /// it is left out of that surface's schema and out of any payload where
+    /// it is empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(skip)]
+    pub files: Vec<VaultExplorerFile>,
+}
+
+/// A listed file that is not a note. `relative_path` is the Vault-relative
+/// path the asset route serves it at.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema, Deserialize)]
+pub struct VaultExplorerFile {
+    pub name: String,
+    pub relative_path: String,
 }
 
 fn is_false(value: &bool) -> bool {
@@ -434,6 +460,9 @@ pub struct TreeScope {
     pub max_depth: Option<u32>,
     /// Whether Notes appear at all. Folders and their counts always do.
     pub include_notes: bool,
+    /// Whether each folder lists its canvases (ADR-53). Off unless asked
+    /// for: only the web explorer shows them.
+    pub include_files: bool,
 }
 
 impl Default for TreeScope {
@@ -444,6 +473,7 @@ impl Default for TreeScope {
             folder: None,
             max_depth: None,
             include_notes: true,
+            include_files: false,
         }
     }
 }
@@ -791,9 +821,7 @@ impl<'a> VaultReadCore<'a> {
                 note.filter(|note| !self.surface.hides(note.layer.as_deref()))
                     .map(|note| VaultQualifiedNote::new(vault_id, note))
             })
-            .map_err(|error| {
-                unavailable(vault_id, "vault_read_unavailable", error.to_string(), true)
-            })
+            .map_err(|error| note_read_error(vault_id, slug, error, "vault_read_unavailable", true))
     }
 
     pub fn exact_note_links(
@@ -802,7 +830,7 @@ impl<'a> VaultReadCore<'a> {
         slug: &str,
     ) -> Result<Option<VaultQualifiedLinks>, VaultReadError> {
         let index = self
-            .control_block(vault_id)?
+            .readable_control_block(vault_id)?
             .linked_index()
             .map_err(|error| runtime_error(vault_id, error))?;
         if self.hidden_slug(&index, slug) {
@@ -880,7 +908,7 @@ impl<'a> VaultReadCore<'a> {
             .iter()
             .map(|raw_target| {
                 index
-                    .resolve_wikilink(raw_target)
+                    .resolve_wikilink_from(raw_target, note_dir)
                     .filter(|note| !self.surface.hides(note.layer.as_deref()))
                     .map(visible)
             })
@@ -936,10 +964,15 @@ impl<'a> VaultReadCore<'a> {
     ) -> Result<VaultReadProjection<Vec<VaultTree>>, VaultReadError> {
         let projection =
             self.try_collection(scope, NoteBodies::Omit, |vault_id, vault_name, snapshot| {
+                let files = if tree_scope.include_files {
+                    self.listed_files(vault_id)
+                } else {
+                    Vec::new()
+                };
                 Ok(VaultTree {
                     vault_id,
                     vault_name: vault_name.to_string(),
-                    tree: tree_for(vault_id, snapshot, &tree_scope)?,
+                    tree: tree_for(vault_id, snapshot, &tree_scope, &files)?,
                 })
             })?;
 
@@ -958,6 +991,29 @@ impl<'a> VaultReadCore<'a> {
             return Err(no_vault_has_folder(requested));
         }
         Ok(projection)
+    }
+
+    /// The Vault-relative paths of the canvases a tree lists for one Vault:
+    /// those its latest Index turn catalogued, so nothing excluded or noise,
+    /// and none under a layer this surface withholds. Empty before the first
+    /// turn has scanned the Vault, or when the Vault cannot be read: the
+    /// notes of the same tree come from a published snapshot and say so
+    /// themselves.
+    fn listed_files(&self, vault_id: VaultId) -> Vec<String> {
+        let Some(assets) = self
+            .control_block(vault_id)
+            .ok()
+            .and_then(|control| control.indexed_assets())
+        else {
+            return Vec::new();
+        };
+        assets
+            .asset_paths
+            .iter()
+            .filter(|path| is_listed_file(path))
+            .filter(|path| !self.surface.hides(assets.layers.layer_for(path)))
+            .cloned()
+            .collect()
     }
 
     pub fn statistics(
@@ -1258,9 +1314,8 @@ impl<'a> VaultReadCore<'a> {
         // while the snapshot loads. A Vault the gate below refuses gets no
         // history read at all.
         let dating = self.note_dating(vault_id);
-        // The one report that counts words rather than rows, so the one read
-        // that asks for Markdown text. Every other collection read projects
-        // structure alone and never pays for it.
+        // Counting words needs Markdown text, unlike structural statistics.
+        // Load it from the same snapshot as the note identities.
         let projection = self.collection_with(
             VaultScope::One(vault_id),
             NoteBodies::Load,
@@ -1311,7 +1366,7 @@ impl<'a> VaultReadCore<'a> {
     /// rather than callers discovering a raw filesystem error later and
     /// reporting an unrelated, non-retryable status.
     pub fn vault_directory(&self, vault_id: VaultId) -> Result<std::path::PathBuf, VaultReadError> {
-        let control = self.control_block(vault_id)?;
+        let control = self.readable_control_block(vault_id)?;
         control
             .ensure_accepting_operations()
             .map_err(|error| runtime_error(vault_id, error))?;
@@ -1418,14 +1473,8 @@ impl<'a> VaultReadCore<'a> {
         let Some(entry) = self.visible_entry(&index, slug) else {
             return Ok(None);
         };
-        let content = std::fs::read_to_string(&entry.path).map_err(|error| {
-            unavailable(
-                vault_id,
-                "note_unreadable",
-                format!("failed to read note '{}': {error}", entry.relative_path),
-                false,
-            )
-        })?;
+        let content = crate::vault::read_note_text(&entry.path)
+            .map_err(|error| note_read_error(vault_id, slug, error, "note_unreadable", false))?;
         Ok(Some((entry, content)))
     }
 
@@ -1440,7 +1489,9 @@ impl<'a> VaultReadCore<'a> {
         let Some(entry) = self.visible_entry(&index, slug) else {
             return Ok(None);
         };
-        crate::vault::list_note_attachments(control.vault_path(), &index.layers, &entry)
+        let content = crate::vault::read_note_text(&entry.path)
+            .map_err(|error| note_read_error(vault_id, slug, error, "note_unreadable", false))?;
+        crate::vault::list_note_attachments(control.vault_path(), &index.layers, &entry, &content)
             .map(Some)
             .map_err(|error| {
                 let error = crate::vault_mutation::write_operation_error(vault_id, error);
@@ -1514,7 +1565,7 @@ impl<'a> VaultReadCore<'a> {
         if self.surface == BrowseSurface::Everything {
             return Ok(true);
         }
-        let control = self.control_block(vault_id)?;
+        let control = self.readable_control_block(vault_id)?;
         let surface = match control.indexed_assets() {
             Some(assets) => {
                 control
@@ -1547,7 +1598,7 @@ impl<'a> VaultReadCore<'a> {
         let note = index
             .read_note_by_slug(slug)
             .map_err(|error| {
-                unavailable(vault_id, "vault_read_unavailable", error.to_string(), true)
+                note_read_error(vault_id, slug, error, "vault_read_unavailable", true)
             })?
             .filter(|note| !self.surface.hides(note.layer.as_deref()));
         Ok(note.map(|note| NoteDownload {
@@ -1598,6 +1649,27 @@ impl<'a> VaultReadCore<'a> {
         })
     }
 
+    /// [`Self::control_block`] for a read of the Vault's content: refused
+    /// while the Vault reports itself unavailable, even when its folder has
+    /// since come back and could be read (#641). The status is what callers
+    /// were told, so content is served only once it says `active`.
+    fn readable_control_block(
+        &self,
+        vault_id: VaultId,
+    ) -> Result<crate::vault_runtime::VaultControlBlock, VaultReadError> {
+        let control = self.control_block(vault_id)?;
+        let snapshot = control.snapshot();
+        if snapshot.activation != crate::vault_runtime::VaultActivationStatus::Active {
+            return Err(unavailable(
+                vault_id,
+                "vault_read_unavailable",
+                inactive_vault_message(snapshot.activation_error.as_ref()),
+                true,
+            ));
+        }
+        Ok(control)
+    }
+
     /// The gated control block together with a freshly built catalog of its
     /// Vault, shared by every exact-read method that needs one (`catalog`
     /// discards the control block; `exact_note_for_download` keeps it for
@@ -1617,7 +1689,7 @@ impl<'a> VaultReadCore<'a> {
         ),
         VaultReadError,
     > {
-        let control = self.control_block(vault_id)?;
+        let control = self.readable_control_block(vault_id)?;
         let index = control
             .authoritative_catalog()
             .map_err(|error| runtime_error(vault_id, error))?;
@@ -1664,7 +1736,7 @@ impl<'a> VaultReadCore<'a> {
     }
 
     /// [`Self::collection`] for a projection that reads Markdown text rather
-    /// than structure. Only the detailed stats report does, and it takes the
+    /// than structure. Detailed statistics and broken-link findings take the
     /// bodies from the same snapshot read as the note list so both describe
     /// one published generation.
     fn collection_with<T>(
@@ -1698,7 +1770,10 @@ impl<'a> VaultReadCore<'a> {
         let mut data = Vec::new();
         let mut participants = Vec::with_capacity(selected.len());
         for selected in selected {
-            let published = self.cache.read_vault_snapshot(selected.vault_id, bodies);
+            let published = match &selected.inactive {
+                Some(message) => Err(message.clone()),
+                None => self.cache.read_vault_snapshot(selected.vault_id, bodies),
+            };
             let participant = match published {
                 Ok(Some(published)) => {
                     let state = match published.status.freshness {
@@ -1761,6 +1836,20 @@ impl<'a> VaultReadCore<'a> {
 pub(crate) struct SelectedVault {
     pub(crate) vault_id: VaultId,
     pub(crate) vault_name: String,
+    /// Why this enabled Vault serves nothing right now: it is not `active`,
+    /// so even an index it built earlier is withheld (#641).
+    pub(crate) inactive: Option<String>,
+}
+
+/// What a read of a Vault that is not `active` reports, carrying the
+/// activation error's own words when there is one.
+pub(crate) fn inactive_vault_message(
+    error: Option<&crate::vault_runtime::VaultRuntimeError>,
+) -> String {
+    match error {
+        Some(error) => format!("Vault is unavailable: {}", error.message),
+        None => "Vault is unavailable and cannot serve reads".to_string(),
+    }
 }
 
 pub(crate) fn selected_vaults(
@@ -1799,6 +1888,8 @@ pub(crate) fn selected_vaults(
         .map(|vault| SelectedVault {
             vault_id: vault.vault_id,
             vault_name: vault.name.clone(),
+            inactive: (vault.activation != crate::vault_runtime::VaultActivationStatus::Active)
+                .then(|| inactive_vault_message(vault.activation_error.as_ref())),
         })
         .collect())
 }
@@ -1860,6 +1951,50 @@ fn saved_query_error(vault_id: VaultId, code: &str, message: String) -> VaultRea
     }
 }
 
+/// A Note's file that could not be read (#636). A file over the size bound
+/// or not a regular file is refused for good; any other failure is reported
+/// under `io_code` and `io_retryable`.
+fn note_read_error(
+    vault_id: VaultId,
+    slug: &str,
+    error: crate::vault::BoundedReadError,
+    io_code: &str,
+    io_retryable: bool,
+) -> VaultReadError {
+    use crate::vault::BoundedReadError;
+    match error {
+        BoundedReadError::TooLarge { limit } => unavailable(
+            vault_id,
+            "note_too_large",
+            format!(
+                "note '{slug}' is larger than {} MiB, the most Hatchdoor reads",
+                limit / (1024 * 1024)
+            ),
+            false,
+        ),
+        BoundedReadError::NotRegular => unavailable(
+            vault_id,
+            "note_unreadable",
+            format!("note '{slug}' is not a regular file"),
+            false,
+        ),
+        // Retrying cannot help, so every exact read reports it the same way
+        // (#637); `find_text` still matches the note's text lossily.
+        BoundedReadError::NotUtf8 => unavailable(
+            vault_id,
+            "note_unreadable",
+            format!("note '{slug}' is not valid UTF-8"),
+            false,
+        ),
+        BoundedReadError::Io(error) => unavailable(
+            vault_id,
+            io_code,
+            format!("failed to read note '{slug}': {error}"),
+            io_retryable,
+        ),
+    }
+}
+
 fn unavailable(vault_id: VaultId, code: &str, message: String, retryable: bool) -> VaultReadError {
     VaultReadError {
         code: code.to_string(),
@@ -1918,8 +2053,19 @@ fn tree_for(
     vault_id: VaultId,
     snapshot: &VaultSnapshotRead,
     tree_scope: &TreeScope,
+    files: &[String],
 ) -> Result<VaultExplorerFolder, VaultReadError> {
     let mut root = FolderBuilder::default();
+    for relative_path in files {
+        let segments = relative_path.split('/').collect::<Vec<_>>();
+        let Some((name, folders)) = segments.split_last() else {
+            continue;
+        };
+        root.folder_at(folders).files.push(VaultExplorerFile {
+            name: (*name).to_string(),
+            relative_path: relative_path.clone(),
+        });
+    }
     for note in &snapshot.notes {
         let segments = note.relative_path.split('/').collect::<Vec<_>>();
         root.insert(
@@ -1938,6 +2084,15 @@ fn tree_for(
             .ok_or_else(|| folder_not_found(vault_id, requested))?,
     };
     Ok(folder.project(name, tree_scope.max_depth, tree_scope.include_notes))
+}
+
+/// Whether a catalogued asset is one a tree lists: an Obsidian canvas
+/// (ADR-53). Images and PDFs are reached through the notes that embed them.
+fn is_listed_file(relative_path: &str) -> bool {
+    std::path::Path::new(relative_path)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("canvas"))
 }
 
 /// A tree read narrowed to a folder this Vault does not have.
@@ -2007,18 +2162,21 @@ fn graph_nodes(vault_id: VaultId, snapshot: &VaultSnapshotRead) -> Vec<VaultGrap
 struct FolderBuilder {
     folders: BTreeMap<String, FolderBuilder>,
     notes: Vec<VaultExplorerNote>,
+    files: Vec<VaultExplorerFile>,
 }
 
 impl FolderBuilder {
     fn insert(&mut self, segments: &[&str], note: VaultExplorerNote) {
-        let Some((head, tail)) = segments.split_first() else {
-            self.notes.push(note);
-            return;
-        };
-        self.folders
-            .entry((*head).to_string())
-            .or_default()
-            .insert(tail, note);
+        self.folder_at(segments).notes.push(note);
+    }
+
+    /// The folder `segments` below this one, made on the way down.
+    fn folder_at(&mut self, segments: &[&str]) -> &mut FolderBuilder {
+        let mut folder = self;
+        for segment in segments {
+            folder = folder.folders.entry((*segment).to_string()).or_default();
+        }
+        folder
     }
 
     /// The folder at a Vault-relative path, with the name the Vault spells it
@@ -2069,6 +2227,7 @@ impl FolderBuilder {
                 truncated: !self.folders.is_empty() || (include_notes && note_count > 0),
                 folders: Vec::new(),
                 notes: Vec::new(),
+                files: Vec::new(),
             };
         }
         let mut notes = if include_notes {
@@ -2088,6 +2247,8 @@ impl FolderBuilder {
                 .map(|(child_name, child)| child.project(child_name, child_depth, include_notes))
                 .collect(),
             notes,
+            // Already in path order, which within one folder is name order.
+            files: self.files.clone(),
         }
     }
 }
@@ -2242,29 +2403,7 @@ fn detailed_stats_for(
             .then_with(|| a.folder.cmp(&b.folder))
     });
 
-    let linked_sources: BTreeSet<&str> = snapshot
-        .links
-        .iter()
-        .map(|link| link.source_slug.as_str())
-        .collect();
-    let linked_targets: BTreeSet<&str> = snapshot
-        .links
-        .iter()
-        .map(|link| link.target_slug.as_str())
-        .collect();
-    let mut orphan_notes: Vec<NoteRef> = snapshot
-        .notes
-        .iter()
-        .filter(|note| {
-            !linked_sources.contains(note.slug.as_str())
-                && !linked_targets.contains(note.slug.as_str())
-        })
-        .map(|note| NoteRef {
-            title: note.title.clone(),
-            slug: note.slug.clone(),
-        })
-        .collect();
-    orphan_notes.sort_by(|a, b| a.title.cmp(&b.title));
+    let orphan_notes = link_findings::orphan_notes(snapshot);
 
     let mut no_tag_notes: Vec<NoteRef> = snapshot
         .notes
@@ -2452,11 +2591,11 @@ fn created_date(
     };
     match history {
         HistoryRead::Ready(first_adds) => {
-            // A snapshot note's path is Vault-relative and drops the `.md`
-            // its file, and so its history, carries.
+            // History knows the note by its file's name, extension spelled
+            // as on disk (#675), under the Vault's folder in the repository.
             let path = match prefix {
-                Some(prefix) => format!("{prefix}/{}.md", note.relative_path),
-                None => format!("{}.md", note.relative_path),
+                Some(prefix) => format!("{prefix}/{}", note.file_path()),
+                None => note.file_path(),
             };
             match first_adds.lookup(&path) {
                 FirstAdd::Known(created) => (created, None),
@@ -2654,6 +2793,7 @@ mod parsing_tests {
             title: slug.to_string(),
             slug: slug.to_string(),
             relative_path: slug.to_string(),
+            extension: "md".to_string(),
             size_bytes: 0,
             mtime_ns: 0,
             layer: layer.map(str::to_string),
@@ -2824,6 +2964,19 @@ mod parsing_tests {
         let note = dated_note("ideas/Idea", mtime(2026, 9, 18), None);
         let git = git_dating(
             ready(&[("notes/ideas/Idea.md", Some(mtime(2026, 4, 2)))]),
+            Some("notes"),
+        );
+
+        assert_eq!(created_date(&note, &git), (mtime(2026, 4, 2), None));
+    }
+
+    /// History knows a `.MD` note by its own file name (#675).
+    #[test]
+    fn a_git_vault_dates_a_note_by_the_case_its_extension_is_written_in() {
+        let mut note = dated_note("ideas/Upper", mtime(2026, 9, 18), None);
+        note.extension = "MD".to_string();
+        let git = git_dating(
+            ready(&[("notes/ideas/Upper.MD", Some(mtime(2026, 4, 2)))]),
             Some("notes"),
         );
 
@@ -3050,6 +3203,156 @@ mod tests {
     // -----------------------------------------------------------------------
     // Text match: every Note containing one literal string (#500, ADR-46)
     // -----------------------------------------------------------------------
+
+    #[test]
+    fn link_findings_reports_missing_targets_outside_code() {
+        let workspace = workspace(&[(
+            "Notes",
+            &[(
+                "Home.md",
+                "[[Absent]] [missing](Gone.md) `[[Inline]]`\n```md\n[[Fenced]]\n```\n![[missing.png]]",
+            )],
+        )]);
+        let reads = VaultReadCore::new(&workspace.cache, &workspace.vaults);
+        let result = reads
+            .find_link_problems(
+                workspace.vault_ids[0],
+                super::LinkFindingKind::BrokenLinks,
+                None,
+                None,
+            )
+            .expect("findings");
+        assert_eq!(result.data.total, 2);
+        assert_eq!(
+            serde_json::to_value(&result.data.findings).unwrap(),
+            serde_json::json!([
+                {"target": "Absent", "notes": [{"title": "Home", "slug": "home"}]},
+                {"target": "Gone.md", "notes": [{"title": "Home", "slug": "home"}]}
+            ])
+        );
+    }
+
+    #[test]
+    fn link_findings_orphans_agree_with_stats_and_dead_ends_are_paged() {
+        use super::LinkFindingKind::{DeadEnds, Orphans};
+        let workspace = workspace(&[(
+            "Notes",
+            &[
+                ("Home.md", "[[Plan]]"),
+                ("Plan.md", "A linked destination."),
+                ("Alone.md", "An isolated note."),
+                ("Broken.md", "[[Missing]]"),
+            ],
+        )]);
+        let reads = VaultReadCore::new(&workspace.cache, &workspace.vaults);
+        let id = workspace.vault_ids[0];
+        let orphans = reads
+            .find_link_problems(id, Orphans, None, None)
+            .expect("orphans")
+            .data;
+        let stats = reads.statistics_detail(id).expect("stats").stats;
+        assert_eq!(
+            serde_json::to_value(&orphans.findings).unwrap(),
+            serde_json::to_value(stats.orphan_notes).unwrap()
+        );
+        assert_eq!(orphans.total, 2);
+        let page = reads
+            .find_link_problems(id, DeadEnds, Some(2), None)
+            .expect("first page")
+            .data;
+        assert_eq!(page.total, 3);
+        assert_eq!(
+            serde_json::to_value(&page.findings).unwrap(),
+            serde_json::json!([
+                {"title":"Alone", "slug":"alone"}, {"title":"Broken", "slug":"broken"}
+            ])
+        );
+        let last = reads
+            .find_link_problems(id, DeadEnds, Some(2), page.next_cursor.as_deref())
+            .expect("last page")
+            .data;
+        assert_eq!(last.total, 3);
+        assert_eq!(
+            serde_json::to_value(&last.findings).unwrap(),
+            serde_json::json!([{"title":"Plan", "slug":"plan"}])
+        );
+        assert!(last.next_cursor.is_none());
+        assert!(
+            reads
+                .find_link_problems(id, DeadEnds, None, Some("999"))
+                .unwrap()
+                .data
+                .findings
+                .is_empty()
+        );
+        let error = reads
+            .find_link_problems(id, DeadEnds, None, Some("bad"))
+            .unwrap_err();
+        assert_eq!(error.public_code(), "invalid_link_findings_cursor");
+        assert!(!error.retryable);
+    }
+
+    #[test]
+    fn link_findings_keep_source_context_ambiguity_and_one_generation() {
+        use super::LinkFindingKind::BrokenLinks;
+        let workspace = workspace(&[(
+            "Notes",
+            &[
+                (
+                    "Root.md",
+                    "[[Duplicate]] [path](../Target.md) [[Shared missing]] [[Shared missing]]",
+                ),
+                (
+                    "a/Source.md",
+                    "[[Duplicate]] [path](../Target.md) [[Shared missing]]",
+                ),
+                ("a/Duplicate.md", "First copy."),
+                ("b/Duplicate.md", "Second copy."),
+                ("Target.md", "A real destination."),
+                ("archive/.hatchdoor-layer", "archive"),
+                ("archive/Old.md", "[[Hidden missing]]"),
+                (".trash/Trashed.md", "[[Trash missing]]"),
+            ],
+        )]);
+        let id = workspace.vault_ids[0];
+        let reads = VaultReadCore::new(&workspace.cache, &workspace.vaults);
+        // A note added after publication must not change this generation's resolution.
+        std::fs::write(
+            workspace.vault_paths[0].join("Shared missing.md"),
+            "New destination.",
+        )
+        .unwrap();
+        let result = reads
+            .find_link_problems(id, BrokenLinks, Some(2), None)
+            .unwrap()
+            .data;
+        assert_eq!(result.total, 4);
+        assert_eq!(
+            serde_json::to_value(&result.findings).unwrap(),
+            serde_json::json!([
+                {"target":"../Target.md", "notes":[{"title":"Root", "slug":"root"}]},
+                {"target":"Duplicate", "notes":[{"title":"Root", "slug":"root"}]}
+            ])
+        );
+        let last = reads
+            .find_link_problems(id, BrokenLinks, Some(2), result.next_cursor.as_deref())
+            .unwrap()
+            .data;
+        assert_eq!(last.total, 4);
+        assert_eq!(
+            serde_json::to_value(&last.findings).unwrap(),
+            serde_json::json!([
+                {"target":"Hidden missing", "notes":[{"title":"Old", "slug":"old"}]},
+                {"target":"Shared missing", "notes":[{"title":"Root", "slug":"root"}, {"title":"Source", "slug":"source"}]}
+            ])
+        );
+        assert!(last.next_cursor.is_none());
+        let restricted = reads
+            .on_surface(BrowseSurface::DefaultOnly)
+            .find_link_problems(id, BrokenLinks, None, None)
+            .unwrap();
+        assert_eq!(restricted.data.total, 3);
+    }
 
     fn text(needle: &str) -> TextMatchRequest {
         TextMatchRequest {
@@ -3545,6 +3848,164 @@ mod tests {
         assert!(response.notes.is_empty());
         assert_eq!(response.total_unread, 1);
         assert_eq!(response.unread[0].reason, TextMatchUnreadReason::Unreadable);
+    }
+
+    /// A FIFO never written to would block a plain `open` for ever (#636).
+    #[cfg(unix)]
+    #[test]
+    fn a_text_match_reports_a_note_replaced_by_a_fifo_as_unread_without_blocking() {
+        let workspace = workspace(&[("Notes", &[("Other.md", "zzz"), ("Kept.md", "zzz")])]);
+        let reads = VaultReadCore::new(&workspace.cache, &workspace.vaults);
+        let path = workspace.vault_paths[0].join("Other.md");
+        std::fs::remove_file(&path).expect("remove note");
+        crate::vault::make_fifo(&path);
+
+        let response = found(&reads, VaultScope::All, &text("zzz"));
+        assert_eq!(found_paths(&response), ["Kept"]);
+        assert_eq!(response.total_unread, 1);
+        assert_eq!(response.unread[0].relative_path, "Other");
+        assert_eq!(response.unread[0].reason, TextMatchUnreadReason::Unreadable);
+    }
+
+    #[test]
+    fn a_text_match_reports_a_note_over_the_size_limit_as_unread() {
+        let workspace = workspace(&[("Notes", &[("Big.md", "zzz"), ("Kept.md", "zzz")])]);
+        let reads = VaultReadCore::new(&workspace.cache, &workspace.vaults);
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(workspace.vault_paths[0].join("Big.md"))
+            .expect("open note");
+        file.set_len(200 * 1024 * 1024).expect("sparse note");
+
+        let response = found(&reads, VaultScope::All, &text("zzz"));
+        assert_eq!(found_paths(&response), ["Kept"]);
+        assert_eq!(response.total_unread, 1);
+        assert_eq!(response.unread[0].reason, TextMatchUnreadReason::Unreadable);
+    }
+
+    #[test]
+    fn an_exact_read_refuses_a_note_over_the_size_limit() {
+        let workspace = workspace(&[("Notes", &[("Big.md", "# Big")])]);
+        let reads = VaultReadCore::new(&workspace.cache, &workspace.vaults);
+        let vault = workspace.vault_ids[0];
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(workspace.vault_paths[0].join("Big.md"))
+            .expect("open note");
+        file.set_len(200 * 1024 * 1024).expect("sparse note");
+
+        let error = reads.exact_note(vault, "big").expect_err("too large");
+        assert_eq!(error.public_code(), "note_too_large");
+        assert!(!error.retryable);
+        let Err(error) = reads.exact_note_for_download(vault, "big") else {
+            panic!("a download read the note");
+        };
+        assert_eq!(error.public_code(), "note_too_large");
+        let error = reads.note_outline(vault, "big").expect_err("too large");
+        assert_eq!(error.public_code(), "note_too_large");
+        let error = reads.note_attachments(vault, "big").expect_err("too large");
+        assert_eq!(error.public_code(), "note_too_large");
+    }
+
+    /// Opening such a note answered a retryable `vault_read_unavailable`
+    /// while the outline and frontmatter reads answered `note_unreadable`;
+    /// retrying never helps, so every exact read now says the latter (#637).
+    #[test]
+    fn every_exact_read_refuses_a_note_that_is_not_utf8_the_same_way() {
+        let workspace = workspace(&[("Notes", &[("Odd.md", "# Odd")])]);
+        let reads = VaultReadCore::new(&workspace.cache, &workspace.vaults);
+        let vault = workspace.vault_ids[0];
+        std::fs::write(
+            workspace.vault_paths[0].join("Odd.md"),
+            b"# Odd\n\nlone continuation byte \x80\n",
+        )
+        .expect("write bytes");
+
+        let mut codes = Vec::new();
+        let error = reads.exact_note(vault, "odd").expect_err("not UTF-8");
+        codes.push((error.public_code().to_string(), error.retryable));
+        let Err(error) = reads.exact_note_for_download(vault, "odd") else {
+            panic!("a download read the note");
+        };
+        codes.push((error.public_code().to_string(), error.retryable));
+        let error = reads.note_outline(vault, "odd").expect_err("not UTF-8");
+        codes.push((error.public_code().to_string(), error.retryable));
+        let error = reads
+            .exact_note_frontmatter(vault, "odd")
+            .expect_err("not UTF-8");
+        codes.push((error.public_code().to_string(), error.retryable));
+        let error = reads.note_attachments(vault, "odd").expect_err("not UTF-8");
+        codes.push((error.public_code().to_string(), error.retryable));
+        for (code, retryable) in codes {
+            assert_eq!(code, "note_unreadable");
+            assert!(!retryable);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_exact_read_of_a_note_replaced_by_a_fifo_finds_no_note_without_blocking() {
+        let workspace = workspace(&[("Notes", &[("Odd.md", "# Odd")])]);
+        let reads = VaultReadCore::new(&workspace.cache, &workspace.vaults);
+        let vault = workspace.vault_ids[0];
+        let path = workspace.vault_paths[0].join("Odd.md");
+        std::fs::remove_file(&path).expect("remove note");
+        crate::vault::make_fifo(&path);
+
+        // The catalogue an exact read builds skips what is not a regular
+        // file, so the FIFO is no note at all; `read_bounded` refuses one
+        // that appears between that walk and the read.
+        assert!(reads.exact_note(vault, "odd").expect("read").is_none());
+        assert!(reads.note_outline(vault, "odd").expect("read").is_none());
+    }
+
+    /// A note with an upper-case extension and one whose bytes are not UTF-8
+    /// are listed, counted and matched like any other (#637).
+    #[test]
+    fn a_text_match_reads_odd_notes_the_index_lists() {
+        let workspace = workspace(&[(
+            "Notes",
+            &[("Upper.MD", "upper unique-token"), ("Home.md", "home")],
+        )]);
+        let vault = workspace.vault_ids[0];
+        let root = &workspace.vault_paths[0];
+        std::fs::create_dir_all(root.join("encoding")).expect("folder");
+        std::fs::write(
+            root.join("encoding/invalid-utf8-bytes.md"),
+            b"lone continuation byte \x80 here",
+        )
+        .expect("write bytes");
+        workspace
+            .cache
+            .replace_vault_snapshot(
+                vault,
+                &VaultIndex::build(root).expect("index"),
+                &StubEmbedder::new(384),
+            )
+            .expect("publish snapshot");
+        let reads = VaultReadCore::new(&workspace.cache, &workspace.vaults);
+
+        let response = found(&reads, VaultScope::One(vault), &text("unique-token"));
+        assert_eq!(found_paths(&response), ["Upper"]);
+        assert_eq!(response.total_unread, 0);
+        let response = found(
+            &reads,
+            VaultScope::One(vault),
+            &text("lone continuation byte"),
+        );
+        assert_eq!(found_paths(&response), ["encoding/invalid-utf8-bytes"]);
+        assert_eq!(response.total_unread, 0);
+
+        let statistics = reads
+            .statistics(VaultScope::One(vault))
+            .expect("statistics")
+            .data;
+        assert_eq!(statistics[0].note_count, 3, "every file on disk is counted");
+        let note = reads
+            .exact_note(vault, "upper")
+            .expect("read")
+            .expect("Upper.MD is a note");
+        assert_eq!(note.note.content, "upper unique-token");
     }
 
     #[test]
@@ -4821,6 +5282,91 @@ mod tests {
         )])
     }
 
+    /// #579, ADR-53: the web explorer's tree lists each folder's canvases,
+    /// a tree that did not ask lists none, and a demo withholds one under a
+    /// demoted layer.
+    #[test]
+    fn a_tree_lists_canvases_only_when_asked_and_only_on_its_surface() {
+        let workspace = workspace(&[(
+            "Boards",
+            &[
+                ("Home.md", "# Home"),
+                ("Top.canvas", "{}"),
+                ("Top.png", "not listed"),
+                ("plans/Roadmap.CANVAS", "{}"),
+                ("plans/Alpha.canvas", "{}"),
+                ("only-boards/Lone.canvas", "{}"),
+                ("sources/.hatchdoor-layer", "name: sources\n"),
+                ("sources/Hidden.canvas", "{}"),
+                (".obsidian/Noise.canvas", "{}"),
+            ],
+        )]);
+        let vault_id = workspace.vault_ids[0];
+        let index = VaultIndex::build(&workspace.vault_paths[0]).expect("index");
+        let reads = VaultReadCore::new(&workspace.cache, &workspace.vaults);
+        let with_files = TreeScope {
+            include_files: true,
+            ..TreeScope::default()
+        };
+        let tree = |reads: &VaultReadCore, scope: &TreeScope| {
+            reads
+                .trees(VaultScope::One(vault_id), scope.clone())
+                .expect("tree")
+                .data
+                .remove(0)
+                .tree
+        };
+        fn listed(folder: &VaultExplorerFolder) -> Vec<String> {
+            let mut paths = folder
+                .files
+                .iter()
+                .map(|file| file.relative_path.clone())
+                .collect::<Vec<_>>();
+            for child in &folder.folders {
+                paths.extend(listed(child));
+            }
+            paths
+        }
+
+        // Before an Index turn has scanned the Vault there is nothing to list.
+        assert!(listed(&tree(&reads, &with_files)).is_empty());
+
+        reads
+            .control_block(vault_id)
+            .expect("control block")
+            .retain_indexed_assets(&index);
+
+        let full = tree(&reads, &with_files);
+        assert_eq!(
+            listed(&full),
+            vec![
+                "Top.canvas",
+                "only-boards/Lone.canvas",
+                "plans/Alpha.canvas",
+                "plans/Roadmap.CANVAS",
+                "sources/Hidden.canvas",
+            ]
+        );
+        assert_eq!(full.files[0].name, "Top.canvas");
+        // A folder holding only a canvas is a folder of the tree.
+        assert_eq!(child(&full, "only-boards").note_count, 0);
+
+        assert!(listed(&tree(&reads, &TreeScope::default())).is_empty());
+        let unasked = serde_json::to_value(tree(&reads, &TreeScope::default())).expect("json");
+        assert!(unasked.get("files").is_none(), "{unasked}");
+
+        let demo = reads.on_surface(BrowseSurface::DefaultOnly);
+        assert_eq!(
+            listed(&tree(&demo, &with_files)),
+            vec![
+                "Top.canvas",
+                "only-boards/Lone.canvas",
+                "plans/Alpha.canvas",
+                "plans/Roadmap.CANVAS",
+            ]
+        );
+    }
+
     fn read_tree(workspace: &Workspace, tree_scope: TreeScope) -> VaultExplorerFolder {
         let reads = VaultReadCore::new(&workspace.cache, &workspace.vaults);
         reads
@@ -5203,6 +5749,7 @@ mod tests {
                 folder: Some("archive".to_string()),
                 max_depth: Some(1),
                 include_notes: false,
+                include_files: false,
             },
         );
         let year = child(&deeper, "2024");

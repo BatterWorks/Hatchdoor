@@ -363,7 +363,7 @@ function parseDefinition(line: string): Destination | null {
 
 /**
  * Whether `raw`, a destination as written, names a note: a local path ending
- * `.md` once any `#anchor` is removed. Anything with a URL scheme, or
+ * `.md`, in any case (#675), once any `#anchor` is removed. Anything with a URL scheme, or
  * protocol-relative, is external whatever it ends in.
  */
 export function noteLinkTarget(
@@ -377,7 +377,7 @@ export function noteLinkTarget(
   }
   const path = decodePercent(rawPath.replace(/\\([!-/:-@[-`{-~])/g, "$1"));
   const fileName = path.split(/[/\\]/).pop() ?? path;
-  if (!fileName.endsWith(".md") || fileName.length <= ".md".length) {
+  if (!/.\.md$/i.test(fileName)) {
     return null;
   }
   return { rawPath, anchor };

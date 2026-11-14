@@ -3,6 +3,7 @@ import {
   fireEvent,
   render,
   screen,
+  waitFor,
   within,
 } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
@@ -36,6 +37,30 @@ const settings = [
     locked: null,
     class: "reindex",
     kind: "switch",
+  },
+  {
+    key: "HATCHDOOR_SIDEBAR_CHANGED_ON_DISK",
+    value: "true",
+    source: "default",
+    locked: null,
+    class: "instant",
+    kind: "switch",
+  },
+  {
+    key: "HATCHDOOR_SIDEBAR_RECENTLY_VIEWED",
+    value: "true",
+    source: "default",
+    locked: null,
+    class: "instant",
+    kind: "switch",
+  },
+  {
+    key: "HATCHDOOR_NOTE_WIDTH",
+    value: "default",
+    source: "default",
+    locked: null,
+    class: "instant",
+    kind: "choice",
   },
   {
     key: "HATCHDOOR_MCP_ENABLED",
@@ -254,14 +279,20 @@ describe("SettingsPage", () => {
   it("opens a Vault's own settings page from the management index", async () => {
     mockPage();
     renderSettingsPage();
-    fireEvent.click(await screen.findByRole("button", { name: /Field notes/ }));
+    // Wait on the text, then look the button up by role once (#679). A role
+    // query over the whole freshly drawn page is the file's first and costs
+    // over a second under load, and it holds up the Vault list request while
+    // it runs, so `findByRole` timed out after one or two attempts.
+    await screen.findByText("Field notes");
+    fireEvent.click(screen.getByRole("button", { name: /Field notes/ }));
 
     expect(
       await screen.findByRole("heading", { name: "Field notes" }),
     ).toBeVisible();
     expect(screen.getByText("This Vault is ready to use.")).toBeVisible();
+    // The last part comes from a request the page sends once it opens.
     expect(
-      screen.getByText(
+      await screen.findByText(
         "A folder on this server · 12 notes · no indexed changes yet",
       ),
     ).toBeVisible();
@@ -341,8 +372,56 @@ describe("SettingsPage", () => {
     expect(screen.getByLabelText("Recorded as (email)")).toHaveValue(
       "author@example.test",
     );
-    // The footer counts the rows the page renders: all thirteen, none hidden.
-    expect(screen.getByText(/13 editable here, 0 set in/)).toBeVisible();
+    // The footer counts the rows the page renders: all sixteen, none hidden.
+    expect(screen.getByText(/16 editable here, 0 set in/)).toBeVisible();
+  });
+
+  it("offers the sidebar's two switches in their own section, second (#684)", async () => {
+    mockPage();
+    renderSettingsPage();
+
+    const index = await screen.findByRole("button", { name: /Layout/ });
+    expect(index).toHaveTextContent("02");
+    expect(
+      screen.getByRole("button", { name: /Agent access/ }),
+    ).toHaveTextContent("03");
+    fireEvent.click(index);
+
+    expect(screen.getByRole("heading", { name: /Layout/ })).toBeVisible();
+    for (const label of ["Show Changed on disk", "Show Recently viewed"]) {
+      expect(screen.getByRole("button", { name: label })).toHaveAttribute(
+        "aria-pressed",
+        "true",
+      );
+    }
+    expect(
+      screen.queryByRole("button", {
+        name: "Meaning search in demoted layers",
+      }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("offers the note width as Default, Wide or Full under Layout, and saves the choice (#698)", async () => {
+    const saved: Record<string, string>[] = [];
+    mockPage(undefined, (updates) => saved.push(updates));
+    renderSettingsPage();
+    fireEvent.click(await screen.findByRole("button", { name: /Layout/ }));
+
+    const group = screen.getByRole("group", { name: "Note width" });
+    const option = (name: string) =>
+      within(group).getByRole("button", { name });
+    expect(option("Default")).toHaveAttribute("aria-pressed", "true");
+    expect(option("Wide")).toHaveAttribute("aria-pressed", "false");
+    expect(option("Full")).toHaveAttribute("aria-pressed", "false");
+
+    fireEvent.click(option("Wide"));
+    expect(option("Wide")).toHaveAttribute("aria-pressed", "true");
+    expect(option("Default")).toHaveAttribute("aria-pressed", "false");
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() =>
+      expect(saved).toEqual([{ HATCHDOOR_NOTE_WIDTH: "wide" }]),
+    );
   });
 
   it("offers the public address under Agent access", async () => {
@@ -513,6 +592,157 @@ describe("SettingsPage", () => {
     expect(
       screen.queryByRole("dialog", { name: "Before this is saved" }),
     ).not.toBeInTheDocument();
+  });
+});
+
+describe("Settings page state after an action (#645)", () => {
+  /** Layers extra routes over `mockPage`'s, which still answer everything
+   * else. */
+  function withRoutes(
+    routes: Record<string, (init: RequestInit | undefined) => Response>,
+  ) {
+    const base = mockedApiFetch.getMockImplementation()!;
+    mockedApiFetch.mockImplementation(async (input, init) => {
+      const key = `${init?.method ?? "GET"} ${String(input)}`;
+      for (const [pattern, handler] of Object.entries(routes))
+        if (key.startsWith(pattern)) return handler(init);
+      return base(input, init);
+    });
+  }
+
+  const CANDIDATE = "candidate-password-that-was-never-saved-0001";
+
+  async function generateThenDiscard() {
+    fireEvent.click(
+      await screen.findByRole("button", { name: /Agent access/ }),
+    );
+    fireEvent.click(await screen.findByRole("button", { name: "Generate" }));
+    const field = screen.getByLabelText("MCP password");
+    await vi.waitFor(() => expect(field).toHaveValue(CANDIDATE));
+    // A candidate is an unsaved edit, not a revealed saved password.
+    expect(
+      screen.queryByRole("button", { name: "Hide" }),
+    ).not.toBeInTheDocument();
+    expect(
+      field.closest(".settings-row")!.querySelector('[aria-label="unsaved"]'),
+    ).not.toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Discard" }));
+    return field;
+  }
+
+  it("clears a generated password on Discard when none is saved", async () => {
+    mockPage();
+    withRoutes({
+      "POST /api/settings/mcp-token/generate": () => json({ value: CANDIDATE }),
+    });
+    renderSettingsPage();
+
+    const field = await generateThenDiscard();
+
+    expect(field).toHaveValue("");
+    expect(
+      screen.queryByRole("button", { name: "Hide" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("goes back to the masked saved password on Discard", async () => {
+    mockPage();
+    withRoutes({
+      "GET /api/settings": () =>
+        json({
+          settings: settings.map((item) =>
+            item.key === "HATCHDOOR_MCP_BEARER_TOKEN"
+              ? { ...item, configured: true }
+              : item,
+          ),
+          last_agent: null,
+          usage_report: usageReport(false),
+        }),
+      "POST /api/settings/mcp-token/generate": () => json({ value: CANDIDATE }),
+    });
+    renderSettingsPage();
+
+    const field = await generateThenDiscard();
+
+    expect(field).toHaveValue("••••••••••••••••");
+    expect(field).toHaveAttribute("readonly");
+    expect(screen.getByRole("button", { name: "Show" })).toBeVisible();
+  });
+
+  it("keeps a typed Vault name through Pause, says it paused, and drops the notice on another Vault", async () => {
+    mockPage([vault("Field notes"), vault("Archive", false)]);
+    withRoutes({
+      "POST /api/v1/vaults/00000000-0000-4000-8000-000000000001/disable": () =>
+        json({
+          vault: { ...vault("Field notes"), enabled: false },
+          registry_revision: 4,
+          collection_revision: 4,
+        }),
+    });
+    renderSettingsPage();
+    fireEvent.click(await screen.findByRole("button", { name: /Field notes/ }));
+    await screen.findByRole("heading", { name: "Field notes" });
+
+    fireEvent.change(screen.getByLabelText("Vault name"), {
+      target: { value: "Typed but not saved" },
+    });
+    fireEvent.change(screen.getByLabelText("Archive folder"), {
+      target: { value: "zz-archive" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Pause Vault" }));
+
+    expect(await screen.findByRole("status")).toHaveTextContent(
+      "This Vault is paused.",
+    );
+    expect(screen.queryByText("Saved.")).not.toBeInTheDocument();
+    expect(screen.getByLabelText("Vault name")).toHaveValue(
+      "Typed but not saved",
+    );
+    expect(screen.getByLabelText("Archive folder")).toHaveValue("zz-archive");
+    // The page took on the paused state the answer carried.
+    expect(screen.getByRole("button", { name: "Resume Vault" })).toBeVisible();
+
+    fireEvent.click(screen.getByRole("button", { name: /Archive/ }));
+    await screen.findByRole("heading", { name: "Archive" });
+    expect(screen.queryByText("This Vault is paused.")).not.toBeInTheDocument();
+    expect(screen.getByLabelText("Vault name")).toHaveValue("Archive");
+  });
+});
+
+describe("Resume keeps unsaved edits (#645)", () => {
+  it("keeps a typed name through Resume and says the Vault is back on", async () => {
+    mockPage([vault("Archive", false)]);
+    const base = mockedApiFetch.getMockImplementation()!;
+    mockedApiFetch.mockImplementation(async (input, init) => {
+      if (
+        init?.method === "POST" &&
+        String(input).startsWith(
+          "/api/v1/vaults/00000000-0000-4000-8000-000000000002/enable",
+        )
+      )
+        return json({
+          vault: { ...vault("Archive", false), enabled: true },
+          registry_revision: 4,
+          collection_revision: 4,
+        });
+      return base(input, init);
+    });
+    renderSettingsPage();
+    fireEvent.click(await screen.findByRole("button", { name: /Archive/ }));
+    await screen.findByRole("heading", { name: "Archive" });
+
+    fireEvent.change(screen.getByLabelText("Vault name"), {
+      target: { value: "Typed before Resume" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Resume Vault" }));
+
+    expect(await screen.findByRole("status")).toHaveTextContent(
+      "This Vault is back on.",
+    );
+    expect(screen.getByLabelText("Vault name")).toHaveValue(
+      "Typed before Resume",
+    );
+    expect(screen.getByRole("button", { name: "Pause Vault" })).toBeVisible();
   });
 });
 

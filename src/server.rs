@@ -23,13 +23,12 @@ use tracing::{error, info, warn};
 
 use crate::app_state::AppState;
 use crate::auth::{
-    AssetReadTokens, WebOrLiveMcpToken, WebToken, require_web_or_live_mcp_read_token,
-    require_web_or_live_mcp_token, require_web_token,
+    AssetReadTokens, WebOrLiveMcpToken, WebToken, require_local_host_and_origin,
+    require_web_or_live_mcp_read_token, require_web_or_live_mcp_token, require_web_token,
 };
-use crate::cache::SqliteCache;
+use crate::cache::{ModelFiles, SqliteCache};
 use crate::config::AppConfig;
 use crate::embed::{Embedder, FastembedEmbedder, RuntimeEmbedder};
-use crate::git::GitConfig;
 use crate::handlers::{
     MAX_IN_MEMORY_UPLOAD_BYTES, app_docs_page_handler, create_folder_handler, create_vault_handler,
     demo_read_only_response, disable_vault_handler, disconnect_vault_handler, docs_router,
@@ -51,7 +50,9 @@ use crate::handlers::{
     whats_new_handler,
 };
 use crate::mcp::{HatchdoorMcpTransport, McpConfig};
-use crate::model_setup::{ModelSetup, SelectedModel};
+use crate::model_setup::{
+    CacheIntegrity, GEMMA_REVISION, ModelSetup, NOMIC_REVISION, SelectedModel,
+};
 use crate::runtime_config::{RuntimeConfig, live_settings_defaults, settings_file_path};
 use crate::startup::StartupTracker;
 use crate::vault_executor::VaultWorkExecutor;
@@ -93,53 +94,97 @@ async fn shutdown_signal() {
 /// Refuse to serve mutating routes unauthenticated on a public interface. A
 /// non-loopback bind with no web token would let anyone on the network
 /// create/overwrite/delete vault notes, guarded only by a log line.
+///
+/// The refusal hands the operator a ready token, but never through the log
+/// (ADR-08), where it would outlive the start in container logs and any log
+/// shipper (#629). It is saved to [`NEW_WEB_TOKEN_FILE`] in `state_dir`,
+/// readable by its owner only, and the message names that file. A file left by
+/// an earlier refused start is reused, so a restart loop offers one token.
 pub fn check_web_auth_posture(
     host: &str,
     has_web_token: bool,
     demo_mode: bool,
+    state_dir: &std::path::Path,
 ) -> Result<(), String> {
     if demo_mode {
         return Ok(());
     }
     if !is_loopback_host(host) && !has_web_token {
-        let token = crate::auth::generate_bearer_token()?;
+        let next_step = match save_new_web_token(state_dir) {
+            Ok(path) => format!(
+                "A new token is saved in {path}: add the line in that file to .env, then \
+                 restart. With the shipped compose.yaml that file is data/state/{NEW_WEB_TOKEN_FILE} \
+                 next to it.",
+                path = path.display()
+            ),
+            Err(error) => format!(
+                "Could not save a new token ({error}). Set HATCHDOOR_WEB_BEARER_TOKEN in .env \
+                 to a long random value, for example from `openssl rand -hex 32`, then restart."
+            ),
+        };
         return Err(format!(
             "HOST={host} is non-loopback but HATCHDOOR_WEB_BEARER_TOKEN is unset: refusing to \
-             start unauthenticated on a public interface. Paste this freshly generated token into \
-             .env, then restart: HATCHDOOR_WEB_BEARER_TOKEN={token} . Or bind to 127.0.0.1. For \
-             a read-only public demo, set HATCHDOOR_DEMO_MODE=true."
+             start unauthenticated on a public interface. {next_step} Or bind to 127.0.0.1. \
+             For a read-only public demo, set HATCHDOOR_DEMO_MODE=true."
         ));
     }
     Ok(())
 }
 
-/// Refuse a demo start whose operator still has legacy instance-wide Git
-/// versioning or MCP configured.
-///
-/// `legacy_git_configured` is `HATCHDOOR_GIT_SYNC_ENABLED` resolving to a
-/// mode. Since #185 that setting drives nothing at runtime, so this is no
-/// longer the refusal that keeps a demo read-only — the registry check in
-/// [`check_demo_mode_registry_posture`] is. It is kept because the setting is
-/// still in the settings schema and can still be set in the environment, and
-/// the operator's `.env` and Hatchdoor's behaviour disagreeing is worth
-/// stopping over.
-pub fn check_demo_mode_posture(
-    demo_mode: bool,
-    mcp_enabled: bool,
-    legacy_git_configured: bool,
-) -> Result<(), String> {
+/// The file a refused start leaves its generated web token in, as one
+/// `HATCHDOOR_WEB_BEARER_TOKEN=...` line ready for `.env`.
+pub(crate) const NEW_WEB_TOKEN_FILE: &str = "new-web-token.env";
+
+const NEW_WEB_TOKEN_KEY: &str = "HATCHDOOR_WEB_BEARER_TOKEN=";
+
+/// Save a generated web token to `state_dir`, or keep the one an earlier
+/// refused start saved there, and return the file's path.
+fn save_new_web_token(state_dir: &std::path::Path) -> Result<std::path::PathBuf, String> {
+    let path = state_dir.join(NEW_WEB_TOKEN_FILE);
+    if let Ok(existing) = std::fs::read_to_string(&path)
+        && existing
+            .trim()
+            .strip_prefix(NEW_WEB_TOKEN_KEY)
+            .is_some_and(|token| !token.trim().is_empty())
+    {
+        return Ok(path);
+    }
+    let token = crate::auth::generate_bearer_token()?;
+    std::fs::create_dir_all(state_dir)
+        .map_err(|error| format!("could not create {}: {error}", state_dir.display()))?;
+    match std::fs::remove_file(&path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(format!("could not replace {}: {error}", path.display())),
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    let mut file = options
+        .open(&path)
+        .map_err(|error| format!("could not write {}: {error}", path.display()))?;
+    std::io::Write::write_all(
+        &mut file,
+        // The leading newline keeps `cat file >> .env` from joining the
+        // token onto a last line that lacks one.
+        format!("\n{NEW_WEB_TOKEN_KEY}{token}\n").as_bytes(),
+    )
+    .map_err(|error| format!("could not write {}: {error}", path.display()))?;
+    Ok(path)
+}
+
+/// Refuse a demo start whose operator has MCP configured. The registry check
+/// in [`check_demo_mode_registry_posture`] is the one that refuses Git
+/// writeback; the retired `HATCHDOOR_GIT_SYNC_ENABLED` is never read, so a
+/// value left in `.env` cannot stop a start (#644).
+pub fn check_demo_mode_posture(demo_mode: bool, mcp_enabled: bool) -> Result<(), String> {
     if !demo_mode {
         return Ok(());
     }
     if mcp_enabled {
         return Err(
             "HATCHDOOR_DEMO_MODE=true is incompatible with HATCHDOOR_MCP_ENABLED=true; disable MCP for public demos."
-                .to_string(),
-        );
-    }
-    if legacy_git_configured {
-        return Err(
-            "HATCHDOOR_DEMO_MODE=true is incompatible with Git writeback; disable HATCHDOOR_GIT_SYNC_ENABLED and managed bidirectional mode for public demos."
                 .to_string(),
         );
     }
@@ -618,8 +663,12 @@ pub fn build_router(state: AppState, web_bearer_token: Option<Arc<str>>) -> Rout
     // Outside every auth layer and mounted in demo mode too, like `/health`;
     // the web token only decides whether private pages are served.
     let docs = docs_router(web_bearer_token.clone());
+    // #629: with no web token (a loopback bind, ADR-07) the Host and Origin
+    // checks are all that keep other websites out. `/mcp` is merged after this
+    // layer: it requires its own token and keeps its own Origin check (ADR-09).
+    let tokenless = web_bearer_token.is_none() && !state.demo_mode;
 
-    Router::new()
+    let web = Router::new()
         .route("/health", get(health_handler))
         .route(READINESS_PATH, get(readiness_handler))
         .route("/api/startup-status", get(startup_status_handler))
@@ -632,7 +681,6 @@ pub fn build_router(state: AppState, web_bearer_token: Option<Arc<str>>) -> Rout
         .merge(transfers)
         .merge(folders)
         .merge(version_routes)
-        .merge(mcp)
         .route("/", get(spa_index_handler))
         // Canonical Vault-qualified browser Note URL (issue #62): unambiguous
         // when multiple Vaults contain the same slug. The legacy slug-only
@@ -658,7 +706,18 @@ pub fn build_router(state: AppState, web_bearer_token: Option<Arc<str>>) -> Rout
         .fallback_service(
             ServeDir::new("frontend/dist")
                 .fallback(get(spa_not_found_handler).with_state(state.clone())),
-        )
+        );
+    let web = if tokenless {
+        web.layer(axum::middleware::from_fn_with_state(
+            state.runtime_config.clone(),
+            require_local_host_and_origin,
+        ))
+    } else {
+        web
+    };
+
+    web.merge(mcp)
+        .layer(axum::middleware::from_fn(refuse_framing))
         .layer(
             TraceLayer::new(MakeFailureClassifier)
                 // Custom span so the URI logged never contains the raw web token
@@ -678,6 +737,34 @@ pub fn build_router(state: AppState, web_bearer_token: Option<Arc<str>>) -> Rout
 }
 
 const READINESS_PATH: &str = "/ready";
+
+const FRAME_ANCESTORS_NONE: &str = "frame-ancestors 'none'";
+
+/// #702: tells the browser never to show any response inside a frame, another
+/// site's or Hatchdoor's own, so a hidden frame cannot trick a click
+/// (clickjacking). The app frames nothing of its own: PDFs draw on a canvas,
+/// Mermaid renders inline. Layered over
+/// every route, `/mcp` and the fallback included. A response that already
+/// sets a policy, such as an SVG asset's `sandbox`, keeps it and gains
+/// `frame-ancestors 'none'`; no other directive is added.
+async fn refuse_framing(request: Request, next: Next) -> Response {
+    let mut response = next.run(request).await;
+    let headers = response.headers_mut();
+    headers.insert(header::X_FRAME_OPTIONS, HeaderValue::from_static("DENY"));
+    let policy = match headers.get(header::CONTENT_SECURITY_POLICY) {
+        Some(existing) if !existing.is_empty() => {
+            let mut combined = existing.as_bytes().to_vec();
+            combined.extend_from_slice(b"; ");
+            combined.extend_from_slice(FRAME_ANCESTORS_NONE.as_bytes());
+            // Cannot fail: a valid header value followed by ASCII is still one.
+            HeaderValue::from_bytes(&combined)
+                .unwrap_or_else(|_| HeaderValue::from_static(FRAME_ANCESTORS_NONE))
+        }
+        _ => HeaderValue::from_static(FRAME_ANCESTORS_NONE),
+    };
+    headers.insert(header::CONTENT_SECURITY_POLICY, policy);
+    response
+}
 
 /// Which responses the trace layer logs as failed, at `ERROR`: every 5xx
 /// except the readiness probe's `503`. An installing agent polls `/ready`
@@ -771,19 +858,18 @@ async fn decline_gemma_handler(State(state): State<AppState>) -> Response {
 
 async fn retry_model_setup_handler(State(state): State<AppState>) -> Response {
     match state.model_setup.selected() {
-        Ok(selected @ (SelectedModel::Gemma | SelectedModel::Nomic)) => {
+        selected @ (SelectedModel::Gemma | SelectedModel::Nomic) => {
             if spawn_model_startup(state, selected) {
                 StatusCode::ACCEPTED.into_response()
             } else {
                 model_setup_conflict()
             }
         }
-        Ok(SelectedModel::TermsRequired) => (
+        SelectedModel::TermsRequired => (
             StatusCode::CONFLICT,
             Json(serde_json::json!({ "error": "Gemma terms must be accepted or declined first." })),
         )
             .into_response(),
-        Err(error) => model_setup_error(error),
     }
 }
 
@@ -877,55 +963,74 @@ fn spawn_claimed_model_startup(state: AppState, selected: SelectedModel) {
         let sqlite = state.startup_sqlite.clone();
         let model_setup = state.model_setup.clone();
         let download_tracker = tracker.clone();
-        let load_result = tokio::task::spawn_blocking(move || -> Result<(), String> {
-            model_setup.prepare_download(selected)?;
+        let load_result = tokio::task::spawn_blocking(move || -> Result<(), SetupFailure> {
+            // A cache that already matches the shipped digests needs no
+            // download, and was just checked, so it is not hashed twice
+            // before its load (#643).
+            let mut cache_checked = model_setup
+                .prepare_download(selected)
+                .map_err(SetupFailure::Other)?
+                == CacheIntegrity::Valid;
             for attempt in 0..=1 {
-                let loaded = (|| -> Result<Arc<dyn Embedder>, String> {
-                    if selected == SelectedModel::Gemma {
-                        let progress = {
-                            let download_tracker = download_tracker.clone();
-                            Arc::new(move |downloaded, total| {
-                                download_tracker.set_downloading(
-                                    model_name,
-                                    Some(downloaded),
-                                    Some(total),
-                                );
-                            })
+                // A stopped download fails setup at once: the network, not
+                // the cache, is what went wrong, and its partial files are
+                // kept for the next attempt to resume (#642).
+                if !cache_checked {
+                    fetch_model_files(&model_setup, selected, &download_tracker)?;
+                }
+                download_tracker.set_model_loading(model_name);
+                // The load covers checking the downloaded files' digests,
+                // which reads every model file and is as slow as the load
+                // itself on a slow share.
+                let loaded = log_model_load(
+                    selected,
+                    MODEL_STILL_LOADING_EVERY,
+                    || -> Result<Arc<dyn Embedder>, String> {
+                        if !cache_checked {
+                            model_setup.verify_download(selected)?;
+                        }
+                        model_setup.point_main_at_pinned_revision(selected)?;
+                        let embedder: Arc<dyn Embedder> = match selected {
+                            SelectedModel::Gemma => {
+                                Arc::new(FastembedEmbedder::embedding_gemma_300m_q4_from(
+                                    &model_setup.snapshot_dir(selected)?,
+                                    GEMMA_REVISION,
+                                )?)
+                            }
+                            SelectedModel::Nomic => Arc::new(FastembedEmbedder::nomic_v1_5_in(
+                                model_dir.clone(),
+                                NOMIC_REVISION,
+                            )?),
+                            SelectedModel::TermsRequired => {
+                                return Err("model terms have not been accepted".to_string());
+                            }
                         };
-                        model_setup.fetch_gemma_at_pinned_revision(progress)?;
-                    }
-                    // The load covers recording the files' digests, which
-                    // reads every model file again and is as slow as the load
-                    // itself on a slow share.
-                    log_model_load(
-                        selected,
-                        MODEL_STILL_LOADING_EVERY,
-                        || -> Result<Arc<dyn Embedder>, String> {
-                            let embedder: Arc<dyn Embedder> = match selected {
-                                SelectedModel::Gemma => {
-                                    Arc::new(FastembedEmbedder::embedding_gemma_300m_q4_in(
-                                        model_dir.clone(),
-                                    )?)
-                                }
-                                SelectedModel::Nomic => {
-                                    Arc::new(FastembedEmbedder::nomic_v1_5_in(model_dir.clone())?)
-                                }
-                                SelectedModel::TermsRequired => {
-                                    return Err("model terms have not been accepted".to_string());
-                                }
-                            };
-                            model_setup.record_integrity(selected)?;
-                            Ok(embedder)
-                        },
-                    )
-                })();
+                        Ok(embedder)
+                    },
+                );
                 match loaded {
                     Ok(embedder) => {
                         // Before the model is installed, so no search reaches
                         // a cache still waiting for its migration (ADR-50).
-                        // An Index turn retries the same check on failure.
-                        if let Err(error) = sqlite.prepare_for_embedder(embedder.as_ref()) {
-                            warn!("Could not prepare the search cache for the model: {error}");
+                        // An Index turn retries the model check on failure, but
+                        // without the step that keeps an index from before #643.
+                        // A change of model files at this start, or at one
+                        // that stopped before this check, decides whether an
+                        // index built before #643 is kept (#693).
+                        let files = if model_setup.files_changed_since_index(selected) {
+                            ModelFiles::Fetched
+                        } else {
+                            ModelFiles::AlreadyPinned
+                        };
+                        match sqlite.prepare_for_embedder(embedder.as_ref(), files) {
+                            Ok(()) => {
+                                if let Err(error) = model_setup.files_reached_index(selected) {
+                                    warn!("{error}");
+                                }
+                            }
+                            Err(error) => {
+                                warn!("Could not prepare the search cache for the model: {error}");
+                            }
                         }
                         runtime.set(embedder, selected == SelectedModel::Gemma);
                         return Ok(());
@@ -935,9 +1040,13 @@ fn spawn_claimed_model_startup(state: AppState, selected: SelectedModel) {
                             model = model_name,
                             "Model setup attempt failed; retrying once: {error}"
                         );
-                        model_setup.reset_download_cache(selected)?;
+                        model_setup
+                            .reset_download_cache(selected)
+                            .map_err(SetupFailure::Other)?;
+                        cache_checked = false;
+                        download_tracker.set_downloading(model_name, None, None);
                     }
-                    Err(error) => return Err(error),
+                    Err(error) => return Err(SetupFailure::Other(error)),
                 }
             }
             unreachable!("the retry loop always returns")
@@ -946,10 +1055,9 @@ fn spawn_claimed_model_startup(state: AppState, selected: SelectedModel) {
 
         match load_result {
             Ok(Ok(())) => finish_model_setup(&state),
-            Ok(Err(error)) => {
-                state.model_setup_started.store(false, Ordering::Release);
-                tracker.set_model_setup_failed();
-                error!(model = model_name, "Model download/load failed: {error}");
+            Ok(Err(failure)) => {
+                record_model_setup_failure(&state, &failure);
+                error!(model = model_name, "Model download/load failed: {failure}");
             }
             Err(error) => {
                 state.model_setup_started.store(false, Ordering::Release);
@@ -958,6 +1066,75 @@ fn spawn_claimed_model_startup(state: AppState, selected: SelectedModel) {
             }
         }
     });
+}
+
+/// Publish a failed setup run and release the setup claim, so the next
+/// accept, decline or retry is taken without a restart. A stopped download
+/// says so in the status message (#642).
+fn record_model_setup_failure(state: &AppState, failure: &SetupFailure) {
+    state.model_setup_started.store(false, Ordering::Release);
+    match failure {
+        SetupFailure::Download(fetch) => match fetch.status_message() {
+            Some(message) => state.startup.set_model_setup_failed_with(message),
+            None => state.startup.set_model_setup_failed(),
+        },
+        SetupFailure::Other(_) => state.startup.set_model_setup_failed(),
+    }
+}
+
+/// Why one model setup run failed.
+enum SetupFailure {
+    /// The supervised download did not complete; the next run resumes it.
+    Download(crate::model_setup::FetchFailure),
+    Other(String),
+}
+
+impl std::fmt::Display for SetupFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Download(failure) => write!(f, "{failure}"),
+            Self::Other(error) => f.write_str(error),
+        }
+    }
+}
+
+/// How often a running download logs how far it has got, so the log shows
+/// a download moving rather than nothing at all.
+const MODEL_DOWNLOAD_LOG_EVERY: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Download the selected model's files in a child process that is stopped
+/// when the download stops moving (#642), reporting progress to the startup
+/// status as it arrives.
+fn fetch_model_files(
+    model_setup: &ModelSetup,
+    selected: SelectedModel,
+    tracker: &StartupTracker,
+) -> Result<(), SetupFailure> {
+    let model_name = startup_model_name(selected);
+    let command = model_setup
+        .fetch_command(selected)
+        .map_err(SetupFailure::Other)?;
+    let last_log = std::sync::Mutex::new(std::time::Instant::now());
+    crate::model_setup::run_supervised_fetch(
+        command,
+        crate::model_setup::FetchLimits::default(),
+        &|downloaded, total| {
+            tracker.set_downloading(model_name, Some(downloaded), Some(total));
+            let mut last = last_log
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if last.elapsed() >= MODEL_DOWNLOAD_LOG_EVERY {
+                *last = std::time::Instant::now();
+                info!(
+                    model = model_name,
+                    downloaded_mb = downloaded / (1024 * 1024),
+                    file_mb = total / (1024 * 1024),
+                    "Search model is still downloading"
+                );
+            }
+        },
+    )
+    .map_err(SetupFailure::Download)
 }
 
 /// How often a load that has not finished says so. A load takes seconds on a
@@ -974,15 +1151,7 @@ fn log_model_load<T>(
     load: impl FnOnce() -> Result<T, String>,
 ) -> Result<T, String> {
     let model_name = startup_model_name(selected);
-    if selected == SelectedModel::Gemma {
-        info!(model = model_name, "Search model downloaded, loading it");
-    } else {
-        // FastEmbed fetches Nomic inside the same call that loads it.
-        info!(
-            model = model_name,
-            "Loading search model, after downloading it if it is not on disk yet"
-        );
-    }
+    info!(model = model_name, "Search model downloaded, loading it");
     let started = std::time::Instant::now();
     let elapsed = || format!("{:.1}s", started.elapsed().as_secs_f64());
     // The reporting thread starts with no subscriber of its own when the
@@ -1125,7 +1294,21 @@ pub async fn run_server() {
         error!("Settings configuration error: {e}");
         std::process::exit(1);
     });
+    // Named before any refusal below, so an operator whose start fails for
+    // another reason still sees which `.env` lines do nothing (#644).
+    let environment_keys = std::env::vars()
+        .filter(|(_, value)| !value.trim().is_empty())
+        .map(|(key, _)| key)
+        .collect::<Vec<_>>();
+    if let Some(message) = legacy_environment_warning(&environment_keys) {
+        warn!("{message}");
+    }
     let startup_snapshot = runtime_config.snapshot();
+    if let Some(message) =
+        crate::vault_migration::stored_retired_settings_warning(&startup_snapshot)
+    {
+        warn!("{message}");
+    }
     // Stated only when it is true of this instance: on a boot with nothing
     // pinned the sentence describes nothing, and running pinned is a
     // legitimate posture rather than something to warn about every start.
@@ -1153,34 +1336,27 @@ pub async fn run_server() {
             std::process::exit(1);
         });
 
+    // Only the registry's location is read here; nothing is written to it
+    // before the refusals below have passed.
+    let state_dir = VaultRegistryStore::at_default_path()
+        .path()
+        .parent()
+        .filter(|directory| !directory.as_os_str().is_empty())
+        .map_or_else(
+            || std::path::PathBuf::from("."),
+            std::path::Path::to_path_buf,
+        );
     if let Err(message) = check_web_auth_posture(
         &config.host,
         config.web_bearer_token.is_some(),
         config.demo_mode,
+        &state_dir,
     ) {
         error!("{message}");
         std::process::exit(1);
     }
 
-    // The instance-wide Git lane is gone (issue #185), so this parses
-    // `HATCHDOOR_GIT_*` for exactly two remaining purposes: validating that a
-    // configured mode is fully configured, and the demo posture refusal
-    // below. No runtime behaviour reads the result.
-    let legacy_git_config = match &config.vault_source {
-        VaultSource::Local { vault_path } => {
-            GitConfig::from_snapshot(vault_path.clone(), &startup_snapshot)
-        }
-    }
-    .unwrap_or_else(|e| {
-        error!("Git sync configuration error: {e}");
-        std::process::exit(1);
-    });
-
-    if let Err(message) = check_demo_mode_posture(
-        config.demo_mode,
-        mcp_config.enabled,
-        legacy_git_config.is_some(),
-    ) {
+    if let Err(message) = check_demo_mode_posture(config.demo_mode, mcp_config.enabled) {
         error!("{message}");
         std::process::exit(1);
     }
@@ -1208,6 +1384,9 @@ pub async fn run_server() {
     // below can write a registry, so a registry or settings file on disk still
     // means an install that existed before this start.
     let existing_install = is_existing_install(vault_registry.path(), &settings_path);
+    // A crash mid-write can leave a full registry copy, credentials included,
+    // beside the registry. Nothing of this process writes it yet (#640).
+    vault_registry.remove_stale_temporary_files();
     // ADR-40: a start with no registry writes an empty one, whatever
     // `VAULT_PATH` holds; an install from 2.4.x or earlier refuses instead,
     // before this start is recorded, so a refusal writes nothing.
@@ -1232,14 +1411,6 @@ pub async fn run_server() {
         config.demo_mode,
     ));
     usage_report.reconcile();
-    let environment_keys = std::env::vars()
-        .filter(|(_, value)| !value.trim().is_empty())
-        .map(|(key, _)| key)
-        .collect::<Vec<_>>();
-    if let Some(message) = legacy_environment_warning(&environment_keys) {
-        warn!("{message}");
-    }
-
     if let VaultRegistryState::Ready(snapshot) = &registry_state
         && let Err(message) = check_demo_mode_registry_posture(config.demo_mode, snapshot)
     {
@@ -1258,21 +1429,11 @@ pub async fn run_server() {
     );
 
     let model_setup = Arc::new(ModelSetup::new(ModelSetup::default_models_dir()));
-    let selected_model = model_setup.selected().unwrap_or_else(|error| {
-        error!("Model setup state is invalid: {error}");
-        std::process::exit(1);
-    });
+    let selected_model = model_setup.selected();
     let selected_model = initial_model_for_startup(config.demo_mode, selected_model);
     let runtime_embedder = Arc::new(RuntimeEmbedder::new());
     let embedder: Arc<dyn Embedder> = runtime_embedder.clone();
 
-    let scan_config = AppState::runtime_scan_config(&startup_snapshot).unwrap_or_else(|e| {
-        error!("Invalid HATCHDOOR_EXCLUDE configuration: {e}");
-        std::process::exit(1);
-    });
-    for (pattern, source) in scan_config.exclude.configured_patterns() {
-        info!(pattern = %pattern, source, "Noise-exclusion pattern active");
-    }
     info!(
         embed_layers = config.embed_layers,
         "Demoted-layer vector embedding (HATCHDOOR_EMBED_LAYERS)"
@@ -1371,6 +1532,8 @@ pub async fn run_server() {
     // Repair remains owned by its later packet.
     // Exits on its own once `vault_work.shutdown()` has discarded the queue
     // and every running turn has published its outcome.
+    let cache_recovery_task =
+        tokio::spawn(crate::vault_executor::recover_corrupt_cache(state.clone()));
     let dispatch_task = tokio::spawn({
         let mut vault_worker = vault_worker;
         let executor = VaultWorkExecutor::from_state(&state);
@@ -1419,6 +1582,11 @@ pub async fn run_server() {
     });
     let scheduler_tick_task =
         crate::git::spawn_scheduler_tick(managed_git.clone(), crate::git::DEFAULT_TICK_INTERVAL);
+    let local_probe_task = spawn_local_content_probe(
+        state.vaults.clone(),
+        vault_work.clone(),
+        crate::vault_runtime::LOCAL_CONTENT_PROBE_INTERVAL,
+    );
     // ADR-39: the opt-in daily check for a newer release. The task reads the
     // setting on every tick, so it runs whenever the setting is on; a demo
     // instance never starts it.
@@ -1489,6 +1657,7 @@ pub async fn run_server() {
     // coordinator has stopped accepting work; the dispatch loop drains and
     // exits on its own now that `shutdown()` above reached quiescence.
     scheduler_tick_task.abort();
+    local_probe_task.abort();
     commit_cooldown_tick_task.abort();
     startup_settle_task.abort();
     if let Some(task) = update_check_task {
@@ -1499,6 +1668,9 @@ pub async fn run_server() {
     }
     if let Some(task) = watcher_index_task {
         task.abort();
+    }
+    if let Err(error) = cache_recovery_task.await {
+        error!(%error, "SQLite cache recovery waiter exited unexpectedly");
     }
     if let Err(error) = dispatch_task.await {
         error!(%error, "Vault background work dispatch loop exited unexpectedly");
@@ -1528,6 +1700,68 @@ async fn serve_until_shutdown(
     axum::serve(listener, app)
         .with_graceful_shutdown(async move { shutdown.wait().await })
         .await
+}
+
+/// Look at every Vault's folder again each `interval`, so a folder that
+/// appears, disappears or changes permissions after activation moves the
+/// Vault's status within one tick (#641). The first tick is skipped:
+/// activation has just looked.
+///
+/// Each Vault is probed on its own blocking task, and a Vault whose last
+/// probe has not returned is skipped, so one stalled network share neither
+/// holds up the others nor piles up threads waiting on it.
+fn spawn_local_content_probe(
+    vaults: VaultCollectionRuntime,
+    coordinator: VaultWorkCoordinator,
+    interval: std::time::Duration,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let in_flight = Arc::new(std::sync::Mutex::new(std::collections::BTreeSet::<
+            crate::vault_registry::VaultId,
+        >::new()));
+        let mut ticks = tokio::time::interval_at(tokio::time::Instant::now() + interval, interval);
+        ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            ticks.tick().await;
+            for vault_id in vaults.active_vault_ids() {
+                let started = in_flight
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .insert(vault_id);
+                if !started {
+                    continue;
+                }
+                let vaults = vaults.clone();
+                let coordinator = coordinator.clone();
+                let in_flight = Arc::clone(&in_flight);
+                tokio::task::spawn_blocking(move || {
+                    // Cleared on drop, so a probe that panics does not
+                    // leave its Vault skipped for good.
+                    let _done = ProbeInFlight {
+                        in_flight,
+                        vault_id,
+                    };
+                    vaults.reprobe_local_vault(vault_id, &coordinator);
+                });
+            }
+        }
+    })
+}
+
+/// One Vault's place in `spawn_local_content_probe`'s in-flight set, given
+/// up when its probe returns or panics.
+struct ProbeInFlight {
+    in_flight: Arc<std::sync::Mutex<std::collections::BTreeSet<crate::vault_registry::VaultId>>>,
+    vault_id: crate::vault_registry::VaultId,
+}
+
+impl Drop for ProbeInFlight {
+    fn drop(&mut self) {
+        self.in_flight
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&self.vault_id);
+    }
 }
 
 /// Forward a per-Vault watcher invalidation to the one shared work queue: a
@@ -1599,14 +1833,30 @@ mod tests {
     fn per_vault_variables_left_in_the_environment_are_named() {
         let message = legacy_environment_warning(&[
             "VAULT_PATH".to_string(),
+            "HATCHDOOR_GIT_AUTHOR_NAME".to_string(),
             "HATCHDOOR_GIT_AUTHOR_EMAIL".to_string(),
             "HATCHDOOR_EXCLUDE".to_string(),
+            "HATCHDOOR_GIT_SYNC_ENABLED".to_string(),
         ])
         .expect("stale per-Vault variables are named");
-        assert!(message.contains("HATCHDOOR_GIT_AUTHOR_EMAIL"), "{message}");
+        // The author keys still sign the commits of a Vault without its own
+        // identity, so telling the operator to remove them would be wrong.
+        assert!(!message.contains("HATCHDOOR_GIT_AUTHOR"), "{message}");
         assert!(message.contains("HATCHDOOR_EXCLUDE"), "{message}");
+        assert!(message.contains("HATCHDOOR_GIT_SYNC_ENABLED"), "{message}");
         assert!(!message.contains("VAULT_PATH"), "{message}");
         assert!(message.contains("Settings"), "{message}");
+    }
+
+    #[test]
+    fn the_commit_author_variables_alone_raise_no_warning() {
+        assert_eq!(
+            legacy_environment_warning(&[
+                "HATCHDOOR_GIT_AUTHOR_NAME".to_string(),
+                "HATCHDOOR_GIT_AUTHOR_EMAIL".to_string(),
+            ]),
+            None
+        );
     }
 
     #[test]
@@ -1872,52 +2122,104 @@ mod tests {
 
     #[test]
     fn web_auth_posture_refuses_public_bind_without_token() {
-        // Non-loopback host with no web token must refuse to start.
+        // Non-loopback host with no web token must refuse to start, and the
+        // refusal must not carry the generated token (#629).
         for host in ["0.0.0.0", "192.168.1.50", "::"] {
-            let error =
-                check_web_auth_posture(host, false, false).expect_err("public bind rejected");
+            let state = tempfile::TempDir::new().expect("temp dir");
+            let error = check_web_auth_posture(host, false, false, state.path())
+                .expect_err("public bind rejected");
 
             assert!(error.contains(&format!("HOST={host}")));
-            assert!(error.contains("HATCHDOOR_WEB_BEARER_TOKEN="));
-            assert!(error.contains("Paste this freshly generated token into .env"));
-
-            let generated_token = error
-                .split("HATCHDOOR_WEB_BEARER_TOKEN=")
-                .nth(1)
-                .and_then(|value| value.split_whitespace().next())
-                .expect("generated token in .env assignment");
-            assert_eq!(generated_token.len(), 43);
+            let file = state.path().join(NEW_WEB_TOKEN_FILE);
+            assert!(error.contains(&file.display().to_string()), "{error}");
+            let saved = std::fs::read_to_string(&file).expect("token file");
+            let token = saved
+                .trim()
+                .strip_prefix("HATCHDOOR_WEB_BEARER_TOKEN=")
+                .expect("one .env line");
+            assert_eq!(token.len(), 43);
             assert!(
-                generated_token
+                token
                     .bytes()
                     .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
             );
+            assert!(!error.contains(token), "the token must stay out of the log");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mode = std::fs::metadata(&file)
+                    .expect("metadata")
+                    .permissions()
+                    .mode();
+                assert_eq!(mode & 0o777, 0o600);
+            }
         }
         // A token makes any host acceptable.
-        assert!(check_web_auth_posture("0.0.0.0", true, false).is_ok());
+        let state = tempfile::TempDir::new().expect("temp dir");
+        assert!(check_web_auth_posture("0.0.0.0", true, false, state.path()).is_ok());
         // Every loopback spelling accepted without a token has a corresponding
         // structurally valid listener address (covered in config tests).
         for host in ["127.0.0.1", "localhost", "::1", "[::1]"] {
-            assert!(check_web_auth_posture(host, false, false).is_ok(), "{host}");
+            assert!(
+                check_web_auth_posture(host, false, false, state.path()).is_ok(),
+                "{host}"
+            );
         }
+        assert!(
+            !state.path().join(NEW_WEB_TOKEN_FILE).exists(),
+            "an accepted start saves no token"
+        );
+    }
+
+    #[test]
+    fn web_auth_posture_offers_the_same_token_across_refused_restarts() {
+        let state = tempfile::TempDir::new().expect("temp dir");
+        let nested = state.path().join("not-yet-created");
+        let first = check_web_auth_posture("0.0.0.0", false, false, &nested).expect_err("refused");
+        let file = nested.join(NEW_WEB_TOKEN_FILE);
+        let saved = std::fs::read_to_string(&file).expect("token file");
+        let second = check_web_auth_posture("0.0.0.0", false, false, &nested).expect_err("refused");
+        assert_eq!(first, second);
+        assert_eq!(std::fs::read_to_string(&file).expect("token file"), saved);
+
+        // An empty or foreign file is replaced with a fresh token.
+        std::fs::write(&file, "").expect("blank it");
+        check_web_auth_posture("0.0.0.0", false, false, &nested).expect_err("refused");
+        assert!(
+            std::fs::read_to_string(&file)
+                .expect("token file")
+                .starts_with("\nHATCHDOOR_WEB_BEARER_TOKEN="),
+            "a leading newline keeps `>> .env` from joining two lines"
+        );
+    }
+
+    #[test]
+    fn web_auth_posture_explains_a_token_it_could_not_save() {
+        let state = tempfile::TempDir::new().expect("temp dir");
+        // A file where the state directory should be makes saving impossible.
+        let blocked = state.path().join("blocked");
+        std::fs::write(&blocked, "").expect("file");
+        let error = check_web_auth_posture("0.0.0.0", false, false, &blocked.join("state"))
+            .expect_err("refused");
+        assert!(error.contains("Could not save a new token"), "{error}");
+        assert!(error.contains("openssl rand -hex 32"), "{error}");
+        assert!(!error.contains("HATCHDOOR_WEB_BEARER_TOKEN="), "{error}");
     }
 
     #[test]
     fn web_auth_posture_allows_public_bind_in_demo_mode() {
-        assert!(check_web_auth_posture("0.0.0.0", false, true).is_ok());
-        assert!(check_web_auth_posture("::", false, true).is_ok());
+        let state = tempfile::TempDir::new().expect("temp dir");
+        assert!(check_web_auth_posture("0.0.0.0", false, true, state.path()).is_ok());
+        assert!(check_web_auth_posture("::", false, true, state.path()).is_ok());
     }
 
     #[test]
     fn demo_mode_posture_rejects_external_write_surfaces() {
-        assert!(check_demo_mode_posture(true, false, false).is_ok());
-        assert!(check_demo_mode_posture(false, true, true).is_ok());
+        assert!(check_demo_mode_posture(true, false).is_ok());
+        assert!(check_demo_mode_posture(false, true).is_ok());
 
-        let mcp_error = check_demo_mode_posture(true, true, false).expect_err("mcp rejected");
+        let mcp_error = check_demo_mode_posture(true, true).expect_err("mcp rejected");
         assert!(mcp_error.contains("HATCHDOOR_MCP_ENABLED"));
-
-        let git_error = check_demo_mode_posture(true, false, true).expect_err("git rejected");
-        assert!(git_error.contains("HATCHDOOR_GIT_SYNC_ENABLED"));
     }
 
     #[test]
@@ -2150,7 +2452,95 @@ mod tests {
 
         let lines = logs.lines();
         assert_eq!(lines.len(), 1, "{lines:?}");
-        assert!(lines[0].contains("Loading search model"), "{lines:?}");
+        assert!(
+            lines[0].contains("Search model downloaded, loading it"),
+            "{lines:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn cache_recovery_requeues_every_active_vault_and_preserves_markdown() {
+        let (_, tmp, mut state, mut worker) = app_for_tests_with_worker(None, false);
+        state.startup_sqlite =
+            Arc::new(SqliteCache::open(tmp.path().join("cache.sqlite3"), 384).unwrap());
+        let app = build_router(state.clone(), None);
+        let mut ids = Vec::new();
+        for (revision, name) in ["First", "Second"].into_iter().enumerate() {
+            let root = tmp.path().join(name);
+            let id = create_vault_with_files(
+                &app,
+                name,
+                &root,
+                &[("Home.md", "# Home\nword\n")],
+                revision as u64,
+            )
+            .await;
+            ids.push(id.parse::<crate::vault_registry::VaultId>().unwrap());
+        }
+        drain_queued_turns(&mut worker).await;
+        let recovery = tokio::spawn(crate::vault_executor::recover_corrupt_cache(state.clone()));
+        // The cache tests exercise physical damage. This test exercises the
+        // runtime's reaction to that same coalesced corruption signal.
+        state
+            .startup_sqlite
+            .report_corruption("database corruption");
+        let mut rebuilt = Vec::new();
+        for _ in 0..2 {
+            let outcome = tokio::time::timeout(
+                Duration::from_secs(10),
+                worker.run_next(|request| {
+                    let state = state.clone();
+                    async move {
+                        crate::vault_executor::dispatch_vault_index_turn(
+                            &state.vaults,
+                            state.startup_sqlite,
+                            state.embedder,
+                            request,
+                        )
+                        .await
+                    }
+                }),
+            )
+            .await
+            .expect("every active Vault gets a turn")
+            .unwrap();
+            outcome.result.expect("rebuild succeeds");
+            rebuilt.push(outcome.request.vault_id());
+        }
+        ids.sort();
+        rebuilt.sort();
+        assert_eq!(rebuilt, ids);
+        for id in ids {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(format!("/api/v1/vaults/{id}/search?q=word&mode=keyword"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(
+                json_body(response).await["data"]["results"]
+                    .as_array()
+                    .unwrap()
+                    .len(),
+                1
+            );
+        }
+        for name in ["First", "Second"] {
+            assert_eq!(
+                std::fs::read_to_string(tmp.path().join(name).join("Home.md")).unwrap(),
+                "# Home\nword\n"
+            );
+        }
+        state.shutdown.trigger();
+        tokio::time::timeout(Duration::from_secs(2), recovery)
+            .await
+            .unwrap()
+            .unwrap();
     }
 
     fn app_for_tests() -> (Router, TempDir) {
@@ -2347,6 +2737,226 @@ mod tests {
             builder = builder.header("authorization", format!("Bearer {token}"));
         }
         builder.body(Body::from(body)).expect("request")
+    }
+
+    fn tokenless_request(method: &str, uri: &str, headers: &[(&str, &str)]) -> Request<Body> {
+        let mut builder = Request::builder().method(method).uri(uri);
+        for (name, value) in headers {
+            builder = builder.header(*name, *value);
+        }
+        builder.body(Body::empty()).expect("request")
+    }
+
+    #[tokio::test]
+    async fn tokenless_instance_refuses_a_host_that_is_not_this_machine() {
+        // #629 G1-01: a DNS-rebinding page sends its own name as Host.
+        let (app, _tmp, _state) = app_for_tests_with_web_auth(None);
+        for host in [
+            "rebind.attacker.example:42824",
+            "rebind.attacker.example",
+            "127.0.0.1.attacker.example",
+            "192.168.1.20:42824",
+        ] {
+            let response = app
+                .clone()
+                .oneshot(tokenless_request(
+                    "GET",
+                    "/api/v1/vaults",
+                    &[("host", host)],
+                ))
+                .await
+                .expect("response");
+            assert_eq!(response.status(), StatusCode::FORBIDDEN, "{host}");
+        }
+        // A Host that is not text is refused, never skipped.
+        let mut request = tokenless_request("GET", "/api/v1/vaults", &[]);
+        request.headers_mut().insert(
+            header::HOST,
+            axum::http::HeaderValue::from_bytes(b"\xffevil").expect("opaque header"),
+        );
+        let response = app.clone().oneshot(request).await.expect("response");
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        for host in [
+            "127.0.0.1:42824",
+            "localhost:5173",
+            "LOCALHOST",
+            "[::1]:42824",
+            "127.0.0.1",
+        ] {
+            let response = app
+                .clone()
+                .oneshot(tokenless_request(
+                    "GET",
+                    "/api/v1/vaults",
+                    &[("host", host)],
+                ))
+                .await
+                .expect("response");
+            assert_eq!(response.status(), StatusCode::OK, "{host}");
+        }
+    }
+
+    #[tokio::test]
+    async fn tokenless_instance_accepts_its_public_url_host() {
+        let (app, _tmp, state) = app_for_tests_with_web_auth(None);
+        state
+            .runtime_config
+            .save([(
+                "HATCHDOOR_PUBLIC_URL".to_string(),
+                "https://Notes.example.com/hatchdoor".to_string(),
+            )])
+            .expect("save public URL");
+        let response = app
+            .clone()
+            .oneshot(tokenless_request(
+                "GET",
+                "/api/v1/vaults",
+                &[("host", "notes.example.com")],
+            ))
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let response = app
+            .oneshot(tokenless_request(
+                "GET",
+                "/api/v1/vaults",
+                &[("host", "other.example.com")],
+            ))
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn tokenless_instance_refuses_a_cross_site_upload_and_writes_nothing() {
+        // #629 G1-01: a cross-site multipart form needs no rebinding at all.
+        let (app, tmp, _state) = app_for_tests_with_web_auth(None);
+        let root = tmp.path().join("attachments");
+        let vault_id = create_vault_with_files(&app, "Attachments", &root, &[], 0).await;
+
+        for (name, value) in [
+            ("origin", "https://evil.example"),
+            ("origin", "null"),
+            ("sec-fetch-site", "cross-site"),
+        ] {
+            let mut request = attachment_upload_request(&vault_id, "evil.png", None);
+            request.headers_mut().insert(
+                axum::http::HeaderName::from_static(name),
+                axum::http::HeaderValue::from_static(value),
+            );
+            request.headers_mut().insert(
+                header::HOST,
+                axum::http::HeaderValue::from_static("127.0.0.1:42824"),
+            );
+            let response = app.clone().oneshot(request).await.expect("response");
+            assert_eq!(response.status(), StatusCode::FORBIDDEN, "{name}: {value}");
+        }
+        assert!(!root.join("evil.png").exists(), "nothing is written");
+
+        // The same upload from the app's own page, or from curl, still works.
+        for origin in [
+            Some("http://127.0.0.1:42824"),
+            Some("http://localhost:5173"),
+            None,
+        ] {
+            let mut request = attachment_upload_request(&vault_id, "ok.png", None);
+            request.headers_mut().insert(
+                header::HOST,
+                axum::http::HeaderValue::from_static("127.0.0.1:42824"),
+            );
+            if let Some(origin) = origin {
+                request.headers_mut().insert(
+                    header::ORIGIN,
+                    axum::http::HeaderValue::from_str(origin).expect("origin"),
+                );
+                request.headers_mut().insert(
+                    axum::http::HeaderName::from_static("sec-fetch-site"),
+                    axum::http::HeaderValue::from_static("same-origin"),
+                );
+            }
+            let response = app.clone().oneshot(request).await.expect("response");
+            assert_eq!(response.status(), StatusCode::OK, "{origin:?}");
+            std::fs::remove_file(root.join("ok.png")).expect("uploaded");
+        }
+    }
+
+    #[tokio::test]
+    async fn tokenless_instance_refuses_a_cross_site_model_setup_post() {
+        let (app, _tmp, _state) = app_for_tests_with_web_auth(None);
+        for path in [
+            "/api/model/accept-gemma",
+            "/api/model/decline-gemma",
+            "/api/model/retry",
+        ] {
+            let response = app
+                .clone()
+                .oneshot(tokenless_request(
+                    "POST",
+                    path,
+                    &[
+                        ("host", "127.0.0.1:42824"),
+                        ("origin", "https://evil.example"),
+                    ],
+                ))
+                .await
+                .expect("response");
+            assert_eq!(response.status(), StatusCode::FORBIDDEN, "{path}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_configured_web_token_or_demo_mode_skips_the_host_check() {
+        let (app, _tmp, _state) = app_for_tests_with_web_auth(Some(Arc::from("web-secret")));
+        let response = app
+            .oneshot(tokenless_request(
+                "GET",
+                "/api/v1/vaults",
+                &[
+                    ("host", "notes.example.com"),
+                    ("authorization", "Bearer web-secret"),
+                ],
+            ))
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let (app, _tmp, _state) = app_for_tests_with_web_auth_and_demo_mode(None, true);
+        let response = app
+            .oneshot(tokenless_request(
+                "GET",
+                "/api/v1/vaults",
+                &[("host", "demo.example.com")],
+            ))
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn the_web_api_accepts_the_bearer_scheme_in_any_case() {
+        // #629 G1-03: RFC 7235 makes the scheme name case-insensitive.
+        let (app, _tmp, _state) = app_for_tests_with_web_auth(Some(Arc::from("web-secret")));
+        for (header, expected) in [
+            ("Bearer web-secret", StatusCode::OK),
+            ("bearer web-secret", StatusCode::OK),
+            ("BEARER web-secret", StatusCode::OK),
+            ("Bearer  web-secret", StatusCode::OK),
+            ("Bearer\tweb-secret", StatusCode::OK),
+            ("bearer wrong-secret", StatusCode::UNAUTHORIZED),
+            ("Basic web-secret", StatusCode::UNAUTHORIZED),
+            ("Bearerweb-secret", StatusCode::UNAUTHORIZED),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(tokenless_request(
+                    "GET",
+                    "/api/v1/vaults",
+                    &[("authorization", header)],
+                ))
+                .await
+                .expect("response");
+            assert_eq!(response.status(), expected, "{header:?}");
+        }
     }
 
     #[tokio::test]
@@ -4235,13 +4845,13 @@ mod tests {
             "# Crlf\nline one\nline two\n"
         );
 
-        // An upper-case extension is still a note, written with `.md`.
+        // An upper-case extension is still a note, written as named (#637).
         let answer = mint_upload_link(&app, &vault_id, "Imports/Upper.MD", false, None).await;
         assert_eq!(answer["result"]["structuredContent"]["upload_kind"], "note");
         let uploaded = post_upload(&app, minted_url(&answer), b"# Upper\n").await;
         assert_eq!(uploaded.status(), StatusCode::OK);
         assert_eq!(json_body(uploaded).await["relative_path"], "Imports/Upper");
-        assert!(vault_root.join("Imports/Upper.md").exists());
+        assert!(vault_root.join("Imports/Upper.MD").exists());
         assert!(!vault_root.join("Imports/Upper.MD.md").exists());
     }
 
@@ -4801,6 +5411,77 @@ mod tests {
         assert_eq!(&body[..], b"ok");
     }
 
+    /// Both framing headers, and exactly `expected_policy` as the one CSP.
+    fn assert_framing_refused(response: &Response, uri: &str, expected_policy: &str) {
+        assert_eq!(
+            response.headers().get(header::X_FRAME_OPTIONS),
+            Some(&HeaderValue::from_static("DENY")),
+            "{uri}"
+        );
+        let policies: Vec<_> = response
+            .headers()
+            .get_all(header::CONTENT_SECURITY_POLICY)
+            .iter()
+            .collect();
+        assert_eq!(policies.len(), 1, "{uri}: {policies:?}");
+        assert_eq!(policies[0], expected_policy, "{uri}");
+    }
+
+    /// #702: no other site may show Hatchdoor in a frame, so a hidden frame
+    /// cannot trick a click (clickjacking). Every kind of response says so:
+    /// the app's page, a note address, the API, a built asset, the health
+    /// check, the manual and MCP.
+    #[tokio::test]
+    async fn every_response_refuses_to_be_shown_in_another_sites_frame() {
+        let (app, _tmp) = app_for_tests();
+        for uri in [
+            "/",
+            "/v/00000000-0000-4000-8000-000000000000/n/home",
+            "/api/v1/vaults",
+            "/assets/index.js",
+            "/health",
+            "/docs/index.md",
+            "/llms.txt",
+            "/mcp",
+            "/nope",
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(uri)
+                        .body(Body::empty())
+                        .expect("request"),
+                )
+                .await
+                .expect("response");
+            // No directive besides frame-ancestors.
+            assert_framing_refused(&response, uri, FRAME_ANCESTORS_NONE);
+        }
+    }
+
+    /// #702: an SVG asset already carries `sandbox`, which must survive next to
+    /// the framing rule rather than be replaced by it.
+    #[tokio::test]
+    async fn a_response_with_its_own_policy_keeps_it_and_gains_frame_ancestors() {
+        let (app, tmp) = app_for_tests();
+        let root = tmp.path().join("svg-vault");
+        let vault_id =
+            create_vault_with_files(&app, "Svg", &root, &[("diagram.svg", "<svg/>")], 0).await;
+        let uri = format!("/api/v1/vaults/{vault_id}/assets/diagram.svg");
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri(&uri)
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_framing_refused(&response, &uri, &format!("sandbox; {FRAME_ANCESTORS_NONE}"));
+    }
+
     #[tokio::test]
     async fn unavailable_vault_keeps_liveness_status_and_spa_available() {
         let (_app, _tmp, mut state) = app_for_tests_with_state();
@@ -5175,6 +5856,63 @@ mod tests {
         payload["state"].as_str().expect("state").to_string()
     }
 
+    /// A stalled download fails setup with a message naming the stall, and
+    /// releases the claim so `POST /api/model/retry` is taken with no
+    /// restart (#642).
+    #[tokio::test]
+    async fn a_stalled_download_fails_setup_and_retry_is_accepted() {
+        let (app, _tmp, state) = app_for_tests_with_state();
+        state.model_setup.decline_gemma().expect("select Nomic");
+        // A download in flight holds the setup claim.
+        state.model_setup_started.store(true, Ordering::Release);
+        state
+            .startup
+            .set_downloading(crate::model_setup::NOMIC_MODEL_ID, None, None);
+        // While the claim is held, a retry is refused: the #642 dead end.
+        let refused = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/model/retry")
+                    .method("POST")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(refused.status(), StatusCode::CONFLICT);
+
+        record_model_setup_failure(
+            &state,
+            &SetupFailure::Download(crate::model_setup::FetchFailure::Stalled(
+                crate::model_setup::DOWNLOAD_STALL_AFTER,
+            )),
+        );
+
+        let status = state.startup.status();
+        assert_eq!(status.state, "failed");
+        assert!(
+            status
+                .message
+                .as_deref()
+                .is_some_and(|m| m.contains("stalled")),
+            "{:?}",
+            status.message
+        );
+        assert!(!state.model_setup_started.load(Ordering::Acquire));
+        let retried = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/model/retry")
+                    .method("POST")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(retried.status(), StatusCode::ACCEPTED);
+    }
+
     /// A fresh install has no Vaults (ADR-40), so no Index turn follows model
     /// setup. `/ready` turns 200 when the model has loaded (#453).
     #[tokio::test]
@@ -5528,7 +6266,8 @@ mod tests {
             )
             .await
             .expect("response");
-        assert_eq!(with_query.status(), StatusCode::NOT_FOUND);
+        // #703: an ordinary JSON read takes the header only.
+        assert_eq!(with_query.status(), StatusCode::UNAUTHORIZED);
 
         let health = app
             .clone()
@@ -5556,13 +6295,77 @@ mod tests {
         assert_ne!(root.status(), StatusCode::UNAUTHORIZED);
     }
 
+    /// #703: the web token rides in `?access_token=` only on the routes the
+    /// browser reaches without a header (`QUERY_TOKEN_ROUTES`); everywhere else
+    /// a query-only token gets `401`, and the header works on every route.
+    #[tokio::test]
+    async fn the_query_token_works_on_the_header_less_routes_only() {
+        let (app, _tmp, _state) = app_for_tests_with_web_auth(Some(Arc::from("secret-token")));
+        let vault = "00000000-0000-4000-8000-000000000000";
+        let send = |method: &'static str, uri: String, header: bool| {
+            let app = app.clone();
+            async move {
+                let mut request = Request::builder().method(method).uri(uri);
+                if header {
+                    request = request.header("authorization", "Bearer secret-token");
+                }
+                app.oneshot(request.body(Body::empty()).expect("request"))
+                    .await
+                    .expect("response")
+                    .status()
+            }
+        };
+
+        let allowed = [
+            format!("/api/v1/vaults/{vault}/assets/diagram.png"),
+            format!("/api/v1/vaults/{vault}/notes/home/download"),
+            "/api/v1/vaults/events".to_string(),
+        ];
+        let refused = [
+            ("POST", format!("/api/v1/vaults/{vault}/notes")),
+            ("PUT", format!("/api/v1/vaults/{vault}/notes/home")),
+            ("POST", "/api/settings/web-token/reveal".to_string()),
+            ("GET", format!("/api/v1/vaults/{vault}/notes/home")),
+            ("GET", "/api/settings".to_string()),
+        ];
+
+        for uri in &allowed {
+            let status = send("GET", format!("{uri}?access_token=secret-token"), false).await;
+            assert_ne!(status, StatusCode::UNAUTHORIZED, "query token on GET {uri}");
+            // The token is still checked there.
+            let wrong = send("GET", format!("{uri}?access_token=wrong"), false).await;
+            assert_eq!(
+                wrong,
+                StatusCode::UNAUTHORIZED,
+                "wrong query token on GET {uri}"
+            );
+        }
+        for (method, uri) in &refused {
+            let status = send(method, format!("{uri}?access_token=secret-token"), false).await;
+            assert_eq!(
+                status,
+                StatusCode::UNAUTHORIZED,
+                "query token on {method} {uri}"
+            );
+        }
+        for (method, uri) in allowed
+            .iter()
+            .map(|uri| ("GET", uri.clone()))
+            .chain(refused.iter().cloned())
+        {
+            let status = send(method, uri.clone(), true).await;
+            assert_ne!(
+                status,
+                StatusCode::UNAUTHORIZED,
+                "header token on {method} {uri}"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn post_start_model_choice_is_rejected_without_persisting_a_new_selection() {
         let (app, _tmp, state) = app_for_tests_with_state();
-        assert_eq!(
-            state.model_setup.selected().expect("initial selection"),
-            SelectedModel::TermsRequired
-        );
+        assert_eq!(state.model_setup.selected(), SelectedModel::TermsRequired);
 
         let response = app
             .oneshot(
@@ -5577,10 +6380,7 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::CONFLICT);
         assert_eq!(
-            state
-                .model_setup
-                .selected()
-                .expect("selection after refusal"),
+            state.model_setup.selected(),
             SelectedModel::TermsRequired,
             "a rejected post-start request must not persist a model the runtime did not adopt"
         );
@@ -5705,7 +6505,7 @@ mod tests {
                     .method("PATCH")
                     .header("content-type", "application/json")
                     .body(Body::from(
-                        r#"{"updates":{"HATCHDOOR_EXCLUDE":"generated/**"}}"#,
+                        r#"{"updates":{"HATCHDOOR_EMBED_LAYERS":"false"}}"#,
                     ))
                     .expect("request"),
             )
@@ -5731,42 +6531,13 @@ mod tests {
                     .method("PATCH")
                     .header("content-type", "application/json")
                     .body(Body::from(
-                        r#"{"updates":{"HATCHDOOR_EXCLUDE":"generated/**"},"confirm":["reindex"]}"#,
-                    ))
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-        assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(
-            state
-                .runtime_snapshot()
-                .setting("HATCHDOOR_EXCLUDE")
-                .expect("setting")
-                .value,
-            "generated/**"
-        );
-        assert!(
-            state
-                .vault_work
-                .has_work(vault_id, crate::vault_work::VaultWorkKind::Index),
-            "a confirmed indexing save must request an Index turn for the active Vault"
-        );
-
-        let second_response = app
-            .oneshot(
-                Request::builder()
-                    .uri("/api/settings")
-                    .method("PATCH")
-                    .header("content-type", "application/json")
-                    .body(Body::from(
                         r#"{"updates":{"HATCHDOOR_EMBED_LAYERS":"false"},"confirm":["reindex"]}"#,
                     ))
                     .expect("request"),
             )
             .await
             .expect("response");
-        assert_eq!(second_response.status(), StatusCode::OK);
+        assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(
             state
                 .runtime_snapshot()
@@ -5775,45 +6546,79 @@ mod tests {
                 .value,
             "false"
         );
+        assert!(
+            state
+                .vault_work
+                .has_work(vault_id, crate::vault_work::VaultWorkKind::Index),
+            "a confirmed indexing save must request an Index turn for the active Vault"
+        );
     }
 
-    /// #185 deleted the instance-wide Git lane, so the legacy
-    /// `HATCHDOOR_GIT_SYNC_ENABLED` key has no runtime reader. Saving it still
-    /// persists (it stays in the settings schema) but must no longer ask for a consequence confirmation and must no
-    /// longer create a repository as a side effect of a settings save.
+    /// Nothing reads a retired setting, and before #644 a saved value the old
+    /// startup checks refused made the next start exit. A save of one is now
+    /// refused with a field error naming it as retired: nothing is stored, no
+    /// reindex is queued, and no repository is created.
     #[tokio::test]
-    async fn saving_the_legacy_git_mode_persists_without_touching_the_vault() {
-        let (app, tmp, state) = app_for_tests_with_state();
-        let vault_root = tmp.path().join("legacy-git-mode");
-        std::fs::create_dir_all(&vault_root).expect("create vault directory");
-        assert!(!vault_root.join(".git").exists());
+    async fn saving_a_retired_setting_is_refused_and_stores_nothing() {
+        let (app, tmp, state, mut worker) = app_for_tests_with_worker(None, false);
+        let vault_root = tmp.path().join("retired");
+        let vault_id =
+            create_vault_with_files(&app, "Retired", &vault_root, &[("Home.md", "# Home\n")], 0)
+                .await;
+        let vault_id: crate::vault_registry::VaultId = vault_id.parse().expect("Vault id");
+        drain_queued_turns(&mut worker).await;
 
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .uri("/api/settings")
-                    .method("PATCH")
-                    .header("content-type", "application/json")
-                    .body(Body::from(
-                        r#"{"updates":{"HATCHDOOR_GIT_SYNC_ENABLED":"local"}}"#,
-                    ))
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-        assert_eq!(response.status(), StatusCode::OK);
+        for (key, body) in [
+            (
+                "HATCHDOOR_GIT_SYNC_ENABLED",
+                r#"{"updates":{"HATCHDOOR_GIT_SYNC_ENABLED":"remote"}}"#,
+            ),
+            (
+                "HATCHDOOR_EXCLUDE",
+                r#"{"updates":{"HATCHDOOR_EXCLUDE":"drafts/, notes/[z-a]"},"confirm":["reindex"]}"#,
+            ),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/api/settings")
+                        .method("PATCH")
+                        .header("content-type", "application/json")
+                        .body(Body::from(body))
+                        .expect("request"),
+                )
+                .await
+                .expect("response");
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{key}");
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("body");
+            let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
+            assert_eq!(json["fields"][0]["key"], key);
+            assert!(
+                json["fields"][0]["message"]
+                    .as_str()
+                    .is_some_and(|message| message.contains("retired")),
+                "{json}"
+            );
+            assert_eq!(
+                state
+                    .runtime_snapshot()
+                    .setting(key)
+                    .expect("still listed")
+                    .source,
+                crate::runtime_config::SettingSource::Default,
+                "{key}: nothing is stored"
+            );
+        }
         assert!(
-            !vault_root.join(".git").exists(),
-            "a settings save must not initialize versioning on any directory"
+            !state
+                .vault_work
+                .has_work(vault_id, crate::vault_work::VaultWorkKind::Index),
+            "a refused save queues no reindex"
         );
-        assert_eq!(
-            state
-                .runtime_snapshot()
-                .setting("HATCHDOOR_GIT_SYNC_ENABLED")
-                .expect("setting")
-                .value,
-            "local"
-        );
+        assert!(!vault_root.join(".git").exists());
     }
 
     #[tokio::test]
@@ -6259,6 +7064,76 @@ mod tests {
             .expect("response");
         assert_eq!(stale.status(), StatusCode::CONFLICT);
         assert_eq!(json_body(stale).await["code"], "write_conflict");
+    }
+
+    #[tokio::test]
+    async fn vault_scoped_update_note_refuses_a_slug_that_moved_to_another_file() {
+        // #627: the wire proof for `expected_relative_path`. `a/Plan` sorts
+        // first, so it holds `plan`; a write meant for `z/Plan` sent to that
+        // slug is refused rather than landing in `a/Plan`.
+        let (app, tmp, _state) = app_for_tests_with_web_auth(None);
+        let notes = tmp.path().join("notes");
+        let vault_id = create_vault_with_files(
+            &app,
+            "Notes",
+            &notes,
+            &[("z/Plan.md", "body\n"), ("a/Plan.md", "body\n")],
+            0,
+        )
+        .await;
+
+        let note_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/vaults/{vault_id}/notes/plan"))
+                    .method("GET")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        let note = json_body(note_response).await["note"].clone();
+        assert_eq!(note["relative_path"], "a/Plan");
+        let hash = note["content_hash"].as_str().expect("hash").to_string();
+
+        let moved = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/vaults/{vault_id}/notes/plan"))
+                    .method("PUT")
+                    .header("content-type", "application/json")
+                    .body(Body::from(format!(
+                        r##"{{"content":"typed\n","expected_content_hash":"{hash}","expected_relative_path":"z/Plan"}}"##
+                    )))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(moved.status(), StatusCode::CONFLICT);
+        let body = json_body(moved).await;
+        assert_eq!(body["code"], "note_moved");
+        assert_eq!(body["retryable"], false);
+        assert_eq!(
+            std::fs::read_to_string(notes.join("a/Plan.md")).expect("read"),
+            "body\n"
+        );
+
+        let matching = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/vaults/{vault_id}/notes/plan"))
+                    .method("PUT")
+                    .header("content-type", "application/json")
+                    .body(Body::from(format!(
+                        r##"{{"content":"typed\n","expected_content_hash":"{hash}","expected_relative_path":"a/Plan"}}"##
+                    )))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(matching.status(), StatusCode::OK);
     }
 
     #[tokio::test]
@@ -7508,7 +8383,10 @@ mod tests {
             .expect("zip body");
         let mut archive =
             zip::ZipArchive::new(std::io::Cursor::new(zip_bytes.to_vec())).expect("read zip");
-        let mut names = archive.file_names().map(str::to_string).collect::<Vec<_>>();
+        let mut names = archive
+            .file_names()
+            .map(|name| name.expect("entry name").into_owned())
+            .collect::<Vec<_>>();
         names.sort();
         assert_eq!(names, ["Mixed-assets/visible.png", "Mixed.md"]);
         let mut markdown = String::new();
@@ -8225,7 +9103,7 @@ mod tests {
                     name: "Unavailable".to_string(),
                     enabled: true,
                     source: crate::vault_registry::VaultSource::Local {
-                        path: unavailable_path,
+                        path: unavailable_path.clone(),
                     },
                     exclude_patterns: Vec::new(),
                     https_credentials: None,
@@ -8244,20 +9122,8 @@ mod tests {
             )
             .await;
         let unavailable_id = unavailable_snapshot.vault_ids().next().expect("vault id");
-        state
-            .vaults
-            .runtime(unavailable_id)
-            .expect("active runtime")
-            .set_local_content_status(
-                crate::vault_runtime::LocalContentStatus::Unavailable,
-                Some(crate::vault_runtime::VaultRuntimeError {
-                    code: "vault_read_unavailable".to_string(),
-                    message: "Vault directory became unavailable".to_string(),
-                    retryable: true,
-                    detail: None,
-                }),
-            )
-            .expect("publish unavailable local content");
+        // The folder goes away after activation; refresh looks again (#641).
+        std::fs::remove_dir_all(&unavailable_path).expect("remove the Vault directory");
 
         let unavailable = app
             .clone()
@@ -9110,6 +9976,71 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn unresolvable_asset_paths_are_caller_errors_and_downloads_keep_unicode_names() {
+        // #647: these answered `500 internal_error`, and a note's download
+        // name lost every non-ASCII letter.
+        let (app, tmp, _state) = app_for_tests_with_web_auth(None);
+        let vault = create_vault_with_files(
+            &app,
+            "Unicode",
+            &tmp.path().join("unicode"),
+            &[("Ελληνική σημείωση.md", "# Γεια")],
+            0,
+        )
+        .await;
+        let get = |uri: String| {
+            app.clone().oneshot(
+                Request::builder()
+                    .uri(uri)
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+        };
+
+        let nul = get(format!("/api/v1/vaults/{vault}/assets/x%00.png"))
+            .await
+            .expect("response");
+        assert_eq!(nul.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(json_body(nul).await["code"], "invalid_asset_path");
+
+        let through_a_file = get(format!(
+            "/api/v1/vaults/{vault}/assets/{}/x.png",
+            crate::vault_read::encode_relative_path("Ελληνική σημείωση.md")
+        ))
+        .await
+        .expect("response");
+        assert_eq!(through_a_file.status(), StatusCode::NOT_FOUND);
+        assert_eq!(json_body(through_a_file).await["code"], "asset_not_found");
+
+        let too_long = get(format!(
+            "/api/v1/vaults/{vault}/assets/{}.png",
+            "a".repeat(300)
+        ))
+        .await
+        .expect("response");
+        assert_eq!(too_long.status(), StatusCode::BAD_REQUEST);
+
+        let download = get(format!(
+            "/api/v1/vaults/{vault}/notes/{}/download",
+            crate::vault_read::encode_relative_path("ελληνική-σημείωση")
+        ))
+        .await
+        .expect("response");
+        assert_eq!(download.status(), StatusCode::OK);
+        let disposition = download.headers()["content-disposition"]
+            .to_str()
+            .expect("ascii header")
+            .to_string();
+        assert!(
+            disposition.ends_with(&format!(
+                "filename*=UTF-8''{}",
+                crate::vault_read::encode_relative_path("Ελληνική σημείωση.md")
+            )),
+            "{disposition}"
+        );
+    }
+
+    #[tokio::test]
     async fn vault_scoped_asset_reports_a_retryable_unavailable_status_for_a_missing_directory() {
         // A managed-Git Vault can be enabled and accepting operations before
         // its checkout has materialized; simulate that by removing the
@@ -9945,13 +10876,17 @@ mod tests {
     }
 
     async fn get_page(app: &Router, uri: &str) -> (StatusCode, String) {
+        get_page_at(app, uri, "attacker.example").await
+    }
+
+    async fn get_page_at(app: &Router, uri: &str, host: &str) -> (StatusCode, String) {
         let response = app
             .clone()
             .oneshot(
                 Request::builder()
                     .uri(uri)
                     // A link preview must never be built from these.
-                    .header("host", "attacker.example")
+                    .header("host", host)
                     .header("x-forwarded-host", "forwarded.example")
                     .header("x-forwarded-proto", "https")
                     .body(Body::empty())
@@ -10152,8 +11087,10 @@ mod tests {
                 (format!("/v/{vault_id}/n/no-such-note"), StatusCode::OK),
                 ("/nope".to_string(), StatusCode::NOT_FOUND),
             ] {
+                // Without a web token the instance answers only its own names
+                // (#629), so the page is asked for at the public address.
                 assert_eq!(
-                    get_page(&app, &uri).await,
+                    get_page_at(&app, &uri, "notes.example.com").await,
                     (status, BUILT_PAGE.to_string()),
                     "{uri} with token {web_bearer_token:?}"
                 );

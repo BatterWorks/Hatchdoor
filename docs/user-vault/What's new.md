@@ -9,6 +9,15 @@ What changed in each Hatchdoor release, in a few plain lines, newest release fir
 
 Agents read this page with `read_docs` and the page name `whats-new`.
 
+## v2.10.0 - 2026-11-14
+
+- **Action needed:** Hatchdoor can no longer be shown inside another page, so a dashboard tile or Home Assistant iframe panel that embeds it must link to it instead.
+- **Action needed:** A script that passes the web token as `?access_token=` must send an `Authorization: Bearer` header instead, except for attachments, note downloads and the live update stream.
+- **Action needed:** Podman installs now use the same image as Docker, so switch an `image:` line on a `podman-` tag to the plain tag before those tags stop, three releases from now. [[Install Hatchdoor with Docker Compose]]
+- A note can now show another note's content inside it, the way Obsidian embeds do, and a link to a block opens the note at that paragraph.
+- Highlights can now be coloured the Obsidian way, such as `==🔴text==` for red.
+- Settings has a new Layout section that sets how wide notes run and can hide the Changed on disk and Recently viewed lists.
+
 ## v2.9.0 - 2026-10-27
 
 - A Git-backed Vault's history now says where each change came from, whether the web app, a named agent or an edit made outside Hatchdoor. [[How to set up a Git-backed Vault#Where each change came from]]

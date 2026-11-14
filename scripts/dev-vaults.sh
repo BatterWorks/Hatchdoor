@@ -741,6 +741,24 @@ EOF
 Nothing links here and this note links nowhere. It should still appear in the
 graph as an isolated node rather than vanishing.
 EOF
+
+    # Obsidian canvases (#579, ADR-53). Renaming or moving `orphan` must
+    # change the one path in the first and nothing else in it, odd spacing
+    # and the unknown key included. The second is not JSON, so a rename
+    # skips it and names it in its warnings.
+    note "$dest/orphan board.canvas" <<'EOF'
+{
+	"nodes":[
+		{"id":"a1","type":"file","file":"links/orphan.md","x":-200,"y":-120,"width":400,"height":300},
+		{"id":"a2",  "file" : "links/broken links.md" ,"type":"file","x":260,"y":-120,"width":400,"height":300,"color":"4"},
+		{"id":"a3","type":"text","text":"A card that only mentions links/orphan.md","x":-200,"y":220,"width":400,"height":80}
+	],
+	"edges":[{"id":"e1","fromNode":"a1","fromSide":"right","toNode":"a2","toSide":"left"}],
+	"x-hatchdoor-fixture":{"keep":"this unknown key"}
+}
+EOF
+    printf '%s' '{"nodes":[{"type":"file","file":"links/orphan.md"},]}' \
+        > "$dest/not json.canvas"
 }
 
 build_structure_edge_cases() {

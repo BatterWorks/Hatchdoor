@@ -58,6 +58,7 @@ import type { ExplorerNote } from "../../../types";
 import type { UploadedAttachment } from "../../NoteEditor";
 import { attachmentRejectionAtCurrentLimit } from "../attachmentDrop";
 import { callouts } from "./callouts";
+import { highlightColours } from "./highlightColours";
 import { markKeymap } from "./commands";
 import { focusTracking } from "./focusState";
 import { assetsResolved, imageWidgets, isImageTarget } from "./imageWidgets";
@@ -195,8 +196,17 @@ export const LiveEditor = forwardRef<LiveEditorHandle, LiveEditorProps>(
         return;
       }
       const openNote = (target: string) => propsRef.current.onOpenNote(target);
-      const openExternal = (url: string) =>
-        window.open(url, "_blank", "noopener,noreferrer");
+      const openExternal = (url: string) => {
+        try {
+          const target = new URL(url);
+          if (["http:", "https:", "mailto:"].includes(target.protocol)) {
+            window.open(url, "_blank", "noopener,noreferrer");
+          }
+        } catch {
+          // Note content is untrusted. Relative or malformed targets are not
+          // external links; note navigation has its own resolver.
+        }
+      };
       const view = new EditorView({
         parent: host,
         state: EditorState.create({
@@ -283,6 +293,7 @@ export const LiveEditor = forwardRef<LiveEditorHandle, LiveEditorProps>(
               resolveAssetSrc: (raw) => propsRef.current.resolveAssetSrc(raw),
             }),
             callouts,
+            highlightColours,
             completionMenus(
               () => propsRef.current.noteCandidates,
               (note) => propsRef.current.formatNoteLink(note),

@@ -63,17 +63,23 @@ Hatchdoor-Origin: web
 
 The agent name is a label the client chooses for itself, not proof of who wrote. Every agent connects with the same MCP token, so nothing stops one from giving another's name. The lines say which origins a commit holds, not which file each one changed. Merge commits made during a sync carry none. A Vault without Git keeps no record of where a change came from.
 
+Choosing Local history for a folder that is not a Git repository yet creates the repository there when you save, with no commit of its own. A folder inside another Git repository gets a repository of its own, nested in that one. Turning a Local history Vault back on never creates a repository: if its `.git` folder is gone, for example because the drive it lives on is not mounted, the Vault stays off and says so. The next change Hatchdoor commits starts the history. A folder that is already a Git checkout keeps its repository and history. If the `.git` folder disappears while the Vault is running, Hatchdoor commits nothing, not even into a repository the folder sits inside, and the console reports the repository missing (see [[How to troubleshoot common problems#Git sync is failing]]).
+
 > [!warning]
 > Local history creates a hidden `.git` folder inside the Vault's notes folder to hold its history, and that folder only grows: every image and PDF ever attached stays in it, even after you delete the file from the Vault. On a Vault with large attachments, choose Local history only if you accept that growth.
+
+### Deleting a note keeps it in Git
+
+On Local history and Two-way, deleting a note commits it as a move into the hidden `.hatchdoor-trash` folder, so the note stays in the repository. On Two-way it also reaches the remote at the next push and every clone of it, which is what lets you get it back from another device. The note was in the history from its first commit anyway. Nothing in Hatchdoor removes a note from the remote or from its Git history: to remove it for good, rewrite the repository's history yourself, outside Hatchdoor. If your own `.gitignore` lists `.hatchdoor-trash`, the commit records a plain deletion instead, and the note survives only in the history.
 
 ## The shared remote fields
 
 These appear when the behaviour you chose talks to a remote, which is **Pull-only** or **Two-way**, for a folder or a managed checkout:
 
 - **Repository URL**: required for Pull-only and Two-way. Local history does not show it, having nothing to fetch or push.
-- **Branch** (optional): leave blank to track the remote's default branch.
+- **Branch** (optional): leave blank to track the remote's default branch. A name Git does not allow, such as `a..b`, is refused when you save, and a branch the remote does not have stops the Vault with **branch not found** instead of retrying.
 - **Folder within the repository** (optional): leave blank to use the repository root as the Vault.
-- **Sign-in**: **No sign-in** for a public repository, or **Access token** for a private one. The token works over HTTPS only, is never shown again once saved, and is stored apart from every other secret Hatchdoor holds.
+- **Sign-in**: **No sign-in** for a public repository, or **Access token** for a private one. The token works over HTTPS only, is never shown again once saved, and is stored apart from every other secret Hatchdoor holds. Hatchdoor sends it only to the host and port in the **Repository URL**, so a remote that redirects elsewhere never receives it.
 - **Sync schedule**: how often Hatchdoor checks the remote when you don't sync by hand. Hatchdoor cannot be told when something is pushed, so it has to ask. It can be anything from 1 minute to 1440 minutes (24 hours). The default is the slowest, once a day, so set a shorter interval for a Vault you want kept current.
 
 The schedule is measured from the Vault's last completed check and survives a restart: Hatchdoor remembers when each Vault last checked, so a restart or a redeploy resumes the countdown and does not start a new one. A Vault already past its interval when Hatchdoor starts syncs straight away, and one still inside its interval waits out the rest.
@@ -94,6 +100,8 @@ Two kinds of edit behave differently:
 > [!note]
 > "This runs as one step: the Vault pauses, the change saves, and the Vault starts back up. It stays out of the sidebar and All Vaults for that moment." Confirming also clears any stored sign-in token, even if you didn't touch it, so sign in again afterward if the Vault still needs one. If you're moving into Local history, the disk-growth warning above appears again in the same confirmation.
 
+On a managed checkout, a new repository URL, branch or folder means a new clone. Before saving, Hatchdoor commits the notes the old checkout has not committed yet and moves that checkout, whole, into `vaults/<Vault ID>/retired-checkouts/<date and time>` in its state folder. When the Vault starts back up it clones the new repository, and syncing carries on from there. Nothing is deleted. Commits the old remote never received exist only in that archived copy. In Settings, the message after saving says how many there are and where the copy is; an agent's `edit_vault` reports the same in its `retired_checkout` field. If the old notes cannot be committed, the change is refused, nothing moves, and the message says why. This applies even when the new URL names the same repository spelled differently.
+
 If the last step, starting the Vault again, fails, the Vault stays paused and hidden. A banner appears with a **Try to bring this Vault back** button that retries that step alone.
 
 ## If a commit or a sync fails
@@ -102,7 +110,7 @@ Every Git-backed Vault has a console on its Settings page. On a Vault with a rem
 
 One failure happens while setting a Vault up: a managed checkout that cloned without error but could not be moved into place. The message gives the underlying error. A common cause is the filesystem, since installing the checkout needs the same single-step file swap a note save needs (see [[Install Hatchdoor with Docker Compose#If your notes are in a Windows folder, on ZFS or on a FUSE mount]]). If a restart or a dropped connection interrupts a clone, the next attempt removes what it left behind and clones again. You have nothing to clean up. See [[How to troubleshoot common problems]].
 
-A sync with a remote never hangs. A remote that takes more than 15 seconds to connect, or sends nothing for 120 seconds during a transfer, is reported as unreachable and retried. A conflict with the remote leaves the checkout exactly as it was before the merge, with no conflict markers in your notes, and a push the remote refuses, because of a protected branch or a server-side hook for example, is reported as a failure with the remote's reason. Either failure stays on the Vault's console while Hatchdoor keeps committing your saves locally. Only a successful sync clears it, and a successful commit does not. On a Two-way Vault, a conflict can be resolved without access to the server: **Publish my side to a branch** on the Vault's page pushes Hatchdoor's side to a branch on the remote for you to merge there. [[How to troubleshoot common problems]] lists each failure and its fix.
+A sync with a remote never hangs. A remote that takes more than 15 seconds to connect, or sends nothing for 120 seconds during a transfer, is reported as unreachable and retried. A conflict with the remote leaves the checkout exactly as it was before the merge, with no conflict markers in your notes, and a push the remote refuses, because of a protected branch or a server-side hook for example, is reported as a failure with the remote's reason. Either failure stays on the Vault's console while Hatchdoor keeps committing your saves locally. Only a successful sync clears it, and a successful commit does not. On a Two-way Vault, a conflict can be resolved without access to the server: **Publish my side to a branch** on the Vault's page pushes Hatchdoor's side to a branch on the remote for you to merge there. A note in a path the checkout's ignore rules cover is never committed, and a sync never overwrites or deletes it either: if the remote brings a file in its way, the sync stops on a conflict that names the note, and publishing a branch does not resolve that one. [[How to troubleshoot common problems]] lists each failure and its fix.
 
 After a failed commit Hatchdoor waits five minutes before trying again on its own, however much you write meanwhile, so a standing problem doesn't fill the log with the same error. Fix the cause and it resumes by itself. Press **Commit now** or **Try again** if you do not want to wait.
 

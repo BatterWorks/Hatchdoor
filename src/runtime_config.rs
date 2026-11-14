@@ -26,6 +26,14 @@ pub fn live_settings_defaults() -> BTreeMap<String, String> {
         ("HATCHDOOR_ARCHIVE_PREFIX", "90-archive/"),
         ("HATCHDOOR_EXCLUDE", ""),
         ("HATCHDOOR_EMBED_LAYERS", "true"),
+        // #684: the two lists above the sidebar's tree. Only their display
+        // switches off; what feeds them keeps running.
+        ("HATCHDOOR_SIDEBAR_CHANGED_ON_DISK", "true"),
+        ("HATCHDOOR_SIDEBAR_RECENTLY_VIEWED", "true"),
+        // #698: how wide a note's text may run, one of its `CHOICES` in
+        // `handlers/settings.rs`. `default` is the reading measure notes
+        // always had.
+        ("HATCHDOOR_NOTE_WIDTH", "default"),
         ("HATCHDOOR_MCP_ENABLED", "false"),
         ("HATCHDOOR_MCP_WRITE_ENABLED", "false"),
         ("HATCHDOOR_MAX_ATTACHMENT_BYTES", "10485760"),
@@ -54,6 +62,24 @@ pub fn live_settings_defaults() -> BTreeMap<String, String> {
     .map(|(key, value)| (key.to_string(), value.to_string()))
     .collect()
 }
+
+/// Keys still in the defaults, so the settings document keeps listing them,
+/// that nothing reads any more: the instance-wide Git lane's inputs (#185,
+/// #427) and `HATCHDOOR_EXCLUDE`, which each Vault's own exclusion patterns
+/// replaced. A save refuses them and every start removes them from stored
+/// settings, because a value nothing reads must never be able to stop the
+/// next start (#644). The two `HATCHDOOR_GIT_AUTHOR_*` keys are absent: the
+/// collection lane's Git turns still read them as the commit-identity
+/// fallback.
+pub const RETIRED_SETTINGS: [&str; 7] = [
+    "HATCHDOOR_EXCLUDE",
+    "HATCHDOOR_GIT_SYNC_ENABLED",
+    "HATCHDOOR_GIT_HTTPS_TOKEN",
+    "HATCHDOOR_GIT_REMOTE",
+    "HATCHDOOR_GIT_BRANCH",
+    "HATCHDOOR_GIT_HTTPS_USERNAME",
+    "HATCHDOOR_GIT_DEBOUNCE_SECONDS",
+];
 
 /// Parse one of the truthy string conventions accepted across live-applicable
 /// boolean settings (`1`, `true`, `yes`, `on`, case-insensitive, surrounding

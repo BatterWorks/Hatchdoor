@@ -23,9 +23,16 @@
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import fs from "node:fs";
-import { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
+import { WEB_TOKEN_SETTING, devSetting } from "./dev-common.mjs";
+import {
+  chromePath,
+  contextOptions,
+  playwright,
+  settle,
+  storedState,
+} from "./dev-browser.mjs";
 import {
   PROTOTYPES_DIR,
   ROOT,
@@ -35,44 +42,10 @@ import {
   run,
 } from "./proto-common.mjs";
 
-const TOKEN_SETTING = "HATCHDOOR_WEB_BEARER_TOKEN";
-// The keys the app reads its token and its theme from (`frontend/src/api/api.ts`
-// and `frontend/src/app/constants.ts`).
-const TOKEN_KEY = "hatchdoor_web_token";
-const THEME_KEY = "hatchdoor.theme";
 // The query parameter `withAccessToken` (`frontend/src/api/api.ts`) puts the
 // web token in, on note images among others. A prototype is served to the
 // whole LAN, so it is cut from every address before anything is written.
 const ACCESS_TOKEN_PARAM = /([?&])access_token=[^&#"'\s]*(&?)/g;
-// What's new (`frontend/src/features/whats-new/whatsNew.ts`) opens over every
-// screen in a browser that has never seen a release. It belongs to the fresh
-// capture browser, not to the screen, so the capture says it saw them all.
-const SEEN_VERSION_KEY = "hatchdoor_whats_new_seen";
-const SEEN_EVERYTHING = "999999.0.0";
-
-const CHROME_NAMES = [
-  "google-chrome",
-  "google-chrome-stable",
-  "chromium",
-  "chromium-browser",
-];
-
-// The web token: the environment first, then `.env`, as the backend and
-// `scripts/dev-browser-token.py` find it.
-export function tokenFrom(environment, envFileText) {
-  const exported = (environment[TOKEN_SETTING] ?? "").trim();
-  if (exported) {
-    return exported;
-  }
-  for (const line of (envFileText ?? "").split("\n")) {
-    const [name, ...rest] = line.trim().split("=");
-    if (name === TOKEN_SETTING) {
-      return rest.join("=").trim().replace(/^(["'])(.*)\1$/, "$2");
-    }
-  }
-  return "";
-}
-
 // A path as part of a file name: `/notes/a b?x=1` is `notes-a-b-x-1`.
 export function slugOf(route) {
   const slug = route.replace(/[^A-Za-z0-9_]+/g, "-").replace(/^-+|-+$/g, "");
@@ -222,34 +195,6 @@ function capture(theme) {
 
 const MEDIA_MARK = /hatchdoor-media:([A-Za-z0-9%._~!*'()-]+)/g;
 
-function chromePath() {
-  if (process.env.HATCHDOOR_DEV_BROWSER) {
-    return process.env.HATCHDOOR_DEV_BROWSER;
-  }
-  for (const dir of (process.env.PATH ?? "").split(path.delimiter)) {
-    for (const name of CHROME_NAMES) {
-      const candidate = path.join(dir, name);
-      if (dir && fs.existsSync(candidate)) {
-        return candidate;
-      }
-    }
-  }
-  throw new ToolError(
-    "no Chrome or Chromium is on the path; name one in HATCHDOOR_DEV_BROWSER",
-  );
-}
-
-function playwright() {
-  const require = createRequire(path.join(ROOT, "frontend", "package.json"));
-  try {
-    return require("playwright-core");
-  } catch {
-    throw new ToolError(
-      "playwright-core is not installed; run `npm ci` in frontend/",
-    );
-  }
-}
-
 // The stylesheet a production build ships, and its fonts, into `assets/`.
 // Built into a scratch folder so nothing of the real build output moves.
 function buildStylesheet(folder) {
@@ -294,32 +239,6 @@ function buildStylesheet(folder) {
   }
 }
 
-async function settle(page, url) {
-  await page.goto(url);
-  // The network can fall quiet before React has drawn anything, which would
-  // capture an empty page; the data the first draw asks for comes after.
-  try {
-    await page.waitForFunction(
-      () => (document.getElementById("root")?.children.length ?? 0) > 0,
-      undefined,
-      { timeout: 30_000 },
-    );
-  } catch {
-    throw new ToolError(`${url} drew nothing within 30 seconds`);
-  }
-  await page.waitForLoadState("networkidle");
-  await page.evaluate(async () => {
-    for (const img of document.querySelectorAll("img[loading=lazy]")) {
-      img.loading = "eager";
-    }
-    await document.fonts.ready;
-  });
-  await page.waitForLoadState("networkidle");
-  await page.evaluate(() =>
-    Promise.all([...document.images].map((img) => img.decode().catch(() => {}))),
-  );
-}
-
 async function main() {
   const usage =
     "just proto-new <issue>-<slug> <path>...   as in: just proto-new 583-vaults-unavailable /";
@@ -340,13 +259,7 @@ async function main() {
       `a path starts with a slash, as in /graph: ${strays.join(" ")}`,
     );
   }
-  let envFile = "";
-  try {
-    envFile = fs.readFileSync(path.join(ROOT, ".env"), "utf8");
-  } catch {
-    // The environment may carry the token alone.
-  }
-  const token = tokenFrom(process.env, envFile);
+  const token = devSetting(WEB_TOKEN_SETTING);
   try {
     await fetch(origin);
   } catch {
@@ -371,33 +284,18 @@ async function main() {
   // once per run, however many pages show it.
   const fetched = new Set();
   try {
-    for (const [size, [width, height]] of Object.entries(SIZES)) {
+    for (const size of Object.keys(SIZES)) {
       for (const theme of THEMES) {
-        // The service worker is kept out: it answers from its own cache, and
-        // this exists to show what the code on disk draws today.
-        // Phone and tablet are touch screens, which the app reads as
-        // `(pointer: coarse)` to choose, for one, the editor's toolbar.
-        const touch = size !== "desktop";
-        const context = await browser.newContext({
-          viewport: { width, height },
-          hasTouch: touch,
-          isMobile: touch,
-          serviceWorkers: "block",
-          reducedMotion: "reduce",
-          colorScheme: theme,
-          extraHTTPHeaders: token ? { Authorization: `Bearer ${token}` } : {},
-        });
+        const context = await browser.newContext(
+          contextOptions({ size, theme, token }),
+        );
         await context.addInitScript(
           (stored) => {
             for (const [key, value] of stored) {
               localStorage.setItem(key, value);
             }
           },
-          [
-            ...(token ? [[TOKEN_KEY, token]] : []),
-            [THEME_KEY, theme],
-            [SEEN_VERSION_KEY, SEEN_EVERYTHING],
-          ],
+          storedState({ token, theme }),
         );
         const page = await context.newPage();
         page.on("pageerror", (error) =>

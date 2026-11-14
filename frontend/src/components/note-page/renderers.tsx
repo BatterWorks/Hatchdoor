@@ -9,6 +9,8 @@ import {
   ListItem,
   MermaidDiagram,
 } from "./RendererComponents";
+import { NoteEmbed } from "./NoteEmbed";
+import { isNoteEmbedElement, parseNoteEmbedHref } from "./noteEmbeds";
 import { markAsParagraph } from "./paragraphs";
 import { PdfPreview } from "./PdfPreview";
 import { OrphanedMarkerNotice, SavedQueryBlock } from "./SavedQueryBlock";
@@ -16,6 +18,10 @@ import { ORPHANED_MARKER_ELEMENT } from "./savedQueries";
 import { flattenText } from "./text";
 import { resolveAssetHref } from "./wikilinks";
 import type { VaultId } from "../../types";
+
+/** Maps the anchor `remarkBlockIds` gave a block (#578) to its element id;
+ * a block without one stays without. */
+type BlockAnchor = (id: string | undefined) => string | undefined;
 
 type MarkdownCodeProps = {
   children?: ReactNode;
@@ -29,9 +35,12 @@ type MarkdownCodeProps = {
  * on these, so the manual looks exactly like a note.
  */
 function createSharedMarkdownComponents(
-  headingIdsBySourceLine: Map<number, string>,
+  /** `null` draws headings without ids, for content embedded from another
+   * note, whose anchors belong to that note and not to this page. */
+  headingIdsBySourceLine: Map<number, string> | null,
   renderBaseBlock: (content: string, props: MarkdownCodeProps) => ReactNode,
   hiddenHeadingLine?: number,
+  blockAnchor: BlockAnchor = (id) => id,
 ) {
   return {
     pre(props: { children?: ReactNode }) {
@@ -81,20 +90,28 @@ function createSharedMarkdownComponents(
         />
       );
     },
-    li(props: { children?: ReactNode; className?: string }) {
-      return <ListItem className={props.className}>{props.children}</ListItem>;
+    li(props: { children?: ReactNode; className?: string; id?: string }) {
+      return (
+        <ListItem className={props.className} id={blockAnchor(props.id)}>
+          {props.children}
+        </ListItem>
+      );
     },
-    blockquote(props: { children?: ReactNode }) {
-      return <CalloutOrQuote>{props.children}</CalloutOrQuote>;
+    blockquote(props: { children?: ReactNode; id?: string }) {
+      return (
+        <CalloutOrQuote id={blockAnchor(props.id)}>
+          {props.children}
+        </CalloutOrQuote>
+      );
     },
     // A `hatchdoor-query` marker naming no block (#276): see
     // remarkHideQueryMarkers.
     [ORPHANED_MARKER_ELEMENT](props: { "data-name"?: string }) {
       return <OrphanedMarkerNotice name={props["data-name"]} />;
     },
-    table(props: { children?: ReactNode }) {
+    table(props: { children?: ReactNode; id?: string }) {
       return (
-        <div className="table-wrap">
+        <div className="table-wrap" id={blockAnchor(props.id)}>
           <table>{props.children}</table>
         </div>
       );
@@ -164,11 +181,17 @@ export function createNoteMarkdownComponents(
     /** The body line of a heading that only repeats the note's title (#530),
      * kept in the DOM but not drawn. */
     hiddenHeadingLine?: number;
+    /** Content embedded from another note (#699): no element gets an id,
+     * since its heading and block anchors are that note's. */
+    embedded?: boolean;
   } = {},
 ) {
+  const blockAnchor: BlockAnchor = options.embedded
+    ? () => undefined
+    : (id) => id;
   const components = {
     ...createSharedMarkdownComponents(
-      headingIdsBySourceLine,
+      options.embedded ? null : headingIdsBySourceLine,
       (content, props) => (
         <SavedQueryBlock
           source={content}
@@ -176,9 +199,18 @@ export function createNoteMarkdownComponents(
         />
       ),
       options.hiddenHeadingLine,
+      blockAnchor,
     ),
     a(props: { href?: string; children?: ReactNode }) {
       const { href, children } = props;
+      const embed = parseNoteEmbedHref(href);
+      if (embed) {
+        return (
+          <NoteEmbed vaultId={vaultId} target={embed}>
+            {children}
+          </NoteEmbed>
+        );
+      }
       if (typeof href === "string" && href.startsWith("/__missing__/")) {
         const target = decodeURIComponent(href.replace("/__missing__/", ""));
         return (
@@ -237,6 +269,7 @@ export function createNoteMarkdownComponents(
     },
     p: markAsParagraph(function NoteParagraph(props: {
       children?: ReactNode;
+      id?: string;
       node?: MarkdownElementNode;
     }) {
       // A lone PDF embed parses as a paragraph wrapping an image, but
@@ -248,7 +281,14 @@ export function createNoteMarkdownComponents(
       if (holdsOnlyPdfEmbed(vaultId, props.node, noteRelativePath)) {
         return <>{props.children}</>;
       }
-      return <p>{props.children}</p>;
+      const id = blockAnchor(props.id);
+      // A note embed draws as a block (#699), so a paragraph holding one is
+      // split around it, the text either side staying a paragraph.
+      const runs = splitAroundNoteEmbeds(props.children);
+      if (runs) {
+        return id ? <div id={id}>{runs}</div> : <>{runs}</>;
+      }
+      return <p id={id}>{props.children}</p>;
     }),
     img(props: { src?: string; alt?: string }) {
       const source =
@@ -281,18 +321,25 @@ export function createNoteMarkdownComponents(
 export function createManualMarkdownComponents(
   headingIdsBySourceLine: Map<number, string>,
   renderLink: (href: string | undefined, children: ReactNode) => ReactNode,
+  /** Turns a block's anchor (`^id`, #578) into the id the caller scrolls to,
+   * the way it already chose the heading ids. */
+  blockAnchor: BlockAnchor = (id) => id,
 ) {
   return {
-    ...createSharedMarkdownComponents(headingIdsBySourceLine, (content) => (
-      <CodeBlock language="base" content={content} />
-    )),
+    ...createSharedMarkdownComponents(
+      headingIdsBySourceLine,
+      (content) => <CodeBlock language="base" content={content} />,
+      undefined,
+      blockAnchor,
+    ),
     a(props: { href?: string; children?: ReactNode }) {
       return renderLink(props.href, props.children);
     },
     p: markAsParagraph(function ManualParagraph(props: {
       children?: ReactNode;
+      id?: string;
     }) {
-      return <p>{props.children}</p>;
+      return <p id={blockAnchor(props.id)}>{props.children}</p>;
     }),
     img(props: { src?: string; alt?: string }) {
       return (
@@ -305,6 +352,40 @@ export function createManualMarkdownComponents(
       );
     },
   };
+}
+
+/**
+ * A paragraph's children with each note embed taken out of the paragraph:
+ * the text before and after it become paragraphs of their own, and a run
+ * holding nothing but white space is dropped. `null` when the paragraph
+ * holds no embed.
+ */
+function splitAroundNoteEmbeds(children: ReactNode): ReactNode[] | null {
+  const nodes = Children.toArray(children);
+  if (!nodes.some(isNoteEmbedElement)) {
+    return null;
+  }
+  const out: ReactNode[] = [];
+  let run: ReactNode[] = [];
+  const flush = () => {
+    const blank = run.every(
+      (node) => typeof node === "string" && node.trim() === "",
+    );
+    if (!blank) {
+      out.push(<p key={`run-${out.length}`}>{run}</p>);
+    }
+    run = [];
+  };
+  for (const node of nodes) {
+    if (isNoteEmbedElement(node)) {
+      flush();
+      out.push(node);
+    } else {
+      run.push(node);
+    }
+  }
+  flush();
+  return out;
 }
 
 // Block-level entries get wrapped so each rendered block can be swapped for its
@@ -364,13 +445,15 @@ type MarkdownHeadingProps = {
 function renderHeading(
   tag: "h1" | "h2" | "h3" | "h4" | "h5" | "h6",
   children: ReactNode,
-  headingIdsBySourceLine: Map<number, string>,
+  headingIdsBySourceLine: Map<number, string> | null,
   node: MarkdownHeadingProps["node"],
   hiddenHeadingLine?: number,
 ) {
   const text = flattenText(children).trim();
   const line = node?.position?.start?.line ?? -1;
-  const id = headingIdsBySourceLine.get(line) ?? slugifyHeading(text);
+  const id = headingIdsBySourceLine
+    ? (headingIdsBySourceLine.get(line) ?? slugifyHeading(text))
+    : undefined;
   // The note's own title, repeated as its first heading, stays in the DOM
   // (line-addressed editing counts on every block being there) but is not
   // drawn: the page already set the title above the body (#530).

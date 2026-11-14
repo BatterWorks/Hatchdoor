@@ -399,7 +399,17 @@ describe("startup states after the gate has stepped aside (#339)", () => {
     );
 
     await screen.findByRole("heading", { level: 1, name: "Notes" });
-    fireEvent.keyDown(window, { key: "k", ctrlKey: true });
+    // The workspace attaches its Ctrl+K listener in an effect that runs just
+    // after the page is drawn, and under load the heading can be found
+    // before that effect has run, so one press can land on nothing (#760).
+    // Press until the palette opens: a second press on an open palette
+    // changes nothing.
+    await waitFor(() => {
+      fireEvent.keyDown(window, { key: "k", ctrlKey: true });
+      expect(
+        screen.getByRole("dialog", { name: "Search notes" }),
+      ).toBeInTheDocument();
+    });
     fireEvent.click(await screen.findByRole("button", { name: "Retry setup" }));
 
     expect(

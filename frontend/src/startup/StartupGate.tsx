@@ -32,6 +32,7 @@ export function StartupGate({
   hasRegistryRecovery,
   hasNoVaults,
   demoMode = false,
+  actionError = null,
   onAcceptGemma,
   onDeclineGemma,
   children,
@@ -43,6 +44,8 @@ export function StartupGate({
   hasRegistryRecovery: boolean;
   hasNoVaults: boolean;
   demoMode?: boolean;
+  /** Why the last Accept or Decline did not start setup (#642). */
+  actionError?: string | null;
   onAcceptGemma: () => void;
   onDeclineGemma: () => void;
   children: ReactNode;
@@ -66,11 +69,14 @@ export function StartupGate({
 
   const termsRequired = status?.state === "terms_required";
   const downloading = status?.state === "downloading" ? status : null;
+  const loading = downloading?.step === "load";
   const percent = downloading?.percent ?? 0;
   const progressLabel =
     downloading?.percent !== undefined
       ? `${percent}% of model download complete`
-      : "Measuring the vault";
+      : loading
+        ? "Loading the search model"
+        : "Measuring the vault";
 
   return (
     <div className="startup-shell">
@@ -148,6 +154,11 @@ export function StartupGate({
                 Use Nomic instead
               </button>
             </div>
+            {actionError ? (
+              <p className="error" role="alert">
+                {actionError}
+              </p>
+            ) : null}
             <p className="startup-fallback-note">
               Nomic is the fallback if you decline Gemma. It supports English
               only. It still provides solid search, but Gemma performed better
@@ -163,9 +174,11 @@ export function StartupGate({
             <p className="startup-lede" aria-live="polite">
               {connectionIssue
                 ? "Waiting for Hatchdoor to respond…"
-                : downloading
-                  ? `Downloading ${downloading.model ?? "the search model"}. Your vault stays locked until setup is complete.`
-                  : "Scanning notes and measuring the work ahead…"}
+                : loading
+                  ? `Loading ${downloading?.model ?? "the search model"}. Your vault stays locked until setup is complete.`
+                  : downloading
+                    ? `Downloading ${downloading.model ?? "the search model"}. Your vault stays locked until setup is complete.`
+                    : "Scanning notes and measuring the work ahead…"}
             </p>
 
             <div
@@ -185,15 +198,19 @@ export function StartupGate({
               <strong>
                 {downloading?.percent !== undefined
                   ? `${percent}%`
-                  : downloading
-                    ? "Downloading"
-                    : "Scanning"}
+                  : loading
+                    ? "Loading"
+                    : downloading
+                      ? "Downloading"
+                      : "Scanning"}
               </strong>
               <span>
-                {formatDownload(
-                  downloading?.downloaded_bytes,
-                  downloading?.total_bytes,
-                )}
+                {loading
+                  ? "Download complete"
+                  : formatDownload(
+                      downloading?.downloaded_bytes,
+                      downloading?.total_bytes,
+                    )}
               </span>
             </div>
           </>

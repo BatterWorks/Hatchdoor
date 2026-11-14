@@ -11,7 +11,7 @@ Each row below is a folder on the computer running Hatchdoor. The defaults are r
 | Folder (setting in `.env`) | What is in it | What to do with it |
 | --- | --- | --- |
 | Your notes (`HOST_VAULT_PATH`, default `./vault`) | Your Markdown notes and their attachments | Back it up. This is your data. |
-| `./data/state` (`HOST_STATE_PATH`) | The list of your Vaults (`vaults.json`), including any Git sign-in tokens, plus two small bookkeeping files: `vault-runtime.json` (when each Git-backed Vault last checked its remote) and `instance.json` (which version ran before this one, which agent last connected, with the update check on, the newest release it found, and, with the usage report on, its install ID, the last day each part of Hatchdoor was used and when the last report was sent) | Keep it across upgrades. Back it up, and treat it as secret because it can hold tokens. |
+| `./data/state` (`HOST_STATE_PATH`) | The list of your Vaults (`vaults.json`), including any Git sign-in tokens, plus two small bookkeeping files: `vault-runtime.json` (when each Git-backed Vault last checked its remote) and `instance.json` (which version ran before this one, which agent last connected, with the update check on, the newest release it found, and, with the usage report on, its install ID, the last day each part of Hatchdoor was used and when the last report was sent). After a first start without a web token it also holds `new-web-token.env`, the token Hatchdoor made for you; you can delete it once that line is in `.env` | Keep it across upgrades. Back it up, and treat it as secret because it can hold tokens. |
 | `./data/cache` (`HOST_CACHE_PATH`) | The search data, which Hatchdoor rebuilds from your notes, and `settings.json` | The search data needs no backup. Keep `settings.json`. |
 | `./models` (`HOST_MODELS_PATH`) | The downloaded search model and your Gemma terms choice | Keep it to avoid downloading the model again. |
 
@@ -22,8 +22,9 @@ The web token lives in the `.env` file next to `compose.yaml`. Keep that file to
 
 ## Deleting is recoverable
 
-- Deleting a note moves it, together with any attachments kept in its own folder, to a hidden `.hatchdoor-trash` folder inside the Vault. To get it back, move it out of there with your file manager.
+- Deleting a note moves it, together with any attachments kept in its own folder, to a hidden `.hatchdoor-trash` folder inside the Vault. For a note at the top of the Vault, an attachment another note still uses stays where it is. To get it back, move it out of there with your file manager.
 - Notes in the trash folder are left out of search.
+- In a Vault that keeps Git history, the deleted note stays in the repository and its history, and on the remote when the Vault pushes to one. See [[How to set up a Git-backed Vault#Deleting a note keeps it in Git]].
 - Archiving moves a note to `90-archive/` by default. You can change that folder per Vault.
 
 ## Keep Hatchdoor's data out of your notes folder

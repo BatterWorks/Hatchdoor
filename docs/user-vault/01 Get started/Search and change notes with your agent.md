@@ -37,6 +37,7 @@ You don't need to know the tool names; the agent picks them. This table is for c
 | Find a note | `list_vaults` → `search_notes` |
 | Find every note with a tag, in a folder, or with a property | `list_vaults` → `query_notes` |
 | Find every note that contains an exact string | `list_vaults` → `find_text` |
+| List broken links, isolated notes or dead ends | `list_vaults` → `find_link_problems` for one Vault |
 | Inspect it | `get_note` |
 | Read a few sections of a long note | `get_note_outline` to see its headings, then `get_note_section` with the ones you want |
 | Get the rows a note's saved query lists | `get_note` to see its `saved_queries`, then `evaluate_saved_query` with the name |

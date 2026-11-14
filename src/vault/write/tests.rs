@@ -7,6 +7,115 @@ use super::*;
 use crate::cache::parse::{content_hash, extract_tags};
 use crate::vault::types::{VaultIndex, VaultScanConfig};
 
+mod canvas;
+mod journaled;
+
+// The multi-note writes take the Vault's intent log as their last argument
+// (#631). These tests exercise what the writes do, not the record, so they
+// call them without one through these wrappers; `journaled.rs` covers the
+// record and the repair.
+
+fn move_or_rename_note(
+    vault_root: &Path,
+    index: &VaultIndex,
+    entry: &crate::vault::types::NoteEntry,
+    target_relative_path: &str,
+    expected_content_hash: &str,
+) -> Result<WriteOutcome, WriteError> {
+    super::move_or_rename_note(
+        vault_root,
+        index,
+        entry,
+        target_relative_path,
+        expected_content_hash,
+        None,
+    )
+}
+
+fn archive_note(
+    vault_root: &Path,
+    index: &VaultIndex,
+    entry: &crate::vault::types::NoteEntry,
+    archive_prefix: &str,
+    expected_content_hash: &str,
+) -> Result<WriteOutcome, WriteError> {
+    super::archive_note(
+        vault_root,
+        index,
+        entry,
+        archive_prefix,
+        expected_content_hash,
+        None,
+    )
+}
+
+fn delete_note(
+    vault_root: &Path,
+    index: &VaultIndex,
+    entry: &crate::vault::types::NoteEntry,
+    expected_content_hash: &str,
+) -> Result<WriteOutcome, WriteError> {
+    super::delete_note(vault_root, index, entry, expected_content_hash, None)
+}
+
+fn move_attachment(
+    vault_root: &Path,
+    index: &VaultIndex,
+    source_relative_path: &str,
+    target_relative_path: &str,
+) -> Result<AttachmentOutcome, WriteError> {
+    super::move_attachment(
+        vault_root,
+        index,
+        source_relative_path,
+        target_relative_path,
+        None,
+    )
+}
+
+fn rename_attachment(
+    vault_root: &Path,
+    index: &VaultIndex,
+    source_relative_path: &str,
+    new_filename: &str,
+) -> Result<AttachmentOutcome, WriteError> {
+    super::rename_attachment(vault_root, index, source_relative_path, new_filename, None)
+}
+
+fn delete_attachment(
+    vault_root: &Path,
+    index: &VaultIndex,
+    source_relative_path: &str,
+) -> Result<AttachmentOutcome, WriteError> {
+    super::delete_attachment(vault_root, index, source_relative_path, None)
+}
+
+fn rename_tag(
+    vault_root: &Path,
+    index: &VaultIndex,
+    old_tag: &str,
+    new_tag: &str,
+    expected_plan_hash: Option<&str>,
+) -> Result<TagRename, TagRenameError> {
+    super::rename_tag(
+        vault_root,
+        index,
+        old_tag,
+        new_tag,
+        expected_plan_hash,
+        None,
+    )
+}
+
+fn delete_tag(
+    vault_root: &Path,
+    index: &VaultIndex,
+    tag: &str,
+    expected_plan_hash: Option<&str>,
+) -> Result<TagDelete, TagDeleteError> {
+    super::delete_tag(vault_root, index, tag, expected_plan_hash, None)
+}
+
 fn build(root: &Path) -> VaultIndex {
     VaultIndex::build(root).expect("build index")
 }
@@ -33,8 +142,8 @@ fn list_note_attachments_reports_the_containing_folders_layer() {
     let index = build(root);
 
     let clip = index.find_by_slug("clip").expect("clip entry").clone();
-    let clip_assets =
-        list_note_attachments(root, &index.layers, &clip).expect("list clip attachments");
+    let clip_assets = list_note_attachments(root, &index.layers, &clip, &note_text(&clip))
+        .expect("list clip attachments");
     assert_eq!(clip_assets.len(), 1);
     assert_eq!(
         clip_assets[0].layer.as_deref(),
@@ -43,8 +152,8 @@ fn list_note_attachments_reports_the_containing_folders_layer() {
     );
 
     let wiki = index.find_by_slug("wiki").expect("wiki entry").clone();
-    let wiki_assets =
-        list_note_attachments(root, &index.layers, &wiki).expect("list wiki attachments");
+    let wiki_assets = list_note_attachments(root, &index.layers, &wiki, &note_text(&wiki))
+        .expect("list wiki attachments");
     assert_eq!(wiki_assets.len(), 1);
     assert_eq!(
         wiki_assets[0].layer, None,
@@ -66,6 +175,67 @@ fn create_note_rejects_traversal_and_writes_markdown() {
         fs::read_to_string(root.join("Projects/New.md")).expect("read"),
         "# New\n"
     );
+}
+
+/// `create_note "Upper.MD"` wrote `Upper.MD.md` while the index ignored
+/// `.MD` (#637): the extension now counts in any case on both sides.
+#[test]
+fn create_note_keeps_an_upper_case_extension() {
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path();
+    let outcome = create_note(root, "Upper.MD", "# Upper", false, &build(root)).expect("create");
+    assert!(root.join("Upper.MD").exists());
+    assert!(!root.join("Upper.MD.md").exists());
+    assert_eq!(outcome.relative_path.as_deref(), Some("Upper"));
+    assert_eq!(outcome.slug.as_deref(), Some("upper"));
+    assert!(build(root).find_by_slug("upper").is_some());
+
+    // Overwriting addresses the same file rather than writing a twin.
+    create_note(root, "Upper.MD", "# Again", true, &build(root)).expect("overwrite");
+    assert_eq!(
+        fs::read_to_string(root.join("Upper.MD")).expect("read"),
+        "# Again\n"
+    );
+    for empty in [".MD", "Folder/.Md"] {
+        assert!(matches!(
+            create_note(root, empty, "x", false, &build(root)),
+            Err(WriteError::InvalidInput(_))
+        ));
+    }
+}
+
+/// A name that differs from an existing note only in its extension's case
+/// names that note: on a case-sensitive filesystem a second file there would
+/// be hidden by the index's twin rule, and the reply would name the other
+/// note's slug (#637).
+#[test]
+fn an_extension_case_variant_names_the_existing_note() {
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path();
+    fs::write(root.join("Report.md"), "# Report\n").expect("note");
+    fs::write(root.join("Other.md"), "# Other\n").expect("note");
+
+    assert!(matches!(
+        create_note(root, "Report.MD", "# Twin", false, &build(root)),
+        Err(WriteError::Conflict(_))
+    ));
+    let outcome =
+        create_note(root, "Report.MD", "# Replaced", true, &build(root)).expect("overwrite");
+    assert_eq!(outcome.slug.as_deref(), Some("report"));
+    assert!(!root.join("Report.MD").exists(), "no twin written");
+    assert_eq!(
+        fs::read_to_string(root.join("Report.md")).expect("read"),
+        "# Replaced\n"
+    );
+
+    let index = build(root);
+    let other = index.find_by_slug("other").expect("other");
+    let hash = content_hash(&fs::read_to_string(&other.path).expect("read"));
+    assert!(matches!(
+        move_or_rename_note(root, &index, other, "Report.Md", &hash),
+        Err(WriteError::Conflict(_))
+    ));
+    assert!(root.join("Other.md").exists());
 }
 
 #[test]
@@ -279,6 +449,84 @@ fn update_note_requires_matching_hash() {
     assert_eq!(fs::read_to_string(path).expect("read"), "new\n");
 }
 
+/// Every edit, move or delete of a note over `MAX_NOTE_BYTES` is refused
+/// before the note is read whole, as invalid input a retry cannot fix, and
+/// the file is left as it was (#670).
+#[test]
+fn edits_to_an_oversized_note_are_refused_unread() {
+    let tmp = TempDir::new().expect("tempdir");
+    let path = tmp.path().join("Home.md");
+    fs::write(&path, "# Home\nbody\n").expect("write");
+    let index = build(tmp.path());
+    let entry = index.find_by_slug("home").expect("home");
+    let oversized = crate::vault::MAX_NOTE_BYTES + 1;
+    crate::vault::grow_past_note_bound(&path);
+    let hash = content_hash("# Home\nbody\n");
+    let frontmatter = || serde_json::from_value(serde_json::json!({"status": "new"})).unwrap();
+
+    let attempts: [(&str, Result<WriteOutcome, WriteError>); 7] = [
+        ("update_note", update_note(entry, "new", &hash)),
+        ("append_note", append_note(entry, "more", &hash)),
+        ("edit_note", edit_note(entry, "body", "text", &hash, false)),
+        (
+            "replace_section",
+            replace_section(entry, "# Home", SectionMode::Replace, "# Home\n", &hash),
+        ),
+        (
+            "update_note_frontmatter",
+            update_note_frontmatter(entry, frontmatter(), &hash),
+        ),
+        (
+            "move_or_rename_note",
+            move_or_rename_note(tmp.path(), &index, entry, "Moved.md", &hash),
+        ),
+        ("delete_note", delete_note(tmp.path(), &index, entry, &hash)),
+    ];
+    for (name, attempt) in attempts {
+        assert!(
+            matches!(&attempt, Err(WriteError::InvalidInput(message)) if message.contains("8 MiB")),
+            "{name}: {attempt:?}"
+        );
+        assert_eq!(
+            fs::metadata(&path).expect("stat").len(),
+            oversized,
+            "{name}"
+        );
+    }
+}
+
+/// A Vault-wide rewrite skips a note over `MAX_NOTE_BYTES` the way the link
+/// graph does, instead of reading it whole to plan a rewrite of it (#670).
+#[test]
+fn a_rename_skips_an_oversized_note_that_links_to_it() {
+    let tmp = TempDir::new().expect("tempdir");
+    fs::write(tmp.path().join("Plan.md"), "# Plan\n").expect("write");
+    let big = tmp.path().join("Big.md");
+    fs::write(&big, "[[Plan]]\n").expect("write");
+    let index = build(tmp.path());
+    let oversized = crate::vault::MAX_NOTE_BYTES + 1;
+    crate::vault::grow_past_note_bound(&big);
+    let entry = index.find_by_slug("plan").expect("plan");
+
+    move_or_rename_note(
+        tmp.path(),
+        &index,
+        entry,
+        "Roadmap.md",
+        &content_hash("# Plan\n"),
+    )
+    .expect("the rename goes ahead");
+
+    assert!(tmp.path().join("Roadmap.md").exists());
+    assert_eq!(fs::metadata(&big).expect("stat").len(), oversized);
+    let mut start = [0u8; 9];
+    std::io::Read::read_exact(&mut fs::File::open(&big).expect("open"), &mut start).expect("read");
+    assert_eq!(
+        &start, b"[[Plan]]\n",
+        "the oversized note is left as it was"
+    );
+}
+
 fn frontmatter_entry(
     root: &Path,
     content: &str,
@@ -291,6 +539,40 @@ fn frontmatter_entry(
         .unwrap_or_else(|| panic!("{} entry", crate::vault::slugify(name)))
         .clone();
     (index, entry)
+}
+
+#[test]
+fn frontmatter_updates_refuse_oversized_yaml_before_parsing() {
+    let tmp = TempDir::new().unwrap();
+    let original = format!("\u{feff}---\nx: {}\n---\nBody\n", "[".repeat(40_000));
+    fs::write(tmp.path().join("Home.md"), &original).unwrap();
+    let index =
+        VaultIndex::build_catalog_with_config(tmp.path(), &VaultScanConfig::default()).unwrap();
+    let entry = index.find_by_slug("home").unwrap().clone();
+    let updates = serde_json::from_value(serde_json::json!({"status": "new"})).unwrap();
+    let start = std::time::Instant::now();
+    let error = update_note_frontmatter(&entry, updates, &content_hash(&original)).unwrap_err();
+    assert!(format!("{error:?}").contains("16384"), "{error:?}");
+    assert!(start.elapsed() < std::time::Duration::from_secs(1));
+    assert_eq!(fs::read_to_string(&entry.path).unwrap(), original);
+}
+
+#[test]
+fn frontmatter_create_edit_and_remove_keep_a_leading_bom() {
+    let tmp = TempDir::new().unwrap();
+    let original = "\u{feff}# Body\n";
+    let (_, entry) = frontmatter_entry(tmp.path(), original, "Home");
+    let updates = serde_json::from_value(serde_json::json!({"tags": ["bomtag"]})).unwrap();
+    update_note_frontmatter(&entry, updates, &content_hash(original)).unwrap();
+    let created = fs::read_to_string(&entry.path).unwrap();
+    assert_eq!(created, "\u{feff}---\ntags: [bomtag]\n---\n# Body\n");
+    let updates = serde_json::from_value(serde_json::json!({"tags": ["edited"]})).unwrap();
+    update_note_frontmatter(&entry, updates, &content_hash(&created)).unwrap();
+    let edited = fs::read_to_string(&entry.path).unwrap();
+    assert_eq!(edited, "\u{feff}---\ntags: [edited]\n---\n# Body\n");
+    let updates = serde_json::from_value(serde_json::json!({"tags": null})).unwrap();
+    update_note_frontmatter(&entry, updates, &content_hash(&edited)).unwrap();
+    assert_eq!(fs::read_to_string(&entry.path).unwrap(), original);
 }
 
 #[test]
@@ -741,7 +1023,10 @@ fn attachment_overwrite_rejects_a_symlink_destination_without_touching_its_targe
     let error = import_attachment_bytes(vault.path(), "image.png", b"new image", 1024, true)
         .expect_err("an overwrite must not follow a symlink destination");
 
-    assert!(matches!(error, WriteError::Conflict(_) | WriteError::Io(_)));
+    assert!(
+        matches!(error, WriteError::InvalidInput(_)),
+        "got {error:?}"
+    );
     assert_eq!(fs::read_to_string(&sentinel).unwrap(), "do not change");
 }
 
@@ -999,9 +1284,80 @@ fn replace_section_rejects_missing_heading() {
             "x",
             &content_hash(body),
         ),
-        Err(WriteError::InvalidInput(_))
+        Err(WriteError::HeadingNotFound(_))
     ));
     assert_eq!(fs::read_to_string(&path).expect("read"), body);
+}
+
+#[test]
+fn replace_section_never_targets_a_frontmatter_comment() {
+    for mode in [
+        SectionMode::Replace,
+        SectionMode::Before,
+        SectionMode::After,
+    ] {
+        let body = "---\ntitle: W\n# status: draft\ntags: [a]\n---\nIntro\n\n## Log\nMonday\n";
+        let (tmp, path, entry) = partial_write_note(body);
+        let error = replace_section(
+            &entry,
+            "# status: draft",
+            mode,
+            "# status: draft\nnew\n",
+            &content_hash(body),
+        )
+        .expect_err("YAML comment is not a section");
+        assert!(matches!(error, WriteError::HeadingNotFound(_)));
+        assert_eq!(fs::read(&path).expect("read"), body.as_bytes());
+        drop(tmp);
+    }
+}
+
+#[test]
+fn replace_section_edits_only_the_body_when_yaml_has_the_same_heading() {
+    for ending in ["\n", "\r\n"] {
+        for (mode, expected_section) in [
+            (SectionMode::Replace, "# Tasks\nnew\n"),
+            (SectionMode::Before, "# Tasks\nnew\n# Tasks\nold\n"),
+            (SectionMode::After, "# Tasks\nold\n# Tasks\nnew\n"),
+        ] {
+            let prefix = "---\ntitle: W\n# Tasks\n# ```\ntags: [a]\n---\nIntro\n\n";
+            let suffix = "# Later\nkeep";
+            let body = format!("{prefix}# Tasks\nold\n{suffix}").replace('\n', ending);
+            let (_tmp, path, entry) = partial_write_note(&body);
+            replace_section(
+                &entry,
+                "# Tasks",
+                mode,
+                "# Tasks\nnew\n",
+                &content_hash(&body),
+            )
+            .expect("only the body heading matches");
+            assert_eq!(
+                fs::read(&path).expect("read"),
+                format!("{prefix}{expected_section}{suffix}")
+                    .replace('\n', ending)
+                    .as_bytes()
+            );
+        }
+    }
+}
+
+#[test]
+fn replace_section_keeps_indented_code_with_the_section_it_replaces() {
+    let body = "# Setup\n\nRun this:\n\n    # install the deps\n\t# tabbed code\n    ```sh\n    echo done\n\n   # Usage\nkeep\n";
+    let (_tmp, path, entry) = partial_write_note(body);
+    replace_section(
+        &entry,
+        "# Setup",
+        SectionMode::Replace,
+        "# Setup\nnew\n",
+        &content_hash(body),
+    )
+    .expect("replace the entire section including its code");
+    assert_eq!(
+        fs::read(&path).expect("read"),
+        b"# Setup\nnew\n   # Usage\nkeep\n"
+    );
 }
 
 #[test]
@@ -1607,11 +1963,10 @@ fn delete_note_moves_note_and_assets_to_trash_and_removes_backlinks() {
     let root = tmp.path();
     fs::write(root.join("Target.md"), "body ![](asset.pdf)").expect("target");
     fs::write(root.join("asset.pdf"), "pdf").expect("asset");
-    fs::write(
-        root.join("Backlink.md"),
-        "before [[Target]] after ![](asset.pdf)",
-    )
-    .expect("backlink");
+    // Backlink names the note but not its asset: a root note's asset that
+    // another note uses stays put (#701), which the root-note tests below
+    // cover.
+    fs::write(root.join("Backlink.md"), "before [[Target]] after").expect("backlink");
     let index = build(root);
     let entry = index.find_by_slug("target").expect("target");
 
@@ -1623,7 +1978,7 @@ fn delete_note_moves_note_and_assets_to_trash_and_removes_backlinks() {
     assert!(root.join(format!("{trash}.md")).exists());
     assert!(root.join(".hatchdoor-trash/asset.pdf").exists());
     let backlink = fs::read_to_string(root.join("Backlink.md")).expect("backlink");
-    assert_eq!(backlink, "before  after ![](.hatchdoor-trash/asset.pdf)");
+    assert_eq!(backlink, "before  after");
 }
 
 #[test]
@@ -2298,32 +2653,177 @@ fn move_note_refuses_an_asset_reference_that_escapes_the_vault() {
     );
 }
 
-#[test]
-fn move_note_from_the_vault_root_carries_the_assets_it_references() {
-    // A note in the Vault root has the whole Vault as its own folder, so by the
-    // #225 rule every asset it references is inside that folder and travels.
-    // Pinned deliberately: it is the one place where the rule and the "leave a
-    // shared attachments folder alone" intent point in different directions,
-    // and #225 put changing which assets travel from inside the note's own
-    // folder out of scope.
-    let tmp = TempDir::new().expect("tempdir");
-    let root = tmp.path();
+/// A root note `B.md` embedding `_system/image.png` by path, plus, when
+/// `other` is given, a second note at that path holding that body. The whole
+/// Vault is a root note's own folder, so whether the picture travels with B
+/// turns on whether another note uses it (#701).
+fn root_note_with_a_picture(root: &Path, other: Option<(&str, &str)>) -> String {
     let body = "# B\n![](_system/image.png)\n";
     fs::create_dir_all(root.join("_system")).expect("system dir");
     fs::write(root.join("_system/image.png"), BINARY_ASSET).expect("asset");
     fs::write(root.join("B.md"), body).expect("note");
+    if let Some((path, other_body)) = other {
+        if let Some(parent) = Path::new(path).parent() {
+            fs::create_dir_all(root.join(parent)).expect("other note's folder");
+        }
+        fs::write(root.join(path), other_body).expect("other note");
+    }
+    body.to_string()
+}
+
+/// The ways another note can use the root note's picture, each of which must
+/// keep it in place: a path-form embed, a bare-name embed Obsidian resolves by
+/// filename anywhere in the Vault, and a plain Markdown link.
+const OTHER_NOTES_USING_THE_PICTURE: [(&str, &str); 4] = [
+    ("Other.md", "![](_system/image.png)\n"),
+    ("folder-x/Other.md", "![](../_system/image.png)\n"),
+    ("folder-x/Other.md", "![[image.png]]\n"),
+    ("folder-x/Other.md", "[the picture](../_system/image.png)\n"),
+];
+
+/// What a root note's delete, move and archive must all leave alone when
+/// another note uses its picture: the picture where it was, the other note
+/// byte for byte.
+fn assert_shared_picture_stayed(root: &Path, outcome: &WriteOutcome, other: (&str, &str)) {
+    assert_eq!(outcome.moved_assets, 0, "a shared picture must not travel");
+    assert_eq!(
+        fs::read(root.join("_system/image.png")).expect("shared picture stays put"),
+        BINARY_ASSET
+    );
+    assert_eq!(
+        fs::read_to_string(root.join(other.0)).expect("other note"),
+        other.1,
+        "the other note's reference must be left untouched"
+    );
+}
+
+#[test]
+fn deleting_a_root_note_leaves_a_picture_another_note_uses() {
+    for other in OTHER_NOTES_USING_THE_PICTURE {
+        let tmp = TempDir::new().expect("tempdir");
+        let root = tmp.path();
+        let body = root_note_with_a_picture(root, Some(other));
+        let index = build(root);
+        let entry = index.find_by_slug("b").expect("b");
+
+        let outcome = delete_note(root, &index, entry, &content_hash(&body)).expect("delete");
+
+        assert_shared_picture_stayed(root, &outcome, other);
+        assert!(!root.join(".hatchdoor-trash/_system/image.png").exists());
+        let trashed = format!("{}.md", outcome.trashed_path.expect("trash path"));
+        embedded_asset_resolves_to(root, &trashed, "_system/image.png");
+    }
+}
+
+#[test]
+fn deleting_a_root_note_trashes_a_picture_no_other_note_uses() {
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path();
+    // Another note that names the root note, not its picture, counts for
+    // nothing.
+    let body = root_note_with_a_picture(root, Some(("Other.md", "See [[B]]\n")));
     let index = build(root);
     let entry = index.find_by_slug("b").expect("b");
 
-    let outcome = move_or_rename_note(root, &index, entry, "folder-z/B.md", &content_hash(body))
+    let outcome = delete_note(root, &index, entry, &content_hash(&body)).expect("delete");
+
+    assert_eq!(outcome.moved_assets, 1);
+    assert!(!root.join("_system/image.png").exists());
+    assert_eq!(
+        fs::read(root.join(".hatchdoor-trash/_system/image.png")).expect("trashed picture"),
+        BINARY_ASSET
+    );
+}
+
+#[test]
+fn a_bare_name_embed_in_another_note_keeps_a_root_notes_picture_in_place() {
+    // Named on its own because nothing in the other note spells the
+    // picture's folder: only resolving the name the way Obsidian does finds it.
+    let other = ("folder-x/Other.md", "![[image.png|300]]\n");
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path();
+    let body = root_note_with_a_picture(root, Some(other));
+    let index = build(root);
+    let entry = index.find_by_slug("b").expect("b");
+
+    let outcome = move_or_rename_note(root, &index, entry, "folder-z/B.md", &content_hash(&body))
+        .expect("move");
+
+    assert_shared_picture_stayed(root, &outcome, other);
+    embedded_asset_resolves_to(root, "folder-z/B.md", "_system/image.png");
+}
+
+#[test]
+fn moving_a_root_note_leaves_a_picture_another_note_uses() {
+    for other in OTHER_NOTES_USING_THE_PICTURE {
+        let tmp = TempDir::new().expect("tempdir");
+        let root = tmp.path();
+        let body = root_note_with_a_picture(root, Some(other));
+        let index = build(root);
+        let entry = index.find_by_slug("b").expect("b");
+
+        let outcome =
+            move_or_rename_note(root, &index, entry, "folder-z/B.md", &content_hash(&body))
+                .expect("move");
+
+        assert_shared_picture_stayed(root, &outcome, other);
+        assert!(!root.join("folder-z/_system").exists());
+        embedded_asset_resolves_to(root, "folder-z/B.md", "_system/image.png");
+    }
+}
+
+#[test]
+fn moving_a_root_note_carries_a_picture_no_other_note_uses() {
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path();
+    let body = root_note_with_a_picture(root, None);
+    let index = build(root);
+    let entry = index.find_by_slug("b").expect("b");
+
+    let outcome = move_or_rename_note(root, &index, entry, "folder-z/B.md", &content_hash(&body))
         .expect("move");
 
     assert_eq!(outcome.moved_assets, 1);
+    assert!(!root.join("_system/image.png").exists());
     assert_eq!(
         fs::read(root.join("folder-z/_system/image.png")).expect("asset travelled"),
         BINARY_ASSET
     );
     embedded_asset_resolves_to(root, "folder-z/B.md", "folder-z/_system/image.png");
+}
+
+#[test]
+fn archiving_a_root_note_leaves_a_picture_another_note_uses() {
+    for other in OTHER_NOTES_USING_THE_PICTURE {
+        let tmp = TempDir::new().expect("tempdir");
+        let root = tmp.path();
+        let body = root_note_with_a_picture(root, Some(other));
+        let index = build(root);
+        let entry = index.find_by_slug("b").expect("b");
+
+        let outcome = archive_note(root, &index, entry, "90-archive/", &content_hash(&body))
+            .expect("archive");
+
+        assert_shared_picture_stayed(root, &outcome, other);
+        assert!(!root.join("90-archive/_system").exists());
+        embedded_asset_resolves_to(root, "90-archive/B.md", "_system/image.png");
+    }
+}
+
+#[test]
+fn archiving_a_root_note_carries_a_picture_no_other_note_uses() {
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path();
+    let body = root_note_with_a_picture(root, None);
+    let index = build(root);
+    let entry = index.find_by_slug("b").expect("b");
+
+    let outcome =
+        archive_note(root, &index, entry, "90-archive/", &content_hash(&body)).expect("archive");
+
+    assert_eq!(outcome.moved_assets, 1);
+    assert!(!root.join("_system/image.png").exists());
+    embedded_asset_resolves_to(root, "90-archive/B.md", "90-archive/_system/image.png");
 }
 
 #[test]
@@ -2459,9 +2959,9 @@ fn move_note_rewrites_a_path_qualified_backlink_to_the_new_full_path() {
 
 #[test]
 fn move_note_falls_back_to_the_full_path_when_the_new_title_collides() {
-    // Two notes would carry the title "Renamed" after the move, and a bare
-    // title resolves through `by_title` to a deterministic first path. The
-    // full path is the only form that still names the moved note.
+    // Two notes would carry the title "Renamed" after the move, so a bare
+    // title could reach either. The full path is the only form that still
+    // names the moved note.
     let tmp = TempDir::new().expect("tempdir");
     let root = tmp.path();
     fs::create_dir_all(root.join("Notes")).expect("notes");
@@ -3070,7 +3570,8 @@ fn list_note_attachments_reports_every_non_markdown_reference() {
     let index = build(root);
     let entry = index.find_by_slug("analysis").expect("analysis");
 
-    let listed = list_note_attachments(root, &index.layers, entry).expect("list attachments");
+    let listed = list_note_attachments(root, &index.layers, entry, &note_text(entry))
+        .expect("list attachments");
 
     let mut paths: Vec<&str> = listed
         .iter()
@@ -3085,6 +3586,28 @@ fn list_note_attachments_reports_every_non_markdown_reference() {
 }
 
 #[test]
+fn listing_passes_over_a_reference_to_a_symbolic_link() {
+    // The attachment report opens only a regular file (#736), so a link in
+    // the note's references is skipped rather than failing the whole listing.
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path();
+    fs::write(root.join("real.png"), BINARY_ASSET).expect("image");
+    std::os::unix::fs::symlink("real.png", root.join("link.png")).expect("link");
+    fs::write(root.join("Note.md"), "![](link.png) ![](real.png)").expect("note");
+    let index = build(root);
+    let entry = index.find_by_slug("note").expect("note");
+
+    let listed = list_note_attachments(root, &index.layers, entry, &note_text(entry))
+        .expect("list attachments");
+
+    let paths: Vec<&str> = listed
+        .iter()
+        .map(|attachment| attachment.relative_path.as_str())
+        .collect();
+    assert_eq!(paths, ["real.png"]);
+}
+
+#[test]
 fn an_attachment_larger_than_one_read_chunk_reports_its_whole_size_and_hash() {
     // The description reads the file in fixed-size chunks, so the value has to
     // be proved against the whole-buffer hash over a file that spans several.
@@ -3096,7 +3619,8 @@ fn an_attachment_larger_than_one_read_chunk_reports_its_whole_size_and_hash() {
     let index = build(root);
     let entry = index.find_by_slug("note").expect("note");
 
-    let listed = list_note_attachments(root, &index.layers, entry).expect("list attachments");
+    let listed = list_note_attachments(root, &index.layers, entry, &note_text(entry))
+        .expect("list attachments");
 
     let mut expected = 0xcbf29ce484222325u64;
     for byte in &bytes {
@@ -3123,7 +3647,7 @@ fn a_wikilink_to_a_note_whose_title_contains_a_dot_is_not_an_asset() {
 
     let entry = index.find_by_slug("b").expect("b");
     assert!(
-        list_note_attachments(root, &index.layers, entry)
+        list_note_attachments(root, &index.layers, entry, &note_text(entry))
             .expect("list attachments")
             .is_empty(),
         "a dotted note title is not an attachment"
@@ -4854,6 +5378,88 @@ fn renaming_a_note_retargets_markdown_links_and_keeps_their_text() {
     );
 }
 
+/// A link written `.MD` is a note link (#675), so renaming its target
+/// rewrites it like any other.
+#[test]
+fn renaming_a_note_retargets_a_link_written_upper_case_md() {
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path();
+    fs::write(root.join("Upper.MD"), "# Upper").expect("upper");
+    fs::write(
+        root.join("Linker.md"),
+        "[up](Upper.MD) and [ref][r]\n\n[r]: Upper.Md#Top\n",
+    )
+    .expect("linker");
+    let index = build(root);
+    let entry = index.find_by_slug("upper").expect("upper");
+
+    move_or_rename_note(root, &index, entry, "Renamed.md", &content_hash("# Upper"))
+        .expect("rename");
+
+    assert_eq!(
+        read(root, "Linker.md"),
+        "[up](Renamed.md) and [ref][r]\n\n[r]: Renamed.md#Top\n"
+    );
+}
+
+/// A rewritten link spells the extension as the target's file does (#740):
+/// moving the linking note away from `Deep.MD` keeps `.MD`, so a tool that
+/// matches file names exactly still finds it.
+#[test]
+fn moving_the_linking_note_keeps_an_upper_case_md_target_extension() {
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path();
+    fs::create_dir_all(root.join("Sub")).expect("sub");
+    fs::create_dir_all(root.join("A/B")).expect("a/b");
+    fs::write(root.join("Sub/Deep.MD"), "# Deep").expect("deep");
+    let body = "[deep](../../Sub/Deep.MD) [same](/Sub/Deep.MD)\n";
+    fs::write(root.join("A/B/Rel.md"), body).expect("rel");
+    let index = build(root);
+    let entry = index.find_by_slug("rel").expect("rel");
+
+    move_or_rename_note(root, &index, entry, "A/Rel.md", &content_hash(body)).expect("move");
+
+    assert_eq!(
+        read(root, "A/Rel.md"),
+        "[deep](../Sub/Deep.MD) [same](/Sub/Deep.MD)\n",
+        "the relative link is recomputed with `.MD`; the root one still resolves and stays"
+    );
+}
+
+/// Moving the `.MD` note itself writes the extension its new file has: the
+/// `.md` a plain destination gets, or the `.MD` one asks for (#740).
+#[test]
+fn moving_an_upper_case_md_note_writes_its_new_file_extension_into_links() {
+    for (destination, expected) in [
+        (
+            "Other/Deep.md",
+            "[d](../Other/Deep.md) [e](Other/Deep.md)\n",
+        ),
+        (
+            "Other/Deep.MD",
+            "[d](../Other/Deep.MD) [e](Other/Deep.MD)\n",
+        ),
+    ] {
+        let tmp = TempDir::new().expect("tempdir");
+        let root = tmp.path();
+        fs::create_dir_all(root.join("Sub")).expect("sub");
+        fs::create_dir_all(root.join("In")).expect("in");
+        fs::write(root.join("Sub/Deep.MD"), "# Deep").expect("deep");
+        fs::write(
+            root.join("In/Linker.md"),
+            "[d](../Sub/Deep.MD) [e](Sub/Deep.MD)\n",
+        )
+        .expect("linker");
+        let index = build(root);
+        let entry = index.find_by_slug("deep").expect("deep");
+
+        move_or_rename_note(root, &index, entry, destination, &content_hash("# Deep"))
+            .expect("move");
+
+        assert_eq!(read(root, "In/Linker.md"), expected, "to {destination}");
+    }
+}
+
 #[test]
 fn moving_a_note_recomputes_relative_markdown_links_from_each_linking_note() {
     let tmp = markdown_link_vault("[x](../20-projects/Beacon%20Launch.md)\n");
@@ -5313,4 +5919,462 @@ fn tag_rename_and_delete_skip_a_dangling_markdown_symlink() {
     let deleted = apply_delete(root, "review");
     assert_eq!(deleted.notes.len(), 1);
     assert_eq!(read(root, "Tagged.md"), "---\ntags: []\n---\nbody\n");
+}
+
+// #626: a rename or delete rewrites only the links that name the note, and
+// copies every other link's bytes through.
+
+fn duplicate_name_rewrite_vault() -> TempDir {
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path();
+    fs::create_dir_all(root.join("links/a")).expect("a");
+    fs::create_dir_all(root.join("links/b")).expect("b");
+    fs::write(root.join("links/a/Duplicate Name.md"), "a").expect("a note");
+    fs::write(root.join("links/b/Duplicate Name.md"), "b").expect("b note");
+    fs::write(
+        root.join("Linker.md"),
+        "- [[b/Duplicate Name]]\n- [[a/Duplicate Name]]\n",
+    )
+    .expect("linker");
+    tmp
+}
+
+#[test]
+fn rename_leaves_a_link_qualified_for_a_namesake_byte_for_byte() {
+    let tmp = duplicate_name_rewrite_vault();
+    let root = tmp.path();
+    let index = build(root);
+    let entry = index
+        .resolve_wikilink("a/Duplicate Name")
+        .expect("a")
+        .clone();
+    assert_eq!(entry.relative_path, "links/a/Duplicate Name");
+
+    move_or_rename_note(
+        root,
+        &index,
+        &entry,
+        "links/a/Renamed A.md",
+        &content_hash("a"),
+    )
+    .expect("rename");
+
+    assert_eq!(
+        fs::read_to_string(root.join("Linker.md")).expect("linker"),
+        "- [[b/Duplicate Name]]\n- [[links/a/Renamed A]]\n"
+    );
+}
+
+#[test]
+fn delete_leaves_a_link_qualified_for_a_namesake_intact() {
+    let tmp = duplicate_name_rewrite_vault();
+    let root = tmp.path();
+    let index = build(root);
+    let entry = index
+        .resolve_wikilink("a/Duplicate Name")
+        .expect("a")
+        .clone();
+
+    delete_note(root, &index, &entry, &content_hash("a")).expect("delete");
+
+    assert_eq!(
+        fs::read_to_string(root.join("Linker.md")).expect("linker"),
+        "- [[b/Duplicate Name]]\n- \n"
+    );
+}
+
+#[test]
+fn rename_of_a_note_without_backlinks_rewrites_nothing() {
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path();
+    fs::write(root.join("README.md"), "readme").expect("readme");
+    fs::write(root.join("Home networking.md"), "# Setup\n").expect("home");
+    fs::write(root.join("Unrelated.md"), "alone").expect("unrelated");
+    let bystander = "[[README | the readme]] and [[Home networking #Setup]] and [[README\\| cell]]";
+    fs::write(root.join("Bystander.md"), bystander).expect("bystander");
+    let index = build(root);
+    let entry = index.find_by_slug("unrelated").expect("unrelated").clone();
+
+    let outcome = move_or_rename_note(
+        root,
+        &index,
+        &entry,
+        "Renamed Unrelated.md",
+        &content_hash("alone"),
+    )
+    .expect("rename");
+
+    assert_eq!(outcome.rewritten_notes, 0);
+    assert_eq!(
+        fs::read_to_string(root.join("Bystander.md")).expect("bystander"),
+        bystander
+    );
+}
+
+#[test]
+fn rename_keeps_the_spacing_around_a_retargeted_link_target() {
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path();
+    fs::write(root.join("Plan.md"), "plan").expect("plan");
+    fs::write(
+        root.join("Linker.md"),
+        "[[Plan | the plan]] and [[ Plan #Goals]]",
+    )
+    .expect("linker");
+    let index = build(root);
+    let entry = index.find_by_slug("plan").expect("plan").clone();
+
+    move_or_rename_note(root, &index, &entry, "Roadmap.md", &content_hash("plan")).expect("rename");
+
+    assert_eq!(
+        fs::read_to_string(root.join("Linker.md")).expect("linker"),
+        "[[Roadmap | the plan]] and [[ Roadmap #Goals]]"
+    );
+}
+
+#[test]
+fn a_non_utf8_note_with_an_unrelated_spaced_link_blocks_nothing() {
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path();
+    fs::write(root.join("README.md"), "readme").expect("readme");
+    fs::write(root.join("One.md"), "one").expect("one");
+    fs::write(root.join("Two.md"), "two").expect("two");
+    fs::write(root.join("Three.md"), "three").expect("three");
+    fs::write(root.join("Legacy.md"), b"Caf\xe9 [[README | readme]]\n").expect("legacy");
+
+    let index = build(root);
+    let one = index.find_by_slug("one").expect("one").clone();
+    move_or_rename_note(root, &index, &one, "One renamed.md", &content_hash("one"))
+        .expect("rename is not blocked");
+
+    let index = build(root);
+    let two = index.find_by_slug("two").expect("two").clone();
+    move_or_rename_note(root, &index, &two, "Moved/Two.md", &content_hash("two"))
+        .expect("move is not blocked");
+
+    let index = build(root);
+    let three = index.find_by_slug("three").expect("three").clone();
+    delete_note(root, &index, &three, &content_hash("three")).expect("delete is not blocked");
+
+    assert_eq!(
+        fs::read(root.join("Legacy.md")).expect("legacy"),
+        b"Caf\xe9 [[README | readme]]\n"
+    );
+}
+
+#[test]
+fn rename_leaves_a_link_to_the_exact_case_namesake_alone() {
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path();
+    fs::write(root.join("UPPER lower MiXeD.md"), "first").expect("first");
+    fs::write(root.join("upper LOWER mixed.md"), "second").expect("second");
+    fs::write(root.join("Linker.md"), "[[upper LOWER mixed]]").expect("linker");
+    let index = build(root);
+    let entry = index
+        .resolve_wikilink("UPPER lower MiXeD")
+        .expect("first")
+        .clone();
+
+    let outcome = move_or_rename_note(root, &index, &entry, "Shouting.md", &content_hash("first"))
+        .expect("rename");
+
+    assert_eq!(outcome.rewritten_notes, 0);
+    assert_eq!(
+        fs::read_to_string(root.join("Linker.md")).expect("linker"),
+        "[[upper LOWER mixed]]"
+    );
+}
+
+#[test]
+fn rename_leaves_a_link_to_a_generated_slug_alone() {
+    let tmp = duplicate_name_rewrite_vault();
+    let root = tmp.path();
+    fs::write(root.join("Future.md"), "[[Duplicate Name 2]]").expect("future");
+    let index = build(root);
+    let second = index
+        .find_by_slug("duplicate-name-2")
+        .expect("second")
+        .clone();
+
+    move_or_rename_note(
+        root,
+        &index,
+        &second,
+        "links/b/Renamed B.md",
+        &content_hash("b"),
+    )
+    .expect("rename");
+
+    assert_eq!(
+        fs::read_to_string(root.join("Future.md")).expect("future"),
+        "[[Duplicate Name 2]]"
+    );
+}
+
+#[test]
+fn rename_of_a_decomposed_filename_rewrites_a_composed_link() {
+    use unicode_normalization::UnicodeNormalization;
+
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path();
+    let korean_nfd: String = "한국어".nfd().collect();
+    fs::write(root.join(format!("{korean_nfd}.md")), "k").expect("korean");
+    fs::write(root.join("Linker.md"), "[[한국어|Korean]]").expect("linker");
+    let index = build(root);
+    let entry = index.resolve_wikilink("한국어").expect("korean").clone();
+
+    let outcome =
+        move_or_rename_note(root, &index, &entry, "Korean.md", &content_hash("k")).expect("rename");
+
+    assert_eq!(outcome.rewritten_notes, 1);
+    assert_eq!(
+        fs::read_to_string(root.join("Linker.md")).expect("linker"),
+        "[[Korean|Korean]]"
+    );
+}
+
+#[test]
+fn move_pins_the_moved_notes_own_link_that_a_nearer_namesake_would_take() {
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path();
+    fs::create_dir_all(root.join("a")).expect("a");
+    fs::create_dir_all(root.join("b")).expect("b");
+    fs::write(root.join("a/Notes.md"), "a notes").expect("a notes");
+    fs::write(root.join("b/Notes.md"), "b notes").expect("b notes");
+    fs::write(root.join("a/Plan.md"), "See [[Notes]]").expect("plan");
+    let index = build(root);
+    let plan = index.find_by_slug("plan").expect("plan").clone();
+
+    move_or_rename_note(
+        root,
+        &index,
+        &plan,
+        "b/Plan.md",
+        &content_hash("See [[Notes]]"),
+    )
+    .expect("move");
+
+    assert_eq!(
+        fs::read_to_string(root.join("b/Plan.md")).expect("plan"),
+        "See [[a/Notes]]"
+    );
+    let after = build(root);
+    let moved = after.resolve_wikilink("b/Plan").expect("moved");
+    let a_notes = after.resolve_wikilink("a/Notes").expect("a notes");
+    assert_eq!(
+        after.outgoing_by_slug[&moved.slug],
+        vec![a_notes.slug.clone()]
+    );
+}
+
+#[test]
+fn rename_pins_another_notes_link_that_the_renamed_note_would_capture() {
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path();
+    fs::create_dir_all(root.join("a")).expect("a");
+    fs::write(root.join("Roadmap.md"), "root roadmap").expect("roadmap");
+    fs::write(root.join("a/Plan.md"), "plan").expect("plan");
+    fs::write(root.join("a/L.md"), "[[Roadmap]] and [[Plan]]").expect("linker");
+    let index = build(root);
+    let plan = index.find_by_slug("plan").expect("plan").clone();
+
+    move_or_rename_note(root, &index, &plan, "a/Roadmap.md", &content_hash("plan"))
+        .expect("rename");
+
+    assert_eq!(
+        fs::read_to_string(root.join("a/L.md")).expect("linker"),
+        "[[/Roadmap]] and [[a/Roadmap]]"
+    );
+}
+
+#[test]
+fn move_to_the_root_beside_a_nearer_namesake_anchors_the_backlink() {
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path();
+    fs::create_dir_all(root.join("a")).expect("a");
+    fs::create_dir_all(root.join("b")).expect("b");
+    fs::write(root.join("a/Plan.md"), "a plan").expect("a plan");
+    fs::write(root.join("b/Plan.md"), "b plan").expect("b plan");
+    fs::write(root.join("b/L.md"), "[[a/Plan]]").expect("linker");
+    let index = build(root);
+    let a_plan = index.resolve_wikilink("a/Plan").expect("a plan").clone();
+
+    move_or_rename_note(root, &index, &a_plan, "Plan.md", &content_hash("a plan")).expect("move");
+
+    assert_eq!(
+        fs::read_to_string(root.join("b/L.md")).expect("linker"),
+        "[[/Plan]]"
+    );
+    let after = build(root);
+    let linker = after.resolve_wikilink("b/L").expect("linker");
+    let moved = after.resolve_wikilink("/Plan").expect("moved");
+    assert_eq!(moved.relative_path, "Plan");
+    assert_eq!(
+        after.outgoing_by_slug[&linker.slug],
+        vec![moved.slug.clone()]
+    );
+}
+
+#[test]
+fn relocated_breaks_ties_in_the_order_a_rebuild_does() {
+    // `a/Plan` sorts before `a b/Plan` folder by folder, but after it as a
+    // string. From the root both are one hop away, so claim order decides.
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path();
+    fs::create_dir_all(root.join("a b")).expect("a b");
+    fs::create_dir_all(root.join("x/y")).expect("x/y");
+    fs::write(root.join("a b/Plan.md"), "r").expect("r");
+    fs::write(root.join("x/y/Plan.md"), "m").expect("m");
+    fs::write(root.join("Home.md"), "[[Plan]]").expect("home");
+    let index = build(root);
+    let moving = index.resolve_wikilink("x/y/Plan").expect("m").clone();
+
+    move_or_rename_note(root, &index, &moving, "a/Plan.md", &content_hash("m")).expect("move");
+
+    let home = fs::read_to_string(root.join("Home.md")).expect("home");
+    let after = build(root);
+    let reached = after
+        .resolve_wikilink_from(home.trim_start_matches("[[").trim_end_matches("]]"), "")
+        .expect("reached");
+    assert_eq!(reached.relative_path, "a b/Plan", "home was {home:?}");
+}
+
+/// A note's text, as the read core hands it to `list_note_attachments`.
+fn note_text(entry: &crate::vault::NoteEntry) -> String {
+    fs::read_to_string(&entry.path).expect("read note")
+}
+
+#[test]
+fn a_root_notes_picture_stays_for_every_way_a_markdown_link_spells_a_space() {
+    // Obsidian writes `%20` itself when wikilinks are off, and CommonMark
+    // allows `<...>` around a path with spaces (#701 review).
+    for other_body in [
+        "![](../_system/my%20image.png)\n",
+        "![](<../_system/my image.png>)\n",
+    ] {
+        let tmp = TempDir::new().expect("tempdir");
+        let root = tmp.path();
+        let body = "# B\n![[_system/my image.png]]\n";
+        fs::create_dir_all(root.join("_system")).expect("system dir");
+        fs::create_dir_all(root.join("folder-x")).expect("folder-x");
+        fs::write(root.join("_system/my image.png"), BINARY_ASSET).expect("asset");
+        fs::write(root.join("B.md"), body).expect("note");
+        fs::write(root.join("folder-x/Other.md"), other_body).expect("other note");
+        let index = build(root);
+        let entry = index.find_by_slug("b").expect("b");
+
+        let outcome = delete_note(root, &index, entry, &content_hash(body)).expect("delete");
+
+        assert_eq!(outcome.moved_assets, 0, "{other_body} uses the picture");
+        assert!(root.join("_system/my image.png").exists());
+        assert_eq!(
+            fs::read_to_string(root.join("folder-x/Other.md")).expect("other note"),
+            other_body
+        );
+    }
+}
+
+#[test]
+fn a_bare_name_the_index_cannot_resolve_still_keeps_a_root_notes_file_in_place() {
+    // A video is not in the index's name list, so only the name fallback
+    // sees this embed, and the `#t=10` time stamp must not hide it.
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path();
+    let body = "# B\n![](_system/clip.mp4)\n";
+    let other_body = "![[clip.mp4#t=10]]\n";
+    fs::create_dir_all(root.join("_system")).expect("system dir");
+    fs::create_dir_all(root.join("folder-x")).expect("folder-x");
+    fs::write(root.join("_system/clip.mp4"), BINARY_ASSET).expect("asset");
+    fs::write(root.join("B.md"), body).expect("note");
+    fs::write(root.join("folder-x/Other.md"), other_body).expect("other note");
+    let index = build(root);
+    let entry = index.find_by_slug("b").expect("b");
+
+    let outcome = move_or_rename_note(root, &index, entry, "folder-z/B.md", &content_hash(body))
+        .expect("move");
+
+    assert_eq!(outcome.moved_assets, 0);
+    assert!(root.join("_system/clip.mp4").exists());
+    assert_eq!(
+        fs::read_to_string(root.join("folder-x/Other.md")).expect("other note"),
+        other_body
+    );
+}
+
+#[test]
+fn a_note_too_large_to_read_keeps_a_root_notes_picture_in_place() {
+    // What an unreadable note embeds is unknown, so it must not count as
+    // using nothing: its link would break with nothing to repoint it.
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path();
+    let body = root_note_with_a_picture(root, None);
+    let mut huge = "![](_system/image.png)\n".to_string();
+    huge.push_str(&"x".repeat(crate::vault::MAX_NOTE_BYTES as usize));
+    fs::write(root.join("Huge.md"), huge).expect("oversized note");
+    let index = build(root);
+    let entry = index.find_by_slug("b").expect("b");
+
+    let outcome = delete_note(root, &index, entry, &content_hash(&body)).expect("delete");
+
+    assert_eq!(outcome.moved_assets, 0);
+    assert!(root.join("_system/image.png").exists());
+}
+
+/// A sync tool that swaps the moved attachment for a FIFO between the
+/// rewrites and the attachment report must not hold the move, and the Vault's
+/// mutation guard with it, until a writer appears (#736). The move is refused
+/// and the note's reference rolled back.
+#[test]
+fn attachment_move_refuses_an_attachment_swapped_for_a_fifo_before_its_report() {
+    use super::types::MutationPhase;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path().to_path_buf();
+    fs::create_dir_all(root.join("Media")).expect("media");
+    fs::write(root.join("Media/image.png"), "original asset").expect("asset");
+    fs::write(root.join("Note.md"), "![](Media/image.png)").expect("note");
+    let index = build(&root);
+
+    let (sender, receiver) = mpsc::channel();
+    let thread_root = root.clone();
+    std::thread::spawn(move || {
+        let result = super::attachments::move_attachment_with_failure(
+            &thread_root,
+            &index,
+            "Media/image.png",
+            "Archive/image.png",
+            |completed| {
+                if completed == MutationPhase::Rewrite {
+                    let moved = thread_root.join("Archive/image.png");
+                    fs::remove_file(&moved).expect("remove the moved attachment");
+                    crate::vault::make_fifo(&moved);
+                }
+                Ok(())
+            },
+        );
+        let _ = sender.send(result);
+    });
+
+    let error = receiver
+        .recv_timeout(Duration::from_secs(10))
+        .expect("the move must not block on the FIFO")
+        .expect_err("an attachment that is no longer a regular file must refuse the move");
+
+    // The swap destroyed the original bytes, so the rollback restores the
+    // note's reference and says plainly that the attachment itself is gone,
+    // rather than moving the FIFO back into its place.
+    let WriteError::Io(message) = &error else {
+        panic!("expected a recovery report, got {error:?}");
+    };
+    assert!(
+        message.contains("recovery required") && message.contains("restore moved asset"),
+        "unexpected error: {message}"
+    );
+    assert_eq!(
+        fs::read_to_string(root.join("Note.md")).expect("restored reference"),
+        "![](Media/image.png)"
+    );
+    assert!(!root.join("Media/image.png").exists());
 }

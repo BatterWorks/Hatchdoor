@@ -32,7 +32,7 @@ Open the Vault from the list in Settings and use **Pause Vault** or **Resume Vau
 - Leaves every file, the search index and any Git history as they were. Nothing is deleted or rebuilt.
 - Stops all changes to that Vault, from agents too, until you resume it.
 
-Pausing asks for no confirmation, because one click undoes it.
+Pausing asks for no confirmation, because one click undoes it. A Vault paused while it indexes keeps the work done so far and carries on from there when you resume it.
 
 ## Disconnect a Vault
 
@@ -53,7 +53,7 @@ An agent manages Vaults with MCP tools, and needs **Let assistants change notes*
 3. If the registry_revision is out of date, the call is refused rather than racing another change. Re-read list_vaults and retry.
 ```
 
-Creating a Vault works the same way, with `create_vault`. [[How to deploy Hatchdoor with an agent]] shows an agent setting up Hatchdoor and its first Vault from scratch.
+Creating a Vault works the same way, with `create_vault`. [[How to deploy Hatchdoor with an agent]] shows an agent setting up Hatchdoor and its first Vault from scratch. An agent can add or move a Vault only to a folder inside the shared folder (`VAULT_PATH`, `/data/vault` in the stock install). A folder anywhere else is refused with `vault_path_outside_mount`: add that one from **Settings** yourself, and the agent can manage it from then on.
 
 > [!tip]
 > `list_vaults` always works, with or without write access, so an agent can look at every Vault, its status and what it allows before deciding anything needs to change. Every tool that changes a Vault or asks it to do something needs write access: `create_vault`, `edit_vault`, `enable_vault`, `disable_vault`, `disconnect_vault`, `sync_vault`, `retry_vault`, `refresh_vault` and `publish_recovery_branch`.

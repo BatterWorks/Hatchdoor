@@ -41,6 +41,12 @@
     --co-fail: #7f4d30;
     --highlight: #f7ebbf;
     --highlight-active: #f1d779;
+    --highlight-red: #fec9e2;
+    --highlight-orange: #ffcfb6;
+    --highlight-yellow: #fad598;
+    --highlight-green: #cae6a9;
+    --highlight-blue: #c4defa;
+    --highlight-purple: #eecef8;
     --code-surface: #0c0c0a;
     --code-ink: #f4f1e8;
     --code-ink-soft: rgba(244, 241, 232, 0.6);
@@ -77,6 +83,12 @@
     --co-fail: #ce9677;
     --highlight: #4a3f15;
     --highlight-active: #6b5a1f;
+    --highlight-red: #5a2a44;
+    --highlight-orange: #5e2f11;
+    --highlight-yellow: #523700;
+    --highlight-green: #30450a;
+    --highlight-blue: #293f56;
+    --highlight-purple: #4b3154;
     --code-surface: #1a1a17;
     --code-ink: #ece8d8;
     --code-ink-soft: rgba(236, 232, 216, 0.6);
@@ -114,6 +126,12 @@
       --co-fail: #ce9677;
       --highlight: #4a3f15;
       --highlight-active: #6b5a1f;
+      --highlight-red: #5a2a44;
+      --highlight-orange: #5e2f11;
+      --highlight-yellow: #523700;
+      --highlight-green: #30450a;
+      --highlight-blue: #293f56;
+      --highlight-purple: #4b3154;
     --code-surface: #1a1a17;
     --code-ink: #ece8d8;
     --code-ink-soft: rgba(236, 232, 216, 0.6);
@@ -138,6 +156,9 @@
     --space-16: 4rem;
     --radius-pill: 999px;
     --radius-none: 0;
+    --pdf-page: #ffffff;
+    --note-measure-default: 38rem;
+    --note-measure-wide: 48rem;
     --dur-fast: 120ms;
     --dur: 200ms;
     --ease: cubic-bezier(.2,.8,.2,1);
@@ -808,6 +829,13 @@
     box-shadow: inset 3px 0 0 var(--hot);
   }
   .note-link.is-active .idx { color: var(--hot); }
+  /* A listed file that is not a note: a glyph in the index's column. */
+  .note-link .file-glyph {
+    display: inline-flex;
+    justify-content: center;
+    transform: none;
+  }
+  .note-link .file-glyph svg { width: 1.45em; height: 1.45em; }
   .sidebar-resizer {
     width: 8px;
     cursor: col-resize;
@@ -1136,6 +1164,12 @@
   .note-body em { font-style: italic; }
   .note-body strong { font-weight: 600; }
   .note-body mark.note-highlight { background: color-mix(in srgb, var(--hot) 20%, transparent); color: inherit; border-radius: var(--radius-none); box-decoration-break: clone; -webkit-box-decoration-break: clone; }
+  .note-body mark.note-highlight-red { background: var(--highlight-red); }
+  .note-body mark.note-highlight-orange { background: var(--highlight-orange); }
+  .note-body mark.note-highlight-yellow { background: var(--highlight-yellow); }
+  .note-body mark.note-highlight-green { background: var(--highlight-green); }
+  .note-body mark.note-highlight-blue { background: var(--highlight-blue); }
+  .note-body mark.note-highlight-purple { background: var(--highlight-purple); }
   .note-body code { font-family: var(--font-mono); font-size: 0.86em; background: var(--paper-2); padding: 0.05rem 0.35rem; color: var(--ink); }
   .note-body ul, .note-body ol {
     padding-left: 0;
@@ -1357,6 +1391,14 @@
   .note-body .saved-query-orphan { font-family: var(--font-sans); font-size: 0.92rem; color: var(--muted); }
   .note-body td:first-child, .note-body th:first-child { padding-left: 0.7rem; }
   .note-body td:first-child { color: var(--muted); }
+
+  /* Embedded note (#699) */
+  .note-body .note-embed { margin: 1.5rem 0; border: 1px solid var(--rule-strong); background: var(--paper); }
+  .note-embed-head { display: flex; align-items: baseline; gap: 0.75rem; padding: 0.65rem 0.8rem; border-bottom: 1px solid var(--rule); background: var(--paper-2); font-family: var(--font-display); font-variation-settings: "wdth" 92, "wght" 600; font-size: 0.72rem; letter-spacing: 0.12em; text-transform: uppercase; }
+  .note-embed-eyebrow { flex: 0 0 auto; color: var(--muted); }
+  .note-body a.note-embed-source { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .note-embed-body { padding: 0.25rem 0.9rem; }
+  .note-body .note-embed-status { font-family: var(--font-sans); color: var(--muted); }
 
   /* Mermaid */
   .mermaid {
@@ -1782,6 +1824,7 @@
 
     <h3>Body</h3>
     <a href="#body-text">Prose &amp; inline</a>
+    <a href="#highlight-colours">Highlight colours</a>
     <a href="#body-lists">Lists</a>
     <a href="#blockquote">Blockquote</a>
     <a href="#callouts">Callouts</a>
@@ -1932,6 +1975,12 @@
             <tr><td class="name">--radius-none</td><td class="val">0 · everywhere</td></tr>
             <tr><td class="name">--radius-pill</td><td class="val">999px · kbd, badges</td></tr>
           </table>
+          <table class="kv-table" style="margin-top: 0.8rem;">
+            <tr><th colspan="2">Fixed</th></tr>
+            <tr><td class="name">--pdf-page</td><td class="val">#ffffff · a rendered PDF page, both themes</td></tr>
+            <tr><td class="name">--note-measure-default</td><td class="val">38rem · note column, Default width</td></tr>
+            <tr><td class="name">--note-measure-wide</td><td class="val">48rem · note column, Wide width</td></tr>
+          </table>
         </div>
       </div>
     </section>
@@ -2037,6 +2086,8 @@
 
       <p class="blurb">Folders use a CSS-only chevron caret that rotates open. <b>Notes show a mono index</b> &mdash; that is what tells note rows apart from folder rows without changing size or weight. Active note: hot-orange left rail + hot-soft background + bolded, and it is <b>canonical in the tree only</b>. Applying it in the recency lists too is what made one note light up in three places at once.</p>
 
+      <p class="blurb"><b>A file that is not a note carries a glyph where a note carries its index.</b> An Obsidian canvas is listed after its folder&rsquo;s notes as <span class="key">.file-link</span>: the same row, with the Sharp <i>dashboard</i> symbol in <span class="key">.file-glyph</span>, centred in the index&rsquo;s own column so note and file labels share one left edge. The label keeps the extension, because the extension is what says the row is not a note. The row downloads the file and opens nothing, so it never takes the active state.</p>
+
       <p class="blurb"><b>The index is centred optically, not geometrically.</b> It is always lining digits &mdash; ascent only, no descender &mdash; while the title beside it hangs about two pixels below their shared baseline. <span class="key">align-items: center</span> lines the two <i>boxes</i> up exactly and still leaves the digits reading high by half that descender, so <span class="key">.idx</span> takes a <span class="key">translateY(0.1em)</span> correction, in em so it survives a resize. The residual is content-dependent &mdash; a title full of descenders sits lower than an all-caps one &mdash; so the target is the face&rsquo;s typical profile, never any single string&rsquo;s ink.</p>
 
       <p class="blurb"><b>Depth is carried by weight and by the caret, not by size.</b> The whole tree sits at one reading size: <span class="key">0.9rem</span> for a Vault head, for the folders and notes beneath it, and for <span class="key">RECENTLY VIEWED</span>&rsquo;s rows above it. None of this is chrome &mdash; it is all the operator&rsquo;s own text, and setting the head above the rest made it shout. What separates a head from its contents is <span class="key">wght 700</span> and, when it is open, the hot rail; folders and notes separate from each other the same way, <span class="key">wght 500</span> with a caret against <span class="key">wght 400</span> with the mono index. Buying a size step here would cost legibility to say something weight already says. Carets shrink the same way: <span class="key">6&times;10</span> at a Vault head, <span class="key">6&times;6</span> at a folder. A child marker larger than its parent&rsquo;s reads as the child outranking it, which is what an <span class="key">8&times;8</span> folder caret under a <span class="key">5&times;8</span> head was doing.</p>
@@ -2111,6 +2162,7 @@
                   <a class="note-link is-active" href="#"><span class="idx">001</span>Field notes from the orchard</a>
                   <a class="note-link" href="#"><span class="idx">002</span>On pruning</a>
                   <a class="note-link is-hover" href="#"><span class="idx">003</span>The grafting calendar</a>
+                  <a class="note-link file-link" href="#"><span class="idx file-glyph"><svg viewBox="0 -960 960 960" fill="currentColor" aria-hidden="true"><path d="M520-600v-240h320v240H520ZM120-440v-400h320v400H120Zm400 320v-400h320v400H520Zm-400 0v-240h320v240H120Zm80-400h160v-240H200v240Zm400 320h160v-240H600v240Zm0-480h160v-80H600v80ZM200-200h160v-80H200v80Zm160-320Zm240-160Zm0 240ZM360-280Z"/></svg></span>Orchard plan.canvas</a>
                 </div>
               </div>
               <div class="folder-item"><a class="folder-row" href="#"><span class="caret"></span>20-reading</a></div>
@@ -2139,7 +2191,7 @@
         <span class="key">.scope-zone</span><span class="key">.scope-zone .scope-zone-head</span><span class="key">.scope-zone-keycap</span><span class="key">.scope-zone-current</span><span class="key">.scope-zone-viewing-line</span><span class="key">.scope-zone-list</span><span class="key">.scope-row</span><span class="key">.scope-row.is-selected</span><span class="key">.scope-row-label</span><span class="key">.scope-row-viewing</span>
         <span class="key">.side-section</span><span class="key">.side-head</span><span class="key">.side-label</span><span class="key">.side-rule</span><span class="key">.side-count</span><span class="key">.side-caret</span>
         <span class="key">.folder-item[data-open]</span><span class="key">.folder-row</span><span class="key">.caret</span><span class="key">.children</span>
-        <span class="key">.note-link</span><span class="key">.note-link.active-note</span><span class="key">.idx</span>
+        <span class="key">.note-link</span><span class="key">.note-link.active-note</span><span class="key">.idx</span><span class="key">.file-link</span><span class="key">.file-glyph</span>
         <span class="key">.recent-notes</span><span class="key">.recent-notes .side-head</span><span class="key">.explorer-changes</span><span class="key">.sidebar-resizer</span>
       </div>
     </section>
@@ -2278,7 +2330,8 @@
     <section class="doc-section" id="body-text">
       <div class="doc-section-num">§10</div>
       <h2>Prose &amp; inline elements</h2>
-      <p class="blurb"><b>Reading measure: 38rem, about 75 characters.</b> The note column is capped at <span class="key">--note-measure</span>, set on <span class="key">.note-page-layout</span>. At the body serif&rsquo;s 1.18rem that holds about 75 characters a line, the top of the range typographic convention gives for a single column (45 to 75) and inside the 80 that WCAG 1.4.8 allows; uncapped, a 1440px window ran to about 100 and a wide one past 120. <b>The whole column takes the cap, not the paragraphs alone</b>: title, Properties rule, tables, callouts, code and diagrams share one right edge. An earlier revision of this section rejected a cap because a narrow text column beside full-width bordered boxes reads as broken alignment; capping the column keeps the alignment, and its cost is the one named then, that a wide table reaches horizontal scrolling sooner. <b>Source</b> and the conflict review keep the 1120px column: they show Markdown in a monospace face, and the review sets two versions side by side.</p>
+      <p class="blurb"><b>Reading measure: 38rem, about 75 to 80 characters.</b> The note column is capped at <span class="key">--note-measure</span>, set on <span class="key">.note-page-layout</span>. At the body serif&rsquo;s 1.18rem that holds about 75 characters a line, the top of the range typographic convention gives for a single column (45 to 75) and inside the 80 that WCAG 1.4.8 allows; uncapped, a 1440px window ran to about 100 and a wide one past 120. <b>The whole column takes the cap, not the paragraphs alone</b>: title, Properties rule, tables, callouts, code and diagrams share one right edge. An earlier revision of this section rejected a cap because a narrow text column beside full-width bordered boxes reads as broken alignment; capping the column keeps the alignment, and its cost is the one named then, that a wide table reaches horizontal scrolling sooner. <b>Source</b> and the conflict review keep the 1120px column: they show Markdown in a monospace face, and the review sets two versions side by side.</p>
+      <p class="blurb"><b>The operator can widen the measure (#698).</b> The Layout setting <i>Note width</i> sets <span class="key">data-note-width</span> on <span class="key">.note-page-layout</span>, and the tokens in <span class="key">base.css</span> hold the values. <span class="key">default</span> is <span class="key">--note-measure-default</span> (38rem, as above). <span class="key">wide</span> is <span class="key">--note-measure-wide</span>, 48rem: about 100 characters a line, near where screen-reading studies find lines read fastest (Dyson &amp; Kipping 1998), although readers prefer shorter ones, which is why it is not the default. <span class="key">full</span> lifts the cap: the column takes the pane less its padding and the outline. Each is an upper limit, so on a screen narrower than the cap all three look the same. Wide leaves Source&rsquo;s 1120px column alone, and Full lifts that one too. The manual in the Help panel never takes the setting.</p>
       <p class="blurb">Body paragraphs use Newsreader serif at 1.18rem / lh 1.62. Inline links underline with a 2px hot rail (hovering inverts: hot fill, paper text). Inline code uses a paper-2 surface. Broken links show dashed underline in error color.</p>
       <div class="stage stage-note paper">
         <div class="note-body">
@@ -2291,6 +2344,23 @@
       <p class="blurb"><b>A text highlight is the author&rsquo;s mark; a search hit is the reader&rsquo;s.</b> <code>==text==</code> renders as a <span class="key">mark.note-highlight</span>: <span class="key">--hot</span> mixed to 20% over the page, the same tint the live editor draws, so the two views of a note match. Square, like everything else, and the text keeps its own ink. It never takes <span class="key">--highlight</span>, which belongs to search: a hit inside a highlight paints its yellow over the tint and still reads as the hit.</p>
       <p class="blurb"><b>A link shaped like a button must pay off the prose link rule.</b> <span class="key">.note-body a</span> outweighs a bare component class, so a button inside the body &mdash; the PDF preview&rsquo;s <span class="key">Open PDF</span> &mdash; inherits the 2px hot rail (wanted: it is still a link) along with a <span class="key">1px</span> bottom padding and the body&rsquo;s <span class="key">1.45</span> line-height (not wanted: together they set the label high in a box 5px taller than it should be). Any such button restores its own <span class="key">padding-block</span> and <span class="key">line-height: 1</span> under a type-qualified selector, less <span class="key">1px</span> off the bottom for the rail it is standing on.</p>
       <div class="tag-row"><span class="key">.note-body p</span><span class="key">a</span><span class="key">a:hover</span><span class="key">.note-body a.ui-button</span><span class="key">em</span><span class="key">strong</span><span class="key">code (inline)</span><span class="key">.ty-broken</span><span class="key">mark.note-highlight</span><span class="key">.search-hit</span><span class="key">.search-hit.active</span></div>
+
+      <h3 class="doc-sub" id="highlight-colours">Highlight colours</h3>
+      <div class="stage stage-note paper">
+        <div class="note-body">
+          <p>Obsidian&rsquo;s six: <mark class="note-highlight note-highlight-red">red</mark>, <mark class="note-highlight note-highlight-orange">orange</mark>, <mark class="note-highlight note-highlight-yellow">yellow</mark>, <mark class="note-highlight note-highlight-green">green</mark>, <mark class="note-highlight note-highlight-blue">blue</mark> and <mark class="note-highlight note-highlight-purple">purple</mark>, beside a <mark class="note-highlight">plain highlight</mark>.</p>
+        </div>
+      </div>
+      <div class="swatches">
+        <div class="sw"><div class="sw-chip" style="background:var(--highlight-red)"></div><div class="sw-meta"><div class="n">--highlight-red</div><div class="v">🔴 · hue of --co-example</div></div></div>
+        <div class="sw"><div class="sw-chip" style="background:var(--highlight-orange)"></div><div class="sw-meta"><div class="n">--highlight-orange</div><div class="v">🟠 · hue of --co-fail</div></div></div>
+        <div class="sw"><div class="sw-chip" style="background:var(--highlight-yellow)"></div><div class="sw-meta"><div class="n">--highlight-yellow</div><div class="v">🟡 · hue of --warn-fg</div></div></div>
+        <div class="sw"><div class="sw-chip" style="background:var(--highlight-green)"></div><div class="sw-meta"><div class="n">--highlight-green</div><div class="v">🟢 · hue of --co-success</div></div></div>
+        <div class="sw"><div class="sw-chip" style="background:var(--highlight-blue)"></div><div class="sw-meta"><div class="n">--highlight-blue</div><div class="v">🔵 · hue of --co-info</div></div></div>
+        <div class="sw"><div class="sw-chip" style="background:var(--highlight-purple)"></div><div class="sw-meta"><div class="n">--highlight-purple</div><div class="v">🟣 · hue of --co-question</div></div></div>
+      </div>
+      <p class="blurb"><b>A colour emoji straight after the opening <code>==</code> picks one of six surfaces, and is not drawn.</b> This is Obsidian&rsquo;s syntax (<code>==🔴Important==</code>); any other character there, a brown circle included, is text. The file keeps the emoji. Each surface takes the hue and chroma of the callout accent nearest Obsidian&rsquo;s colour, so a coloured highlight reads as one of the house inks rather than a marker pen, and all six share one lightness (OKLCh L 0.89 light, 0.36 dark). Body ink clears 8.6:1 on every one; <span class="key">docs/design/palette.py</span> checks that, the shared lightness and the chroma ceilings. The colour replaces the plain <span class="key">--hot</span> tint rather than mixing with it, in the rendered views (<span class="key">mark.note-highlight-&lt;colour&gt;</span>) and in the editor (<span class="key">.live-editor-highlight-&lt;colour&gt;</span>), where the emoji shows while the caret is on its line. Orange sits close to the plain tint in the light theme; that was seen and accepted when this palette was chosen (#577).</p>
+      <div class="tag-row"><span class="key">mark.note-highlight-red</span><span class="key">-orange</span><span class="key">-yellow</span><span class="key">-green</span><span class="key">-blue</span><span class="key">-purple</span><span class="key">.live-editor-highlight-&lt;colour&gt;</span></div>
     </section>
 
     <!-- ───────── LISTS ───────── -->
@@ -2491,6 +2561,22 @@ mood        = <span class="str">"calm; not on a Sunday"</span></pre>
         </div>
       </div>
       <div class="tag-row"><span class="key">.figure</span><span class="key">.figure img</span><span class="key">.figure figcaption</span></div>
+
+      <h3 class="doc-sub">Embedded note</h3>
+      <p class="blurb">An Obsidian note embed, <code>![[Note]]</code>, <code>![[Note#Heading]]</code> or <code>![[Note#^id]]</code>, draws that note, section or block in the PDF preview's frame: a <span class="key">--rule-strong</span> border on paper, and a <span class="key">--paper-2</span> head row in the PDF title's type that says <em>Embedded</em> in muted ink and links the source note. The content inside keeps the note's own type and carries no heading or block anchors. While it loads, the body holds one muted line; anything that stops it (a missing note, heading or block, a failed read, a cycle, a fourth level) draws the plain note link instead, never an empty frame.</p>
+      <div class="stage stage-note paper">
+        <div class="note-body">
+          <div class="note-embed" role="group" aria-label="Embedded note">
+            <div class="note-embed-head"><span class="note-embed-eyebrow">Embedded</span><a class="note-embed-source" href="#media">Pruning calendar</a></div>
+            <div class="note-embed-body"><p>Cut the Bramley back in late winter, before the buds break.</p></div>
+          </div>
+          <div class="note-embed" role="group" aria-label="Embedded note" aria-busy="true">
+            <div class="note-embed-head"><span class="note-embed-eyebrow">Embedded</span><a class="note-embed-source" href="#media">Soil notes</a></div>
+            <div class="note-embed-body"><p class="note-embed-status">Loading…</p></div>
+          </div>
+        </div>
+      </div>
+      <div class="tag-row"><span class="key">.note-embed</span><span class="key">.note-embed-head</span><span class="key">.note-embed-source</span><span class="key">.note-embed-body</span><span class="key">.note-embed-status</span></div>
 
       <h3 class="doc-sub">Mermaid container</h3>
       <div class="stage stage-note">
@@ -2726,8 +2812,8 @@ mood        = <span class="str">"calm; not on a Sunday"</span></pre>
     <section class="doc-section" id="save-state">
       <div class="doc-section-num">§21</div>
       <h2>Save state</h2>
-      <p class="blurb">Autosave removed the Save button, and with it the only evidence a user had that their writing survived. In a vault with agent co-writers and git sync, that evidence is the trust surface of the whole feature, so it gets a permanent slot beside <b>Edit</b>.</p>
-      <p class="blurb">It states what is true <i>now</i> rather than announcing an event: &ldquo;Saved 14:32&rdquo;, not &ldquo;Saved!&rdquo;. The failure state is a click target that opens the conflict review.</p>
+      <p class="blurb">The live editor has no Save button. Its save badge states whether the current text reached the Vault, in a permanent slot beside the view controls.</p>
+      <p class="blurb">It states what is true <i>now</i>: &ldquo;Saved 14:32&rdquo;, not &ldquo;Saved!&rdquo;. Typing again hides that confirmation until the new text saves. A failed save reads &ldquo;Not saving&rdquo;; the notice strip carries the <b>Review</b> button that opens Source for recovery.</p>
       <p class="blurb"><b>The slot sits at the end of the Properties heading line</b> (<a href="#meta">§08</a>), not beside the title. On the title&rsquo;s line the pair took width from it and a long title wrapped around them; the Properties rule already runs the full measure and has the room. Where a note has no properties and no Vault row, that line renders for the actions alone rather than showing a disclosure that opens on to nothing.</p>
       <div class="stage" style="display:flex; gap:1.5rem; align-items:center; flex-wrap:wrap;">
         <span class="save-state">Saving…</span>

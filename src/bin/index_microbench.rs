@@ -9,7 +9,7 @@ use tokenizers_fe::Tokenizer;
 const DEFAULT_CACHE: &str = "data/cache/hatchdoor-cache.sqlite3";
 const SAMPLE_NOTES: usize = 16;
 const PRODUCTION_EMBEDDER_ID: &str =
-    "EmbeddingGemma300MQ4-768-max2048-fastembed-v5-ctx1-gemma-retrieval-v1";
+    "EmbeddingGemma300MQ4-768-max2048-fastembed-v5-ctx1-gemma-retrieval-v1-rev-5090578d9565";
 const PRODUCTION_REPRESENTATION: &str =
     "EmbeddingGemma300MQ4 retrieval-format v1 (768-dim, max 2048)";
 

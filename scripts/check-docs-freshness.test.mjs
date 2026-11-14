@@ -38,6 +38,7 @@ const FIXTURE_NOTES = [
   "docs/user-vault/03 Reference/Usage report reference.md",
   "docs/user-vault/03 Reference/Settings and environment variables reference.md",
   "docs/user-vault/04 Concepts/The security model.md",
+  "docs/user-vault/02 Guides/How to troubleshoot common problems.md",
 ];
 
 function run(root, args = []) {
@@ -75,6 +76,10 @@ async function fixture() {
     sourceScript,
     path.join(root, "scripts", "check-docs-freshness.mjs"),
   );
+  await copyFile(
+    path.join(path.dirname(sourceScript), "git-changes.mjs"),
+    path.join(root, "scripts", "git-changes.mjs"),
+  );
   await write(root, "src/mcp/tools/read.rs");
   await write(root, "src/lib.rs");
   await write(root, "frontend/src/App.tsx");
@@ -108,6 +113,19 @@ async function commit(root, message, ...paragraphs) {
     message,
     ...paragraphs.flatMap((paragraph) => ["-m", paragraph]),
   ]);
+}
+
+for (const source of ["src/vault/sections.rs", "src/vault_read/sections.rs"]) {
+  test(`${source} triggers the section contract's MCP documentation review`, async () => {
+    const root = await fixture();
+    await write(root, source, "// corrected section recognition\n");
+    await addChangelogEntry(root);
+    const result = run(root);
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /Note mutation behaviour/);
+    assert.ok(result.stderr.includes(MCP_NOTE));
+    assert.ok(result.stderr.includes(source));
+  });
 }
 
 async function addChangelogEntry(root) {
@@ -202,6 +220,18 @@ test("one change can require several surfaces' notes", async () => {
 // the note-mutation surface. What it did not do was summon the guide that
 // actually documents move_attachment, rename_attachment, and delete_attachment
 // (#220), which left that guide free to drift.
+test("an MCP transport change names the troubleshooting guide", async () => {
+  // The guide quotes the transport's status lines for a failed connection, so
+  // a change to the MCP routes or the library behind them can make it wrong.
+  const root = await fixture();
+  await write(root, "src/mcp/routes.rs", "// a new status answer\n");
+  await commit(root, "mcp transport");
+
+  const result = run(root);
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /How to troubleshoot common problems\.md/);
+});
+
 test("an attachment mutation change names the attachments guide too", async () => {
   const root = await fixture();
   await write(root, "src/vault/write/attachments.rs", "// move an asset\n");
@@ -450,6 +480,39 @@ test("test-only changes need no changelog entry", async () => {
   assert.doesNotMatch(result.stderr, /CHANGELOG/);
 });
 
+test("test-only changes name no surface and pass without acknowledgement", async () => {
+  const root = await fixture();
+  await write(root, "frontend/src/App.write-mode.test.tsx", "// a test\n");
+  await write(
+    root,
+    "frontend/src/features/settings/SettingsPage.test.tsx",
+    "// a test\n",
+  );
+  await write(root, "frontend/src/test/setup.ts", "// test setup\n");
+  await write(root, "src/mcp/tests.rs", "// a test\n");
+  await commit(root, "tests");
+
+  const result = run(root);
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /no user-facing surface changed/);
+});
+
+test("a test file beside a shipped Web UI file still names the Web UI notes", async () => {
+  const root = await fixture();
+  await write(root, "frontend/src/App.test.tsx", "// a test\n");
+  await write(root, "frontend/src/App.tsx", "// a change\n");
+  await commit(root, "ui");
+
+  const result = run(root);
+  assert.equal(result.status, 1);
+  assert.match(
+    result.stderr,
+    /Web UI \[web-ui\]\n {4}frontend\/src\/App\.tsx\n/,
+  );
+  assert.doesNotMatch(result.stderr, /App\.test\.tsx/);
+  assert.match(result.stderr, /Browse and review through the Web UI\.md/);
+});
+
 test("a bundled manual change names the MCP tools reference", async () => {
   const root = await fixture();
   await write(root, "src/docs_bundle.rs", "// a new page name rule\n");
@@ -477,15 +540,20 @@ test("a usage report change names its reference page", async () => {
 const DOCKER_HUB_OVERVIEW = "docs/maintenance/docker-hub/overview.md";
 const INSTALL_GUIDE =
   "docs/user-vault/01 Get started/Install Hatchdoor with Docker Compose.md";
+const DEPLOY_GUIDE =
+  "docs/user-vault/02 Guides/How to deploy Hatchdoor with an agent.md";
+const SMOKE_INSTALL_SCRIPT = "scripts/smoke-install.sh";
 
 async function deploymentFixture() {
   const root = await fixture();
   git(root, ["switch", "--quiet", "development"]);
   await write(root, "docker-compose.yml");
   await write(root, DOCKER_HUB_OVERVIEW);
+  await write(root, "README.md");
+  await write(root, SMOKE_INSTALL_SCRIPT);
   for (const note of [
     INSTALL_GUIDE,
-    "docs/user-vault/02 Guides/How to deploy Hatchdoor with an agent.md",
+    DEPLOY_GUIDE,
     "docs/user-vault/01 Get started/Understand where your data lives.md",
   ]) {
     await write(root, note);
@@ -537,6 +605,43 @@ test("reports the Docker Hub overview as edited when the branch changed it", asy
     result.stderr,
     /docker-hub\/overview\.md {2}\(edited on this branch\)/,
   );
+});
+
+// #569: the smoke script is a hand-written copy of the install steps, so a
+// change to either side names the other.
+test("a README edit names the smoke script", async () => {
+  const root = await deploymentFixture();
+  await write(root, "README.md", "# A new Quick Start step\n");
+  await commit(root, "reword the quick start");
+
+  const result = run(root);
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /\[install-smoke-script\]/);
+  assert.match(result.stderr, /scripts\/smoke-install\.sh {2}\(UNTOUCHED\)/);
+});
+
+test("a deploy guide edit names the smoke script", async () => {
+  const root = await deploymentFixture();
+  await write(root, DEPLOY_GUIDE, "# A new API step\n");
+  await addChangelogEntry(root);
+  await commit(root, "reword the deploy guide");
+
+  const result = run(root);
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /scripts\/smoke-install\.sh {2}\(UNTOUCHED\)/);
+});
+
+test("a smoke script edit names the README and both install guides", async () => {
+  const root = await deploymentFixture();
+  await write(root, SMOKE_INSTALL_SCRIPT, "# a new step\n");
+  await commit(root, "add a smoke step");
+
+  const result = run(root);
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /\[install-smoke-docs\]/);
+  assert.match(result.stderr, /README\.md {2}\(UNTOUCHED\)/);
+  assert.ok(result.stderr.includes(INSTALL_GUIDE));
+  assert.ok(result.stderr.includes(DEPLOY_GUIDE));
 });
 
 // The manual ships inside the binary (ADR-38), so editing a page changes

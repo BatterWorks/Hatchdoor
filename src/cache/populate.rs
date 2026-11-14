@@ -1,6 +1,5 @@
 use std::cell::Cell;
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::fs;
 use std::mem::MaybeUninit;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, mpsc};
@@ -15,7 +14,7 @@ use crate::cache::chunk_ops::{
 use crate::chunk::{ChunkOptions, NoteChunking, chunk_note};
 use crate::embed::Embedder;
 use crate::startup::IndexingProgressSnapshot;
-use crate::vault::{MARKER_FILE_NAME, NoteEntry, VaultIndex, normalize_title};
+use crate::vault::{MARKER_FILE_NAME, NoteEntry, VaultIndex};
 use crate::vault_registry::VaultId;
 
 use super::SqliteCache;
@@ -92,7 +91,8 @@ pub(crate) struct BuildHandles<'a> {
 /// The error a build returns when it stopped early for [`IndexYield`]. The
 /// caller tells it from a failure by asking [`IndexYield::yielded`], never
 /// by this text.
-const YIELDED: &str = "the build stopped early so another Vault could index";
+const YIELDED: &str =
+    "the build stopped early so another Vault could index, or its Vault is stopping";
 
 /// How a long Index turn takes turns with other Vaults (ADR-35 decision 3).
 ///
@@ -106,22 +106,34 @@ const YIELDED: &str = "the build stopped early so another Vault could index";
 ///
 /// Asking before a chunk rather than after one means a build that has just
 /// embedded its last chunk finishes instead of pausing with nothing left to
-/// do. A build that has embedded nothing yet never stops either, so two
-/// Vaults can never hand the slot back and forth without either of them
-/// getting anywhere.
+/// do. A build that has embedded nothing yet never stops for another Vault
+/// either, so two Vaults can never hand the slot back and forth without
+/// either of them getting anywhere.
+///
+/// The build also stops, before any chunk and with no slice to wait out,
+/// once `must_stop` says its Vault is being drained or the instance is
+/// shutting down (#640). Pause, a settings edit, disconnect and SIGTERM all
+/// wait for the running turn, and the saved progress makes stopping cheap:
+/// the next turn resumes from it.
 pub(crate) struct IndexYield {
     every: Duration,
     another_vault_waits: Box<dyn Fn() -> bool + Send>,
+    must_stop: Box<dyn Fn() -> bool + Send>,
     next_check: Cell<Duration>,
     embedded_any: Cell<bool>,
     yielded: Cell<bool>,
 }
 
 impl IndexYield {
-    pub(crate) fn new(every: Duration, another_vault_waits: Box<dyn Fn() -> bool + Send>) -> Self {
+    pub(crate) fn new(
+        every: Duration,
+        another_vault_waits: Box<dyn Fn() -> bool + Send>,
+        must_stop: Box<dyn Fn() -> bool + Send>,
+    ) -> Self {
         Self {
             every,
             another_vault_waits,
+            must_stop,
             next_check: Cell::new(every),
             embedded_any: Cell::new(false),
             yielded: Cell::new(false),
@@ -132,7 +144,8 @@ impl IndexYield {
         self.embedded_any.set(true);
     }
 
-    /// Whether the build stopped early for another Vault.
+    /// Whether the build stopped early, for another Vault or because its
+    /// own Vault is being drained or the instance is shutting down.
     pub(crate) fn yielded(&self) -> bool {
         self.yielded.get()
     }
@@ -140,6 +153,10 @@ impl IndexYield {
     /// Asked before each chunk with the time this build has spent embedding
     /// so far.
     fn should_stop(&self, embedding: Duration) -> bool {
+        if (self.must_stop)() {
+            self.yielded.set(true);
+            return true;
+        }
         if !self.embedded_any.get() || embedding < self.next_check.get() {
             return false;
         }
@@ -162,6 +179,12 @@ pub enum UpsertOutcome {
         content: String,
     },
     Unchanged,
+    /// The file is no longer a regular file: a FIFO, device or link swapped
+    /// in after the scan listed it. Its row, chunks and links were dropped,
+    /// so search stops serving text every exact read refuses (#672).
+    Dropped {
+        reason: String,
+    },
     /// The file could not be read as text: non-UTF-8 bytes, a permission
     /// change, or a delete racing the scan that listed it. Reported rather
     /// than returned as `Err` so one unreadable file cannot abort indexing
@@ -172,10 +195,22 @@ pub enum UpsertOutcome {
     },
 }
 
+/// Stands in for the content hash of a note over `MAX_NOTE_BYTES`, which is
+/// listed with no text (#670). No real hash takes this form, so the note
+/// reads as changed once it shrinks back under the bound, and as unchanged,
+/// without being read, on every turn it stays over it.
+const OVERSIZED_NOTE_HASH: &str = "oversized";
+
 /// Names the shape of the text a chunk row stores. Change it when that shape
-/// changes without the embedded text changing, so existing indexes are
-/// re-chunked once and keep their vectors.
-const CHUNK_STORED_TEXT_SHAPE: &str = "fence-markers";
+/// changes, or when chunking changes for notes whose content did not, so
+/// existing indexes are re-chunked once. A chunk whose embedding input is
+/// unchanged keeps its vector; the rest are embedded again. `native-fences`
+/// (#635): fences and headings follow the note's Section rule, and a stored
+/// fence keeps the note's own marker.
+const CHUNK_STORED_TEXT_SHAPE: &str = "native-fences";
+/// Reparse unchanged notes once after the BOM and bounded-YAML parser upgrade.
+/// Chunk hashes still reuse their vectors; this is not a model/schema change.
+const NOTE_METADATA_SHAPE: &str = "bounded-yaml-bom-v1";
 
 const FIRST_PROGRESS_LOG_AFTER: Duration = Duration::from_secs(10);
 const PROGRESS_LOG_INTERVAL: Duration = Duration::from_secs(60);
@@ -242,7 +277,10 @@ impl SqliteCache {
             .snapshot_model_epoch
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        // The refresh runs in one transaction whose rollback clears the
+        // connection's error, so report corruption from the returned message.
         self.replace_with_options_unlocked(index, embedder, handles, embed_layers, opts, None)
+            .inspect_err(|message| self.report_corruption(message))
     }
 
     /// Callers hold `snapshot_model_epoch`. `build_stamp` carries the metadata a
@@ -321,6 +359,8 @@ impl SqliteCache {
         // hash, so the pass re-chunks without re-embedding.
         let stored_text_changed =
             self.get_metadata("chunk_stored_text")?.as_deref() != Some(CHUNK_STORED_TEXT_SHAPE);
+        let note_metadata_changed =
+            self.get_metadata("note_metadata")?.as_deref() != Some(NOTE_METADATA_SHAPE);
 
         // Guard against silent promotion: if a `.hatchdoor-layer` marker present
         // at the last index has vanished (a sync tool dropped the dotfile), keep
@@ -417,6 +457,7 @@ impl SqliteCache {
         let mut chunks_reused: usize = 0;
         let mut per_note_failures: usize = 0;
         let mut unreadable_notes: usize = 0;
+        let mut dropped_notes: usize = 0;
         let mut last_unreadable_reason: Option<String> = None;
         let mut notes_changed: usize = 0;
         let mut notes_unchanged: usize = 0;
@@ -427,7 +468,10 @@ impl SqliteCache {
         // of the measured full-vault runtime, and retaining these results gives
         // the heartbeat an exact embedding-work denominator without chunking
         // notes twice.
-        let force_note_refresh = marker_set_changed || embed_layers_changed || stored_text_changed;
+        let force_note_refresh = marker_set_changed
+            || embed_layers_changed
+            || stored_text_changed
+            || note_metadata_changed;
         for entry in &entries {
             let note_sync_started = Instant::now();
             let upsert_outcome = upsert_note_if_changed(&tx, entry, now, force_note_refresh)?;
@@ -458,14 +502,24 @@ impl SqliteCache {
                     }
                 }
                 UpsertOutcome::Unchanged => notes_unchanged += 1,
+                UpsertOutcome::Dropped { reason } => {
+                    dropped_notes += 1;
+                    tracing::warn!(
+                        path = %entry.relative_path,
+                        reason = %reason,
+                        "Dropping a note that is no longer a regular file; the rest of the Vault still indexes"
+                    );
+                    last_unreadable_reason = Some(reason);
+                }
                 UpsertOutcome::Unreadable { reason } => {
                     per_note_failures += 1;
                     unreadable_notes += 1;
-                    last_unreadable_reason = Some(reason);
                     tracing::warn!(
                         path = %entry.relative_path,
+                        reason = %reason,
                         "Skipping unreadable note; the rest of the Vault still indexes"
                     );
+                    last_unreadable_reason = Some(reason);
                 }
             }
         }
@@ -483,11 +537,12 @@ impl SqliteCache {
         // good one. Losing every note the scan just listed is that case, so it
         // stays fatal and the prior snapshot is retained as stale. A Vault
         // that legitimately holds no notes has nothing to lose and succeeds.
-        if !entries.is_empty() && unreadable_notes == entries.len() {
+        // A note dropped for not being a regular file counts as lost here too.
+        if !entries.is_empty() && unreadable_notes + dropped_notes == entries.len() {
             return Err(format!(
                 "every note in the Vault became unreadable during indexing ({} of {}); \
                  the previous index is kept. Last error: {}",
-                unreadable_notes,
+                unreadable_notes + dropped_notes,
                 entries.len(),
                 last_unreadable_reason.unwrap_or_else(|| "unknown".to_string())
             ));
@@ -559,9 +614,10 @@ impl SqliteCache {
         progress
             .tokens_processed
             .store(resumed_tokens, Ordering::Relaxed);
-        progress
-            .notes_processed
-            .store(notes_unchanged + per_note_failures, Ordering::Relaxed);
+        progress.notes_processed.store(
+            notes_unchanged + per_note_failures + dropped_notes,
+            Ordering::Relaxed,
+        );
         progress
             .failures
             .store(per_note_failures, Ordering::Relaxed);
@@ -596,9 +652,7 @@ impl SqliteCache {
                     // Not this note's failure: the whole build is stopping,
                     // and the candidate it was filling is never published.
                     Err(error) if index_yield.is_some_and(IndexYield::yielded) => {
-                        tracing::info!(
-                            "Pausing embedding so another Vault can index; progress is saved"
-                        );
+                        tracing::info!("Pausing embedding; progress is saved");
                         return Err(error);
                     }
                     Err(error) => {
@@ -643,6 +697,7 @@ impl SqliteCache {
         set_metadata_in_transaction(&tx, "marker_set", &effective_markers_json)?;
         set_metadata_in_transaction(&tx, "embed_layers", embed_layers_value)?;
         set_metadata_in_transaction(&tx, "chunk_stored_text", CHUNK_STORED_TEXT_SHAPE)?;
+        set_metadata_in_transaction(&tx, "note_metadata", NOTE_METADATA_SHAPE)?;
         set_metadata_in_transaction(&tx, "layer_catalog", &layer_catalog_json)?;
         if let Some(stamp) = build_stamp {
             set_metadata_in_transaction(
@@ -731,6 +786,7 @@ impl SqliteCache {
                 started_at: Instant::now(),
             }),
         )
+        .inspect_err(|message| self.report_corruption(message))
     }
 }
 
@@ -1199,6 +1255,10 @@ struct CachedNoteState {
     slug: String,
     content_hash: String,
     snapshot: FileSnapshot,
+    /// The file path the row was written from. A rename that changes only
+    /// the extension's case, `Draft.md` to `Draft.MD`, keeps everything else
+    /// (#675).
+    absolute_path: String,
 }
 
 /// Every cached note as `(relative_path, slug)`. The pass needs both: the path
@@ -1224,7 +1284,7 @@ fn cached_note_state(
 ) -> Result<Option<CachedNoteState>, String> {
     tx.query_row(
         r#"
-        SELECT slug, content_hash, mtime_ns, size_bytes
+        SELECT slug, content_hash, mtime_ns, size_bytes, absolute_path
         FROM notes
         WHERE relative_path = ?1
         "#,
@@ -1237,6 +1297,7 @@ fn cached_note_state(
                     mtime_ns: row.get(2)?,
                     size_bytes: row.get(3)?,
                 },
+                absolute_path: row.get(4)?,
             })
         },
     )
@@ -1384,15 +1445,56 @@ fn upsert_note_if_changed(
     };
     let cached = cached_note_state(tx, &entry.relative_path)?;
 
-    let content = match fs::read_to_string(&entry.path) {
-        Ok(content) => content,
+    // Bounded and non-blocking (#670). A note over `MAX_NOTE_BYTES` is listed
+    // unread: it keeps its row, so the explorer still shows it, with no text,
+    // so nothing of it is chunked, embedded or left over from before it grew.
+    // One that became a FIFO or device after the scan loses its row unread,
+    // the way it would on the next scan, which no longer lists it (#672).
+    let (content, hash) = match crate::vault::read_note_text(&entry.path) {
+        Ok(content) => {
+            let hash = content_hash(&content);
+            (content, hash)
+        }
+        // Indexed lossily, the way `find_text` matches it, so the note stays in
+        // the tree, search, graph and totals rather than vanishing (#637).
+        Err(crate::vault::BoundedReadError::NotUtf8) => {
+            match crate::vault::read_bounded(&entry.path, crate::vault::MAX_NOTE_BYTES) {
+                Ok(bytes) => {
+                    tracing::warn!(
+                        path = %entry.relative_path,
+                        "Note is not valid UTF-8; indexing its text with the bad bytes replaced"
+                    );
+                    let content = String::from_utf8_lossy(&bytes).into_owned();
+                    let hash = content_hash(&content);
+                    (content, hash)
+                }
+                Err(error) => {
+                    return Ok(UpsertOutcome::Unreadable {
+                        reason: format!("failed reading note '{}': {error}", entry.path.display()),
+                    });
+                }
+            }
+        }
+        Err(error @ crate::vault::BoundedReadError::TooLarge { .. }) => {
+            tracing::warn!(
+                path = %entry.relative_path,
+                reason = %error,
+                "Note unreadable, too large to index; it stays listed without its text"
+            );
+            (String::new(), OVERSIZED_NOTE_HASH.to_string())
+        }
+        Err(error @ crate::vault::BoundedReadError::NotRegular) => {
+            delete_note_by_relative_path(tx, &entry.relative_path)?;
+            return Ok(UpsertOutcome::Dropped {
+                reason: format!("note '{}' is {error}", entry.path.display()),
+            });
+        }
         Err(error) => {
             return Ok(UpsertOutcome::Unreadable {
                 reason: format!("failed reading note '{}': {error}", entry.path.display()),
             });
         }
     };
-    let hash = content_hash(&content);
 
     // When the marker set changed, the note's `layer` may differ even though its
     // content, mtime and slug are identical. `layer` is only written on the full
@@ -1400,7 +1502,10 @@ fn upsert_note_if_changed(
     // be skipped to let the new classification land.
     if !force_layer_refresh {
         let cached_matches_file_and_content = cached.as_ref().is_some_and(|cached| {
-            cached.slug == entry.slug && cached.snapshot == snapshot && cached.content_hash == hash
+            cached.slug == entry.slug
+                && cached.snapshot == snapshot
+                && cached.content_hash == hash
+                && cached.absolute_path == entry.path.to_string_lossy()
         });
         if cached_matches_file_and_content {
             return Ok(UpsertOutcome::Unchanged);
@@ -1429,28 +1534,22 @@ fn update_note_file_metadata(
     snapshot: FileSnapshot,
     indexed_at: i64,
 ) -> Result<(), String> {
-    let normalized_title = normalize_title(&entry.title);
-    let normalized_relative_path = normalize_title(&entry.relative_path);
     let absolute_path = entry.path.to_string_lossy().to_string();
     tx.execute(
         r#"
         UPDATE notes
         SET title = ?2,
-            normalized_title = ?3,
-            slug = ?4,
-            normalized_relative_path = ?5,
-            absolute_path = ?6,
-            mtime_ns = ?7,
-            size_bytes = ?8,
-            indexed_at = ?9
+            slug = ?3,
+            absolute_path = ?4,
+            mtime_ns = ?5,
+            size_bytes = ?6,
+            indexed_at = ?7
         WHERE relative_path = ?1
         "#,
         params![
             &entry.relative_path,
             &entry.title,
-            &normalized_title,
             &entry.slug,
-            &normalized_relative_path,
             &absolute_path,
             snapshot.mtime_ns,
             snapshot.size_bytes,
@@ -1504,8 +1603,6 @@ fn upsert_note_content(
     indexed_at: i64,
 ) -> Result<(), String> {
     let absolute_path = entry.path.to_string_lossy().to_string();
-    let normalized_title = normalize_title(&entry.title);
-    let normalized_relative_path = normalize_title(&entry.relative_path);
     let frontmatter = parse_frontmatter_metadata(content).unwrap_or_else(|error| {
         tracing::warn!(slug = %entry.slug, error = %error, "Ignoring malformed YAML frontmatter");
         Default::default()
@@ -1524,9 +1621,7 @@ fn upsert_note_content(
         INSERT INTO notes(
             slug,
             title,
-            normalized_title,
             relative_path,
-            normalized_relative_path,
             absolute_path,
             content,
             content_hash,
@@ -1537,12 +1632,10 @@ fn upsert_note_content(
             size_bytes,
             indexed_at
         )
-        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
         ON CONFLICT(relative_path) DO UPDATE SET
             slug = excluded.slug,
             title = excluded.title,
-            normalized_title = excluded.normalized_title,
-            normalized_relative_path = excluded.normalized_relative_path,
             absolute_path = excluded.absolute_path,
             content = excluded.content,
             content_hash = excluded.content_hash,
@@ -1556,9 +1649,7 @@ fn upsert_note_content(
         params![
             &entry.slug,
             &entry.title,
-            &normalized_title,
             &entry.relative_path,
-            &normalized_relative_path,
             &absolute_path,
             content,
             hash,
@@ -1634,13 +1725,19 @@ fn rebuild_links(
     tx.execute("DELETE FROM note_links", [])
         .map_err(|error| format!("failed clearing cached note links: {error}"))?;
 
+    // A listed note can have no row: one skipped unreadable on its first
+    // turn, or one dropped because it stopped being a regular file (#672).
+    // A link to or from it is left out rather than failing the whole turn
+    // on the foreign key.
     for entry in entries {
         if let Some(links) = index.note_links(&entry.slug) {
             for link in links.outgoing {
                 tx.execute(
                     r#"
                     INSERT OR IGNORE INTO note_links(source_slug, target_slug)
-                    VALUES (?1, ?2)
+                    SELECT ?1, ?2
+                    WHERE EXISTS (SELECT 1 FROM notes WHERE slug = ?1)
+                      AND EXISTS (SELECT 1 FROM notes WHERE slug = ?2)
                     "#,
                     params![&entry.slug, &link.slug],
                 )
@@ -2486,6 +2583,41 @@ mod tests {
         .expect("query slug")
     }
 
+    /// Renaming `Draft.md` to `Draft.MD` keeps its relative path, slug,
+    /// content and modification time, so only the stored file path says the
+    /// extension changed; snapshot rows read the extension from it (#675).
+    #[test]
+    fn a_rename_that_only_changes_the_extension_case_updates_the_file_path() {
+        let dir = tempdir().expect("temp dir");
+        std::fs::write(dir.path().join("Draft.md"), "# Draft\n\nbody").expect("note");
+        let cache = SqliteCache::in_memory(384).expect("cache");
+        let embedder = StubEmbedder::new(384);
+        cache
+            .replace_from_index_with_embedder(
+                &VaultIndex::build(dir.path()).expect("index"),
+                &embedder,
+            )
+            .expect("first populate");
+
+        std::fs::rename(dir.path().join("Draft.md"), dir.path().join("Draft.MD")).expect("rename");
+        cache
+            .replace_from_index_with_embedder(
+                &VaultIndex::build(dir.path()).expect("reindex"),
+                &embedder,
+            )
+            .expect("second populate");
+
+        let conn = cache.connection().expect("connection");
+        let stored: String = conn
+            .query_row(
+                "SELECT absolute_path FROM notes WHERE relative_path = 'Draft'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("row");
+        assert!(stored.ends_with("Draft.MD"), "{stored}");
+    }
+
     /// A slug comes from a note's filename alone, so `Archive/Overview.md` and
     /// `Projects/Overview.md` both want `overview`, and the index build hands it
     /// to whichever path sorts first. The loser's cached row still holds that
@@ -2611,6 +2743,182 @@ mod tests {
             Some("overview-2"),
             "and returns on the first pass that can read it, under its new slug"
         );
+    }
+
+    /// Indexes `dir` with `make_unreadable` run between the scan and the
+    /// populate, and returns the captured log lines.
+    fn index_with_one_unreadable_note(
+        dir: &std::path::Path,
+        make_unreadable: impl FnOnce(&std::path::Path),
+    ) -> (SqliteCache, Vec<String>) {
+        std::fs::write(dir.join("Home.md"), "# Home\n\nhome body").expect("note");
+        std::fs::write(dir.join("Other.md"), "# Other\n\nother body").expect("note");
+        std::fs::write(dir.join("Odd.md"), "# Odd\n\nplaceholder").expect("note");
+        let index = VaultIndex::build(dir).expect("index");
+        make_unreadable(&dir.join("Odd.md"));
+        let cache = SqliteCache::in_memory(384).expect("cache");
+        let logs = crate::config::log_capture::CapturedLogs::default();
+        tracing::dispatcher::with_default(&logs.dispatch(tracing::Level::WARN), || {
+            cache
+                .replace_from_index_with_embedder(&index, &StubEmbedder::new(384))
+                .expect("one unreadable note must not fail the turn");
+        });
+        (cache, logs.lines())
+    }
+
+    fn assert_only_odd_skipped(cache: &SqliteCache, lines: &[String], reason: &str) {
+        assert_eq!(cached_slug_for_path(cache, "Odd"), None);
+        assert_eq!(cached_slug_for_path(cache, "Home").as_deref(), Some("home"));
+        assert_eq!(
+            cached_slug_for_path(cache, "Other").as_deref(),
+            Some("other")
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("Odd.md") && line.contains(reason)),
+            "the turn logs the note and why it skipped it: {lines:#?}"
+        );
+    }
+
+    /// A note over `MAX_NOTE_BYTES` is listed without being read, so one huge
+    /// file cannot drive the server out of memory and still shows in the
+    /// explorer (#670). The file is sparse,
+    /// so the test costs no disk.
+    #[test]
+    fn an_oversized_note_is_listed_unread_and_the_rest_index() {
+        let dir = tempdir().expect("temp dir");
+        let (cache, lines) = index_with_one_unreadable_note(dir.path(), |path| {
+            crate::vault::grow_past_note_bound(path);
+        });
+        assert_eq!(cached_slug_for_path(&cache, "Odd").as_deref(), Some("odd"));
+        assert_eq!(chunk_count(&cache, "odd"), 0);
+        assert_eq!(
+            cached_slug_for_path(&cache, "Home").as_deref(),
+            Some("home")
+        );
+        assert!(
+            lines.iter().any(|line| line.contains("path=Odd")
+                && line.contains(&format!(
+                    "larger than {} bytes",
+                    crate::vault::MAX_NOTE_BYTES
+                ))),
+            "the turn logs the note and why it left its text out: {lines:#?}"
+        );
+    }
+
+    /// A note indexed before it grew past the bound loses its chunks, rather
+    /// than serving its old text in search while exact reads refuse it, and
+    /// gets them back once it shrinks (#670).
+    #[test]
+    fn a_note_that_grew_past_the_bound_drops_its_old_chunks() {
+        let dir = tempdir().expect("temp dir");
+        let note = dir.path().join("Odd.md");
+        std::fs::write(&note, "# Odd\n\nodd body").expect("note");
+        std::fs::write(dir.path().join("Home.md"), "# Home\n\nhome body").expect("note");
+        let cache = SqliteCache::in_memory(384).expect("cache");
+        let embedder = StubEmbedder::new(384);
+        let reindex = || {
+            cache
+                .replace_from_index_with_embedder(
+                    &VaultIndex::build(dir.path()).expect("index"),
+                    &embedder,
+                )
+                .expect("populate");
+        };
+        reindex();
+        assert!(chunk_count(&cache, "odd") > 0);
+
+        crate::vault::grow_past_note_bound(&note);
+        reindex();
+        assert_eq!(cached_slug_for_path(&cache, "Odd").as_deref(), Some("odd"));
+        assert_eq!(chunk_count(&cache, "odd"), 0);
+        reindex();
+        assert_eq!(
+            chunk_count(&cache, "odd"),
+            0,
+            "a second turn changes nothing"
+        );
+
+        std::fs::write(&note, "# Odd\n\nodd body").expect("shrink the note");
+        reindex();
+        assert!(chunk_count(&cache, "odd") > 0);
+    }
+
+    fn chunk_count(cache: &SqliteCache, slug: &str) -> i64 {
+        cache
+            .connection()
+            .expect("connection")
+            .query_row(
+                "SELECT COUNT(*) FROM chunks WHERE note_slug = ?1",
+                params![slug],
+                |row| row.get(0),
+            )
+            .expect("count chunks")
+    }
+
+    /// A note replaced by a FIFO after the scan is skipped without blocking
+    /// the turn on a writer that never comes (#670).
+    #[cfg(unix)]
+    #[test]
+    fn a_note_that_became_a_fifo_is_skipped_without_blocking() {
+        let dir = tempdir().expect("temp dir");
+        let (cache, lines) = index_with_one_unreadable_note(dir.path(), |path| {
+            std::fs::remove_file(path).expect("remove");
+            crate::vault::make_fifo(path);
+        });
+        assert_only_odd_skipped(&cache, &lines, "not a regular file");
+    }
+
+    /// A note indexed as text and then swapped for a FIFO after a turn's scan
+    /// listed it loses its row, chunks and search text in that turn, rather
+    /// than search serving the old text that every exact read refuses (#672).
+    #[cfg(unix)]
+    #[test]
+    fn a_note_that_became_a_fifo_after_indexing_drops_its_old_text() {
+        let dir = tempdir().expect("temp dir");
+        let note = dir.path().join("Odd.md");
+        // Linked both ways, so the dropped row is a link source and target.
+        std::fs::write(&note, "# Odd\n\nzanzibarquux body [[Home]]").expect("note");
+        std::fs::write(dir.path().join("Home.md"), "# Home\n\nhome body [[Odd]]").expect("note");
+        let cache = SqliteCache::in_memory(384).expect("cache");
+        let embedder = StubEmbedder::new(384);
+        cache
+            .replace_from_index_with_embedder(
+                &VaultIndex::build(dir.path()).expect("index"),
+                &embedder,
+            )
+            .expect("first populate");
+        assert!(chunk_count(&cache, "odd") > 0);
+        assert_eq!(fts_matches(&cache, "zanzibarquux"), 1);
+
+        // The scan lists the note as a file, then it becomes a FIFO.
+        let index = VaultIndex::build(dir.path()).expect("index");
+        std::fs::remove_file(&note).expect("remove");
+        crate::vault::make_fifo(&note);
+        cache
+            .replace_from_index_with_embedder(&index, &embedder)
+            .expect("one dropped note must not fail the turn");
+
+        assert_eq!(cached_slug_for_path(&cache, "Odd"), None);
+        assert_eq!(chunk_count(&cache, "odd"), 0);
+        assert_eq!(fts_matches(&cache, "zanzibarquux"), 0);
+        assert_eq!(
+            cached_slug_for_path(&cache, "Home").as_deref(),
+            Some("home")
+        );
+    }
+
+    fn fts_matches(cache: &SqliteCache, word: &str) -> i64 {
+        cache
+            .connection()
+            .expect("connection")
+            .query_row(
+                "SELECT COUNT(*) FROM note_fts WHERE note_fts MATCH ?1",
+                params![word],
+                |row| row.get(0),
+            )
+            .expect("count FTS matches")
     }
 
     /// Reads the `layer` column for a note by slug directly from the notes table.
@@ -2802,7 +3110,7 @@ mod tests {
     fn refresh_updates_content_even_when_cached_file_snapshot_matches() {
         let dir = tempdir().expect("temp dir");
         let note_path = dir.path().join("Home.md");
-        fs::write(&note_path, "# Home\nalpha token").expect("write original note");
+        std::fs::write(&note_path, "# Home\nalpha token").expect("write original note");
 
         let cache = SqliteCache::in_memory(384).expect("sqlite cache");
         let embedder: Arc<dyn Embedder> = Arc::new(StubEmbedder::new(384));
@@ -2811,7 +3119,7 @@ mod tests {
             .replace_from_index_with_embedder(&index, embedder.as_ref())
             .expect("initial populate");
 
-        fs::write(&note_path, "# Home\nbravo token").expect("write changed note");
+        std::fs::write(&note_path, "# Home\nbravo token").expect("write changed note");
         let snapshot = file_snapshot(&note_path).expect("file snapshot");
         {
             let conn = cache.connection().expect("connection");
@@ -3169,6 +3477,49 @@ mod chunk_integration_tests {
     }
 
     #[test]
+    fn old_metadata_is_reparsed_without_reembedding_unchanged_notes() {
+        let dir = make_vault(&[(
+            "bom.md",
+            "\u{feff}---\ntags: [bomtag]\nstatus: current\n---\n# Body\nword",
+        )]);
+        let cache = SqliteCache::in_memory(384).unwrap();
+        let index = VaultIndex::build(dir.path()).unwrap();
+        let embedder = RecordingEmbedder::new(384);
+        cache
+            .replace_from_index_with_embedder(&index, &embedder)
+            .unwrap();
+        let embedded = embedder.recorded().len();
+        {
+            let conn = cache.connection().unwrap();
+            conn.execute_batch(
+                "DELETE FROM metadata WHERE key='note_metadata'; DELETE FROM tags;
+                UPDATE notes SET frontmatter_json='{}';",
+            )
+            .unwrap();
+        }
+        cache
+            .replace_from_index_with_embedder(&index, &embedder)
+            .unwrap();
+        let metadata = cache
+            .read_note_by_slug("bom")
+            .unwrap()
+            .unwrap()
+            .metadata
+            .unwrap();
+        assert_eq!(metadata.tags, ["bomtag"]);
+        assert_eq!(metadata.properties["status"], "current");
+        assert_eq!(
+            embedder.recorded().len(),
+            embedded,
+            "reuse every unchanged vector"
+        );
+        cache
+            .replace_from_index_with_embedder(&index, &embedder)
+            .unwrap();
+        assert_eq!(embedder.recorded().len(), embedded);
+    }
+
+    #[test]
     fn an_index_from_before_fence_markers_is_rewritten_without_re_embedding() {
         let dir = make_vault(&[("atlas.md", FENCED_NOTE)]);
         let cache = SqliteCache::in_memory(384).expect("open");
@@ -3273,12 +3624,17 @@ mod chunk_integration_tests {
     }
 
     #[test]
-    fn non_utf8_note_is_skipped_without_failing_the_vault() {
+    fn non_utf8_note_is_indexed_lossily_without_failing_the_vault() {
         // A single unreadable file used to abort the whole indexing turn, so a
-        // Vault holding one binary `.md` had no search index at all.
+        // Vault holding one binary `.md` had no search index at all. Skipping
+        // it then hid it from every listing while `find_text` reported nothing
+        // unread, so it is now indexed with its bad bytes replaced (#637).
         let dir = make_vault(&[("a.md", "# A\n\nbody A"), ("b.md", "# B\n\nbody B")]);
-        std::fs::write(dir.path().join("binary.md"), [0xff_u8, 0xfe, 0x00, 0x9c])
-            .expect("write binary note");
+        std::fs::write(
+            dir.path().join("binary.md"),
+            b"# Binary\n\nlone continuation byte \x80 here\n",
+        )
+        .expect("write binary note");
 
         let cache = SqliteCache::in_memory(384).expect("open");
         let embedder: Arc<dyn Embedder> = Arc::new(StubEmbedder::new(384));
@@ -3292,7 +3648,15 @@ mod chunk_integration_tests {
         let note_count: i64 = conn
             .query_row("SELECT COUNT(*) FROM notes", [], |r| r.get(0))
             .expect("count");
-        assert_eq!(note_count, 2, "the two readable notes still index");
+        assert_eq!(note_count, 3, "every note is listed, the odd one included");
+        let binary_chunks: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM chunks WHERE note_slug = 'binary'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("count chunks");
+        assert!(binary_chunks > 0, "its text is searchable");
     }
 
     #[test]
@@ -3577,7 +3941,7 @@ mod chunk_integration_tests {
         });
 
         let lines = logs.lines();
-        for message in ["Per-note embedding failed", "Skipping unreadable note"] {
+        for message in ["Per-note embedding failed", "Note is not valid UTF-8"] {
             assert!(
                 lines
                     .iter()
@@ -3935,8 +4299,21 @@ mod index_yield_tests {
     use super::IndexYield;
 
     fn yield_point(every: Duration) -> (IndexYield, Arc<AtomicBool>, Arc<AtomicUsize>) {
+        let (index_yield, waiting, asked, _) = yield_point_with_stop(every);
+        (index_yield, waiting, asked)
+    }
+
+    fn yield_point_with_stop(
+        every: Duration,
+    ) -> (
+        IndexYield,
+        Arc<AtomicBool>,
+        Arc<AtomicUsize>,
+        Arc<AtomicBool>,
+    ) {
         let waiting = Arc::new(AtomicBool::new(false));
         let asked = Arc::new(AtomicUsize::new(0));
+        let stopping = Arc::new(AtomicBool::new(false));
         let index_yield = IndexYield::new(
             every,
             Box::new({
@@ -3947,8 +4324,29 @@ mod index_yield_tests {
                     waiting.load(Ordering::SeqCst)
                 }
             }),
+            Box::new({
+                let stopping = stopping.clone();
+                move || stopping.load(Ordering::SeqCst)
+            }),
         );
-        (index_yield, waiting, asked)
+        (index_yield, waiting, asked, stopping)
+    }
+
+    /// A drained Vault or a shutting-down instance stops the build at the
+    /// next chunk, with no slice to wait out and whether or not it has
+    /// embedded anything yet (#640).
+    #[test]
+    fn a_stopping_vault_stops_at_the_next_chunk_without_waiting_for_the_slice() {
+        let (index_yield, _, asked, stopping) = yield_point_with_stop(Duration::from_secs(300));
+        assert!(!index_yield.should_stop(Duration::from_secs(1)));
+        stopping.store(true, Ordering::SeqCst);
+        assert!(index_yield.should_stop(Duration::from_secs(1)));
+        assert!(index_yield.yielded());
+        assert_eq!(
+            asked.load(Ordering::SeqCst),
+            0,
+            "stopping does not depend on another Vault waiting"
+        );
     }
 
     /// The queue is asked once per slice of embedding time, not at every

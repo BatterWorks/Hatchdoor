@@ -13,7 +13,7 @@
 //
 // Everything the public repository cannot know about, the build machines,
 // the registries and the servers, sits behind the hook named by
-// `HATCHDOOR_RELEASE_HOOK`, called as `<hook> images <version>` and
+// `HATCHDOOR_RELEASE_HOOK` (from the environment or `.release.env`), called as `<hook> images <version>` and
 // `<hook> deploy <version>` (decision 7). Each hook step is safe to re-run.
 //
 // Every run works out where the release stands from git and GitHub, so a
@@ -37,6 +37,7 @@ import {
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { devSetting } from "./dev-common.mjs";
 import {
   hasEntries,
   parseChecklist,
@@ -53,6 +54,10 @@ const REMOTE = "origin";
 const DEVELOPMENT = "development";
 const MAIN = "main";
 const HOOK_VARIABLE = "HATCHDOOR_RELEASE_HOOK";
+// The maintainer's local release settings: `KEY=value` lines, git-ignored,
+// so the hook's path is set once on the machine that releases and never
+// enters the repository. The environment wins over it.
+const LOCAL_SETTINGS = ".release.env";
 
 class Refusal extends Error {}
 
@@ -93,16 +98,16 @@ function short(sha) {
 // Step 1: checks
 
 // Checked on every run, since every run after the merge still calls the hook.
-// A bare name is not looked up on PATH: the variable must name the file.
+// A bare name is not looked up on PATH: the setting must name the file.
 function requireHook() {
-  const value = process.env[HOOK_VARIABLE] ?? "";
+  const value = devSetting(HOOK_VARIABLE, repositoryRoot, LOCAL_SETTINGS);
   if (value === "") {
     refuse(
       "release hook",
-      `${HOOK_VARIABLE} is not set. Point it at the executable that runs \`<hook> images <version>\` and \`<hook> deploy <version>\`.`,
+      `${HOOK_VARIABLE} is not set. Set it in ${LOCAL_SETTINGS} at the repository root, as \`${HOOK_VARIABLE}=/path/to/hook\`, or export it. It names the executable that runs \`<hook> images <version>\` and \`<hook> deploy <version>\`.`,
     );
   }
-  const hook = path.resolve(value);
+  const hook = path.resolve(repositoryRoot, value);
   try {
     if (!statSync(hook).isFile()) {
       throw new Error("not a file");

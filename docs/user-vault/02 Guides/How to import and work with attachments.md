@@ -12,7 +12,7 @@ Three lists of file types apply, and people often mix them up:
 | --- | --- | --- |
 | What may be **uploaded** | `png`, `jpg`, `jpeg`, `gif`, `webp`, `avif`, `bmp`, `pdf` | Hatchdoor's rule for what may enter a Vault through it. |
 | What Hatchdoor will **manage** once present | anything that is not Markdown | A Vault is a plain folder you also edit in Obsidian and sync with Git, so it holds video, audio, data and archives whatever Hatchdoor accepts as an upload. Those files are yours, and Hatchdoor can list, move, rename and delete them. |
-| What Hatchdoor will **fetch or display** | `png`, `jpg`, `jpeg`, `gif`, `webp`, `svg`, `avif`, `bmp`, `pdf` | What the Web UI can render and `get_attachment` can hand back. |
+| What Hatchdoor will **fetch or display** | `png`, `jpg`, `jpeg`, `gif`, `webp`, `svg`, `avif`, `bmp`, `pdf`, `canvas` | What the Web UI can render and `get_attachment` can hand back. A `canvas`, Obsidian's whiteboard, is the exception: it is listed in the explorer and downloaded, not drawn. |
 
 So a `.mp4` screen recording already in your Vault can be listed, moved, renamed and deleted, and it moves with its note. It cannot be uploaded through Hatchdoor, and `get_attachment` refuses to return it. Open it from the filesystem or in Obsidian.
 
@@ -24,7 +24,7 @@ Every upload, from the browser or an agent, is held to the same file types and t
 | --- | --- | --- |
 | Extensions | `png`, `jpg`, `jpeg`, `gif`, `webp`, `avif`, `bmp`, `pdf` | |
 | HTTP upload (Web UI, upload links, and agents holding a token) | | `HATCHDOOR_MAX_ATTACHMENT_BYTES`, 10 MiB |
-| Agent downloads (download links and `get_attachment` base64), and the MCP base64 upload fallback `import_attachment` | | `HATCHDOOR_MCP_MAX_BASE64_BYTES`, 5 MiB decoded |
+| Agent downloads (download links and `get_attachment` base64), and the MCP base64 upload fallback `import_attachment` | | `HATCHDOOR_MCP_MAX_BASE64_BYTES`, 5 MiB decoded; the base64 tools stop at about 5.95 MiB even when it is set higher |
 
 You can change both limits in **Settings → Uploads** without a restart. See [[Settings and environment variables reference]].
 
@@ -75,7 +75,7 @@ To re-import over a note that already exists, pass `overwrite: true` and `expect
 | `encoding` | Returns | When to use it |
 | --- | --- | --- |
 | `url` (default) | `content.download_url`, a download link, and `content.expires_at` | The default. The link is a full address that carries its own credential, so fetch it as it is, for example `curl -o manual.pdf '<download_url>'`, with no token. It works for that one file, any number of times, for five minutes. Call `get_attachment` again for a new one. It is held to the same size ceiling and rate quota as the base64 path (see [[The security model]]). |
-| `base64` | `content.content`, the bytes inline | The fallback, for a client that cannot make an HTTP request outside MCP. Limited by the same `HATCHDOOR_MCP_MAX_BASE64_BYTES` as `import_attachment`. A file over it is refused with its measured size, never cut short. |
+| `base64` | `content.content`, the bytes inline | The fallback, for a client that cannot make an HTTP request outside MCP. Limited by the same `HATCHDOOR_MCP_MAX_BASE64_BYTES` as `import_attachment`, and never above about 5.95 MiB, what one reply can carry. A file over it is refused with its measured size, never cut short. |
 
 `get_attachment` is a read. It works whenever MCP is on, with write mode on or off.
 
@@ -93,9 +93,17 @@ These tools act on bytes the Vault already stores, so the upload list does not a
 | `rename_attachment` | Renames the file where it is and rewrites every reference. | Required |
 | `delete_attachment` | Trashes the file under `.hatchdoor-trash` and rewrites every reference, the way `delete_note` trashes a note (see [[MCP tools reference#Write content tools]]), so you can get the file back from disk. | Required |
 
+Moving or renaming an attachment also updates every Obsidian canvas card that shows it; see [[Supported Markdown reference#Obsidian syntax Hatchdoor does not handle]] for what Hatchdoor does with a canvas.
+
 Reference rewriting goes by the file extension, so a link to a file with no extension is left as written when that file moves. Rename the file to carry an extension if you want its links to follow it.
 
 A note that is not valid UTF-8 text, such as a Latin-1 export from an older tool, cannot have its references rewritten without damaging the bytes that are not text. If one references the attachment you move, rename or delete, the call is refused with `link_rewrite_unsupported` and nothing is written; the message names each such note. Re-save those notes as UTF-8 and try again.
+
+### When the note moves or is deleted
+
+Moving, archiving or deleting a note, in the Web UI or through an agent, takes along the attachments kept in that note's own folder or a subfolder of it. An attachment kept anywhere else, such as a shared `Attachments/` folder, stays where it is, and only the moved note's link to it is rewritten so it still opens.
+
+A note at the top of the Vault has no folder of its own, so there the rule is different: an attachment goes with it only when no other note uses it. If any other note shows or links to that attachment, whether by its path, by name alone as in `![[image.png]]`, or with a Markdown link, the attachment stays where it is and that other note is not touched. A rename leaves the note where it is, so nothing moves.
 
 The three mutating tools need `HATCHDOOR_MCP_WRITE_ENABLED` and the same Vault-level `mutate` capability as any other write; see [[MCP tools reference#Write content tools]] for full parameters. To move, rename, or delete several attachments in one round trip, put them in a `batch` call (see [[MCP tools reference#Batch]]); one item can fail while the others succeed, so read each item's `ok`.
 

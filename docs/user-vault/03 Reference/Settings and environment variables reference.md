@@ -15,7 +15,7 @@ Compose reads these on the host, and Hatchdoor never sees them. They decide whic
 | `HOST_VAULT_PATH` | `./vault` | `/data/vault` | Markdown notes and attachments |
 | `HOST_CACHE_PATH` | `./data/cache` | `/data/cache` | SQLite search cache and `settings.json` |
 | `HOST_STATE_PATH` | `./data/state` | `/data/state` | The Vault registry (`vaults.json`), any stored Git credentials, each Vault's Git poll schedule (`vault-runtime.json`), which Hatchdoor version ran before this one, which agent last connected and, with the usage report on, its install ID and when the last report was sent (`instance.json`) |
-| `HOST_MODELS_PATH` | `./models` | `/models` | Downloaded embedding model and the Gemma-terms acceptance record |
+| `HOST_MODELS_PATH` | `./models` | `/models` | Downloaded embedding model and the Gemma-terms acceptance record. Hatchdoor always keeps its models here and ignores `HF_HOME`. |
 
 See [[Understand where your data lives]] for what to back up.
 
@@ -37,7 +37,7 @@ Hatchdoor reads these once, when it starts. The Compose file already sets most o
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `HATCHDOOR_WEB_BEARER_TOKEN` | unset | Protects the browser and the HTTP API. Required whenever `HOST` is not a loopback address. A Docker first run without it prints a newly generated token to the logs and refuses to start. See [[The security model]] and [[How to troubleshoot common problems]]. |
+| `HATCHDOOR_WEB_BEARER_TOKEN` | unset | Protects the browser and the HTTP API. Required whenever `HOST` is not a loopback address. A Docker first run without it saves a newly generated token in `new-web-token.env` in the state folder and refuses to start. Without it on a loopback address, Hatchdoor answers only requests addressed to this computer or to `HATCHDOOR_PUBLIC_URL`, and refuses changes sent from other websites. See [[The security model]] and [[How to troubleshoot common problems]]. |
 | `HATCHDOOR_DEMO_MODE` | `false` | Turns the instance into a public, read-only demo: Settings and model setup are removed, Vault reads become public, and writes are refused. A link to a demo page shared in a chat app shows a preview with the page's title and a short description; set `HATCHDOOR_PUBLIC_URL` for the preview to include a picture. Hatchdoor refuses to start with this and `HATCHDOOR_MCP_ENABLED=true` both set. |
 
 ## Live settings
@@ -51,16 +51,26 @@ These live in `settings.json`. Leave them out of `.env` to manage them from **Se
 | `HATCHDOOR_ARCHIVE_PREFIX` | `90-archive/` | instant | The instance-wide default archive folder `archive_note` moves a note into, when a Vault doesn't override it with its own `archive_folder`. |
 | `HATCHDOOR_EMBED_LAYERS` | `true` | reindex | Whether notes on a demoted [[The layer system\|layer]] can be found by meaning. Off, they are still found by exact words, and the index is smaller and faster to build. Changing it rebuilds every Vault that's turned on, one at a time. |
 
+**Layout**
+
+| Key | Default | Class | Purpose |
+| --- | --- | --- | --- |
+| `HATCHDOOR_SIDEBAR_CHANGED_ON_DISK` | `true` | instant | Shown in Settings as **Show Changed on disk**. Off removes the **Changed on disk** list from the sidebar, the phone's drawer and Home, for everyone. Hatchdoor keeps noticing changes, so turning it back on shows them all, folded or unfolded as each browser last left it. |
+| `HATCHDOOR_SIDEBAR_RECENTLY_VIEWED` | `true` | instant | Shown in Settings as **Show Recently viewed**. Off removes the **Recently viewed** list from the sidebar, the phone's drawer and Home, for everyone. Each browser keeps its own list underneath, so turning it back on shows it as it was. |
+| `HATCHDOOR_NOTE_WIDTH` | `default` | instant | Shown in Settings as **Note width**. How wide a note's text may run in the Reading view and the editor, for everyone: `default` keeps about 80 characters a line, `wide` about 100, and `full` uses the whole pane. Each is an upper limit, so on a screen narrower than it all three look the same. **Source** keeps its own wider column unless this is `full`. Wide tables and code blocks still scroll sideways. The manual in the Help panel always reads at the default width. A browser picks up a change the next time it draws a note, with no reload. |
+
+A public demo (`HATCHDOOR_DEMO_MODE=true`) has no Settings, so it always shows both lists and the default note width, whatever these settings say.
+
 **Agent access (MCP)**
 
 | Key | Default | Class | Purpose |
 | --- | --- | --- | --- |
 | `HATCHDOOR_MCP_ENABLED` | `false` | instant | Turns `/mcp` on or off. Off, the endpoint returns `404`, as if it did not exist. |
 | `HATCHDOOR_MCP_WRITE_ENABLED` | `false` | instant | Allows the MCP tools that change notes or Vaults. With MCP on and this off, an agent can only read. Changing it changes which tools Hatchdoor lists, and connected agents are told to refresh their tool list without reconnecting. |
-| `HATCHDOOR_MCP_RATE_LIMITS_ENABLED` | `true` | instant | Limits on `/mcp`: at most 120 tool calls per minute per token and eight tool calls running at once, two of them searches. A request over a limit is answered `429` with `Retry-After`. Each `search_notes` item inside a `batch` counts as one call. Protocol, discovery and list requests never count. Off removes the limits. |
+| `HATCHDOOR_MCP_RATE_LIMITS_ENABLED` | `true` | instant | Limits on `/mcp`: at most 120 tool calls per minute per token and eight tool calls running at once, two of them searches. A request over a limit is answered `429` with `Retry-After`. Each `search_notes` item inside a `batch` counts as one call. Protocol, discovery and list requests never count. On the older `2025-11-25` revision, opening a session is limited too: 60 handshakes a minute and 32 open sessions per MCP password. Off removes the limits. |
 | `HATCHDOOR_MCP_BEARER_TOKEN` | unset | instant | The MCP password, required even for read-only access (see [[The security model]]). With `HATCHDOOR_MCP_ENABLED=true` in `.env` and no password, Hatchdoor refuses to start. |
-| `HATCHDOOR_MCP_ALLOWED_ORIGINS` | `http://127.0.0.1,http://localhost` | instant | The origins allowed to call MCP, checked on every request as a defence against DNS-rebinding attacks. It matters to a browser-based MCP client and rarely to a command-line agent. |
-| `HATCHDOOR_PUBLIC_URL` | unset | instant | The address people and agents reach this server at, such as `https://notes.example.com`, shown in Settings as **Public address**. Transfer links, which let an agent download or upload a file with no token, are built on it (see [[The security model#Transfer links]]). When set it always wins. Unset, links use the address the agent reached the server on, as a proxy reports it in `Forwarded` or `X-Forwarded-Proto`/`X-Forwarded-Host`, else the request's own `http://` and `Host`. Set it when a proxy sends none of those headers or serves Hatchdoor under a path. On a public demo (`HATCHDOOR_DEMO_MODE=true`) it is also what makes the link preview picture appear: a shared link gets its picture and its own address only when this is set, because Hatchdoor never takes that address from the request (see [[The security model#Demo mode's narrower rule]]). It must be an absolute `http://` or `https://` address without a query. A trailing slash is dropped. |
+| `HATCHDOOR_MCP_ALLOWED_ORIGINS` | `http://127.0.0.1,http://localhost` | instant | The origins allowed to call MCP, checked on every request as a defence against DNS-rebinding attacks. It matters to a browser-based MCP client and rarely to a command-line agent. With no web token, pages from these origins may also send changes to the web API (see [[The security model#Running without a web token]]). |
+| `HATCHDOOR_PUBLIC_URL` | unset | instant | The address people and agents reach this server at, such as `https://notes.example.com`, shown in Settings as **Public address**. Transfer links, which let an agent download or upload a file with no token, are built on it (see [[The security model#Transfer links]]). When set it always wins. Unset, links use the address the agent reached the server on, as a proxy reports it in `Forwarded` or `X-Forwarded-Proto`/`X-Forwarded-Host`, else the request's own `http://` and `Host`. Set it when a proxy sends none of those headers or serves Hatchdoor under a path. On a public demo (`HATCHDOOR_DEMO_MODE=true`) it is also what makes the link preview picture appear: a shared link gets its picture and its own address only when this is set, because Hatchdoor never takes that address from the request (see [[The security model#Demo mode's narrower rule]]). With no web token, its host is the one name besides `localhost`, `127.0.0.1` and `[::1]` that Hatchdoor answers to (see [[The security model#Running without a web token]]). It must be an absolute `http://` or `https://` address without a query. A trailing slash is dropped. |
 
 Above these settings, **Agent access (MCP)** names the last agent that used a tool and how long ago, or says "No agent has connected yet". It is not a setting: Hatchdoor records it on its own and keeps only the name the agent gives itself and the time.
 
@@ -69,7 +79,7 @@ Above these settings, **Agent access (MCP)** names the last agent that used a to
 | Key | Default | Class | Purpose |
 | --- | --- | --- | --- |
 | `HATCHDOOR_MAX_ATTACHMENT_BYTES` | `10485760` (10 MiB) | instant | Size limit for an attachment uploaded through the Web UI, an agent's upload link, or `POST /api/v1/vaults/{vault_id}/attachments`. |
-| `HATCHDOOR_MCP_MAX_BASE64_BYTES` | `5242880` (5 MiB, decoded) | instant | Size limit for what an agent moves through MCP's own allowance: `import_attachment` on the way in, and every download on the way out, whether `get_attachment` returns the bytes as base64 or as a download link. |
+| `HATCHDOOR_MCP_MAX_BASE64_BYTES` | `5242880` (5 MiB, decoded) | instant | Size limit for what an agent moves through MCP's own allowance: `import_attachment` on the way in, and every download on the way out, whether `get_attachment` returns the bytes as base64 or as a download link. The two base64 tools stop at about 5.95 MiB (6,242,304 bytes) whatever this says, since one MCP reply cannot carry more; download links follow the setting. |
 
 **Updates**
 
@@ -101,7 +111,7 @@ These configured a single-Vault deployment before the Vault registry existed. Re
 `HATCHDOOR_GIT_AUTHOR_NAME` and `HATCHDOOR_GIT_AUTHOR_EMAIL` are the one pair still in use. Hatchdoor signs commits with them in any Vault that has no `commit_identity` of its own. Changing either in **Settings** applies to the next commit Hatchdoor makes in such a Vault, with no restart. A Vault that has its own `commit_identity` ignores them.
 
 > [!warning]
-> Remove these from `.env`. Hatchdoor logs a warning at startup naming any that are still set, because they do nothing there. An install from 2.4.x or earlier that still stores the retired Git settings (every key above except `HATCHDOOR_EXCLUDE` and the two author keys) in its settings file, with no Vault registry, refuses to start: upgrade it to a 2.5.0 to 2.7.x release first, which imports them, then to this version. See the [legacy single-Vault upgrade guide](https://github.com/BatterWorks/Hatchdoor/blob/main/docs/migrations/legacy-single-vault.md) in the repository.
+> Remove these from `.env`, except the two author keys. Hatchdoor logs a warning at startup naming any of the others that are still set, because they do nothing there. Saving any of them except the two author keys through the settings API is refused, and every start removes them from the settings file, logging a warning that names each one it found. An install from 2.4.x or earlier that still stores the retired Git settings (every key above except `HATCHDOOR_EXCLUDE` and the two author keys) in its settings file, with no Vault registry, refuses to start: upgrade it to a 2.5.0 to 2.7.x release first, which imports them, then to this version. See the [legacy single-Vault upgrade guide](https://github.com/BatterWorks/Hatchdoor/blob/main/docs/migrations/legacy-single-vault.md) in the repository.
 
 ## Logging (environment-only)
 

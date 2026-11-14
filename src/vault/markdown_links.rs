@@ -381,7 +381,8 @@ pub(crate) struct NoteLinkTarget {
 
 /// Whether `raw` (a destination as written) is a note link, and to what path.
 ///
-/// A note link is a local path ending `.md` once any `#anchor` is removed.
+/// A note link is a local path ending `.md`, in any case (#675), once any
+/// `#anchor` is removed.
 /// Anything with a URL scheme, or protocol-relative, is external and never a
 /// note link, whatever it ends in.
 pub(crate) fn note_link_target(raw: &str) -> Option<NoteLinkTarget> {
@@ -392,7 +393,8 @@ pub(crate) fn note_link_target(raw: &str) -> Option<NoteLinkTarget> {
     }
     let path = percent_decode(&unescape_backslashes(raw_path));
     let file_name = path.rsplit(['/', '\\']).next().unwrap_or(&path);
-    if !file_name.ends_with(".md") || file_name.len() <= ".md".len() {
+    let stem = strip_md_extension(file_name);
+    if stem.len() == file_name.len() || stem.is_empty() {
         return None;
     }
     Some(NoteLinkTarget { path, raw_path_len })
@@ -493,9 +495,9 @@ pub(crate) fn encode_link_path(path: &str, angle: bool) -> String {
 }
 
 /// Notes addressed by path and by filename, for resolving Markdown note links
-/// through [`resolve_path_ladder`]. Keys are lowercased the way
-/// `VaultIndex::by_path_title` is, and the first note to claim a path keeps
-/// it, in the same layer-priority order.
+/// through [`resolve_path_ladder`]. Keys are folded by `normalize_title`, as
+/// wikilink titles are, and the first note to claim a path keeps it, in the
+/// same layer-priority order.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct NotePaths {
     /// Normalised Vault-relative path without `.md` to slug.
@@ -570,8 +572,10 @@ impl NotePaths {
 }
 
 /// The path from a note in `from_dir` to the note at `target` (both
-/// Vault-relative, `target` without `.md`), as a Markdown link writes it.
-pub(crate) fn relative_note_path(from_dir: &str, target: &str) -> String {
+/// Vault-relative, `target` without its extension), as a Markdown link writes
+/// it. `extension` is the target file's own, in its own case, so a link to
+/// `Deep.MD` names `Deep.MD` (#740).
+pub(crate) fn relative_note_path(from_dir: &str, target: &str, extension: &str) -> String {
     let from: Vec<&str> = from_dir
         .split('/')
         .filter(|part| !part.is_empty())
@@ -584,7 +588,7 @@ pub(crate) fn relative_note_path(from_dir: &str, target: &str) -> String {
         .count();
     let mut parts: Vec<&str> = vec![".."; from.len() - shared];
     parts.extend(&to[shared..]);
-    format!("{}.md", parts.join("/"))
+    format!("{}.{extension}", parts.join("/"))
 }
 
 /// The Vault-relative folder of a note's extension-free relative path.
@@ -799,6 +803,17 @@ mod tests {
         assert!(note_link_target("Install#x.md").is_none());
     }
 
+    /// A note's extension counts in any case (#637), so a link to one does too
+    /// (#675).
+    #[test]
+    fn a_note_link_ends_md_in_any_case() {
+        for raw in ["Upper.MD", "a/Mixed.Md#top", "b/Low.mD"] {
+            assert!(note_link_target(raw).is_some(), "{raw}");
+        }
+        assert!(note_link_target(".MD").is_none());
+        assert!(note_link_target("Note.MDX").is_none());
+    }
+
     #[test]
     fn percent_decoding_keeps_a_bare_percent_literal() {
         assert_eq!(percent_decode("Save%2020%%20now.md"), "Save 20% now.md");
@@ -848,10 +863,10 @@ mod tests {
     #[test]
     fn relative_note_path_climbs_and_descends() {
         assert_eq!(
-            relative_note_path("00-inbox", "20-projects/Beacon"),
+            relative_note_path("00-inbox", "20-projects/Beacon", "md"),
             "../20-projects/Beacon.md"
         );
-        assert_eq!(relative_note_path("a", "a/Plan"), "Plan.md");
-        assert_eq!(relative_note_path("", "a/Plan"), "a/Plan.md");
+        assert_eq!(relative_note_path("a", "a/Plan", "md"), "Plan.md");
+        assert_eq!(relative_note_path("", "a/Plan", "MD"), "a/Plan.MD");
     }
 }

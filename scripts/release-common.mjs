@@ -186,8 +186,9 @@ const ACTION_NEEDED = "**Action needed:**";
 const ACTION_HEADING = /breaking|action/i;
 
 // One draft line per changelog entry: its first sentence, without issue
-// references, action-needed entries first. The draft is a starting point;
-// a release with more than six entries refuses until someone cuts it down.
+// references, action-needed entries first. Which 3 to 6 lines a release
+// shows is the maintainer's call (ADR-42), so the draft keeps every entry and
+// `release-prepare` names how many to cut before it runs the long tests.
 export function draftHighlights(sectionBody) {
   const action = [];
   const plain = [];
@@ -244,9 +245,13 @@ export function highlightProblems(sectionBody) {
       problems.push(`"${line}" is not a one-line "- " item.`);
     }
   }
-  if (items.length < MIN_HIGHLIGHTS || items.length > MAX_HIGHLIGHTS) {
+  if (items.length > MAX_HIGHLIGHTS) {
     problems.push(
-      `it has ${items.length} lines; a release has ${MIN_HIGHLIGHTS} to ${MAX_HIGHLIGHTS}.`,
+      `it has ${items.length} lines; a release has ${MIN_HIGHLIGHTS} to ${MAX_HIGHLIGHTS}. Cut ${items.length - MAX_HIGHLIGHTS} or more, keeping what a user must do or will notice.`,
+    );
+  } else if (items.length < MIN_HIGHLIGHTS) {
+    problems.push(
+      `it has ${items.length} lines; a release has ${MIN_HIGHLIGHTS} to ${MAX_HIGHLIGHTS}. Add ${MIN_HIGHLIGHTS - items.length} or more.`,
     );
   }
   const firstPlain = items.findIndex(
@@ -323,8 +328,7 @@ export function readVersions(files) {
   const name = cargoPackageName(files["Cargo.toml"]);
   const lock = JSON.parse(files["frontend/package-lock.json"]);
   return {
-    "Cargo.toml":
-      cargoPackageField(files["Cargo.toml"], "version")?.match[2] ?? null,
+    "Cargo.toml": cargoVersion(files["Cargo.toml"]),
     "Cargo.lock": cargoLockVersion(name).exec(files["Cargo.lock"])?.[2] ?? null,
     "frontend/package.json":
       JSON.parse(files["frontend/package.json"]).version ?? null,
@@ -346,6 +350,11 @@ function replaceOnce(text, pattern, version, file) {
     throw new Error(`${file} has no version field to set.`);
   }
   return text.replace(pattern, `$1${version}$3`);
+}
+
+// The version Cargo.toml's `[package]` table declares, or null.
+export function cargoVersion(cargoToml) {
+  return cargoPackageField(cargoToml, "version")?.match[2] ?? null;
 }
 
 // Returns the four files with their version set. The JSON files round-trip
@@ -375,6 +384,34 @@ export function setVersions(files, version) {
 }
 
 // ---------------------------------------------------------------------------
+// The README's version example
+//
+// The README shows a version tag as an example (`e.g. 2.9.0`). The bump sets
+// it to the version being released, and `just check` fails when it names any
+// other version than the one Cargo.toml declares, so it cannot fall behind.
+
+export const README = "README.md";
+const README_VERSION_EXAMPLE = /(\be\.g\.,? v?)(\d+\.\d+\.\d+)\b/g;
+
+export function readmeVersionExamples(readme) {
+  return [...readme.matchAll(README_VERSION_EXAMPLE)].map((match) => match[2]);
+}
+
+export function setReadmeVersion(readme, version) {
+  return readme.replace(README_VERSION_EXAMPLE, `$1${version}`);
+}
+
+// Every example naming another version than `version`, as a sentence each.
+export function readmeVersionProblems(readme, version) {
+  return readmeVersionExamples(readme)
+    .filter((found) => found !== version)
+    .map(
+      (found) =>
+        `${README} gives ${found} as a version example where it should say ${version}.`,
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Release checklist (ADR-36 decision 3, on the version-bump pull request per
 // ADR-37)
 
@@ -388,6 +425,7 @@ export const CHECKLIST_ITEMS = [
   DOCS_FRESHNESS_ITEM,
   "No ADR is contradicted by what shipped.",
   "An MCP conformance run is recorded, if MCP behavior changed.",
+  "`just smoke-install` passed against an image built from the version-bump branch.",
   "The release title and notes are drafted.",
 ];
 

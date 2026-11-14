@@ -11,16 +11,22 @@ export function parseWikilinkTarget(body: string): {
   const targetEnd = pipe > 0 && body[pipe - 1] === "\\" ? pipe - 1 : pipe;
   const target = (targetEnd < 0 ? body : body.slice(0, targetEnd)).trim();
   const alias = pipe < 0 ? "" : body.slice(pipe + 1).trim();
-  const label = alias || target.split(/[#^]/)[0].trim();
+  const label =
+    alias || (ownNoteFragment(target) ?? target.split(/[#^]/)[0].trim());
   return { target, label };
+}
+
+/**
+ * The place a wikilink target names in the note it is written in, `Heading`
+ * for `#Heading` and `^id` for `#^id`; `null` for a target that names a note
+ * (#727). Such a link shows this text whole, `/` included, as Obsidian does.
+ */
+export function ownNoteFragment(target: string): string | null {
+  return target.startsWith("#") ? target.slice(1) : null;
 }
 
 export function escapeMarkdownLabel(input: string): string {
   return input.replace(/[\\`*_[\]{}()#+.!|]/g, "\\$&");
-}
-
-export function stripBlockIds(markdown: string): string {
-  return markdown.replace(/ \^[a-zA-Z0-9-]+$/gm, "");
 }
 
 export function stripVaultNoteLinks(markdown: string): string {

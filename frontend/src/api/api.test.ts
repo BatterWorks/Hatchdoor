@@ -203,3 +203,38 @@ describe("unauthorized notifications", () => {
     expect(handler).toHaveBeenCalledOnce();
   });
 });
+
+describe("withAccessToken", () => {
+  it("leaves the URL alone when no token is stored", () => {
+    expect(withAccessToken("/assets/x.pdf#page=3")).toBe(
+      "/assets/x.pdf#page=3",
+    );
+  });
+
+  it.each([
+    ["no query", "/assets/x.pdf", "/assets/x.pdf?access_token=t%2B1"],
+    [
+      "an existing query",
+      "/assets/x.pdf?a=1",
+      "/assets/x.pdf?a=1&access_token=t%2B1",
+    ],
+    [
+      "a fragment",
+      "/assets/x.pdf#page=3",
+      "/assets/x.pdf?access_token=t%2B1#page=3",
+    ],
+    [
+      "a query and a fragment",
+      "/assets/x.pdf?a=1#page=3",
+      "/assets/x.pdf?a=1&access_token=t%2B1#page=3",
+    ],
+    [
+      "a ? only inside the fragment",
+      "/assets/x.pdf#page=3?zoom=2",
+      "/assets/x.pdf?access_token=t%2B1#page=3?zoom=2",
+    ],
+  ])("puts the token in the query for a URL with %s (#755)", (_, url, want) => {
+    setToken("t+1");
+    expect(withAccessToken(url)).toBe(want);
+  });
+});

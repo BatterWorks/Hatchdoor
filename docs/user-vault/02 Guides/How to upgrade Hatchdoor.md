@@ -19,7 +19,7 @@ docker compose up -d
 
 The first command downloads the newest image for the tag your `compose.yaml` names. The second restarts Hatchdoor on it. Give it a minute: it waits for any Git sync in progress to finish before it stops, then starts again and checks your Vaults. Open the web address you normally use and carry on.
 
-If your `compose.yaml` names a fixed version, such as `battermanz/hatchdoor:2.7.0`, change that line to the new version first. The `latest` tag always means the newest release. Podman users run the same two commands with `podman compose` and the `podman-latest` or `podman-<version>` tag.
+If your `compose.yaml` names a fixed version, such as `battermanz/hatchdoor:2.7.0`, change that line to the new version first. The `latest` tag always means the newest release. Podman users run the same two commands with `podman compose`. Docker and Podman use the same image and tags. If your `image:` line still names a `podman-` tag, such as `podman-latest`, change it to the plain tag, such as `latest`: the `podman-` tags will soon stop receiving new versions.
 
 Want to go back? Put the previous version in the `image:` line and run the same two commands. Your notes are plain Markdown files, so no version can lock you out of them.
 
@@ -27,7 +27,7 @@ Want to go back? Put the previous version in the `image:` line and run the same 
 
 Hatchdoor 2.8.0 and later upgrade directly only from 2.5.0 or later. An install still on 2.4.x or earlier takes two steps:
 
-1. Set the `image:` line to `battermanz/hatchdoor:2.7.0` (`podman-2.7.0` on Podman), run the two commands above and open Hatchdoor once. That release moves your single Vault into the Vault list.
+1. Set the `image:` line to `battermanz/hatchdoor:2.7.0` (`podman-2.7.0` on Podman, since 2.7.0 came before the shared image), run the two commands above and open Hatchdoor once. That release moves your single Vault into the Vault list.
 2. Set the `image:` line back to `latest`, or to the version you want, and run the two commands again.
 
 If you skip the first step, an install that used Git sync refuses to start and changes nothing; [[How to troubleshoot common problems#Hatchdoor won't start]] shows the log line. An install that never used Git sync opens with no Vaults instead. Its notes are untouched, and you add their folder as a Vault yourself, as in [[Connect your first Vault]]. The [legacy single-Vault upgrade guide](https://github.com/BatterWorks/Hatchdoor/blob/main/docs/migrations/legacy-single-vault.md) in the repository has the details.

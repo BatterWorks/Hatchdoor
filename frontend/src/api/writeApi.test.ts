@@ -14,6 +14,7 @@ import {
   renameNote,
   MUTATION_FETCH_TIMEOUT_MS,
   updateNote,
+  isNoteMovedError,
   uploadAttachment,
   UPLOAD_FETCH_TIMEOUT_MS,
 } from "./writeApi";
@@ -224,6 +225,37 @@ describe("writeApi", () => {
     mockedApiFetch.mockResolvedValueOnce(jsonResponse(outcome()));
     await updateNote(VAULT_ID, "home", "# Updated", "hash-1");
     expect(mockedApiFetch.mock.calls[1]?.[1]?.keepalive).toBeUndefined();
+  });
+
+  // #627: the path the page opened travels with the write, and a refusal
+  // because the slug now names another note is not a conflict to review.
+  it("sends the expected path and names a note_moved refusal apart from a conflict", async () => {
+    mockedApiFetch.mockResolvedValueOnce(jsonResponse(outcome()));
+    await updateNote(VAULT_ID, "plan", "# Updated", "hash-1", {
+      expectedRelativePath: "z/Plan",
+    });
+    expectJsonCall(0, `/api/v1/vaults/${VAULT_ID}/notes/plan`, "PUT", {
+      content: "# Updated",
+      expected_content_hash: "hash-1",
+      expected_relative_path: "z/Plan",
+    });
+
+    mockedApiFetch.mockResolvedValueOnce(
+      jsonResponse(
+        { code: "note_moved", message: "moved", retryable: false },
+        409,
+      ),
+    );
+    const refusal = updateNote(VAULT_ID, "plan", "# Updated", "hash-1", {
+      expectedRelativePath: "z/Plan",
+    });
+    await expect(refusal).rejects.toMatchObject({
+      name: "NoteMovedError",
+      code: "note_moved",
+    });
+    await expect(
+      refusal.catch((error) => isNoteMovedError(error)),
+    ).resolves.toBe(true);
   });
 
   it("summarizes write outcome side effects", () => {

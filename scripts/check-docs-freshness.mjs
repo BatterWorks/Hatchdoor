@@ -7,8 +7,9 @@
 // let a branch that moved a user-facing surface reach `development` without
 // someone having looked. It reports which surfaces the branch touched, which
 // notes in `docs/user-vault` claim to document them, and whether those notes
-// moved in the same range. One entry on that reading list lives outside the
-// vault: the Docker Hub overview, which repeats the install steps.
+// moved in the same range. Three entries on that reading list live outside
+// the vault, because each repeats the install steps: the Docker Hub overview,
+// the README and the smoke script that runs them.
 //
 // Run it, read the notes it names, fix what drifted, then re-run with
 // `--acknowledge` to record that the review happened. Acknowledging without
@@ -21,10 +22,11 @@
 // with a `Changelog: none, <reason>` trailer on one of its commits, so the
 // reason stays in history.
 
-import { spawnSync } from "node:child_process";
 import { lstat } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+
+import { changedPaths, git, mergeBaseOf, resolveBase } from "./git-changes.mjs";
 
 const repositoryRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -42,6 +44,15 @@ const CONCEPTS = `${VAULT_ROOT}/04 Concepts`;
 // repeats the install steps, so it sits on the reading list like one.
 const DOCKER_HUB_OVERVIEW = "docs/maintenance/docker-hub/overview.md";
 
+// Runs the Quick Start (#569). Not a note either, but a copy of the install
+// steps, so the table pairs it with the pages it copies, both ways.
+const SMOKE_INSTALL_SCRIPT = "scripts/smoke-install.sh";
+const INSTALL_PAGES = [
+  "README.md",
+  `${GET_STARTED}/Install Hatchdoor with Docker Compose.md`,
+  `${GUIDES}/How to deploy Hatchdoor with an agent.md`,
+];
+
 // Each surface names the source paths that produce a user-facing behaviour and
 // the notes that describe it. A changed file may match several surfaces; that
 // is intended, because one change can invalidate several notes.
@@ -54,6 +65,7 @@ const SURFACES = [
       `${REFERENCE}/MCP tools reference.md`,
       `${GET_STARTED}/Connect your agent.md`,
       `${GET_STARTED}/Search and change notes with your agent.md`,
+      `${GUIDES}/How to troubleshoot common problems.md`,
     ],
   },
   {
@@ -186,7 +198,13 @@ const SURFACES = [
   {
     id: "write-mutations",
     label: "Note mutation behaviour",
-    paths: ["src/vault_mutation.rs", "src/vault/write.rs", "src/vault/write/"],
+    paths: [
+      "src/vault_mutation.rs",
+      "src/vault/write.rs",
+      "src/vault/write/",
+      "src/vault/sections.rs",
+      "src/vault_read/sections.rs",
+    ],
     notes: [
       `${GET_STARTED}/Search and change notes with your agent.md`,
       `${REFERENCE}/MCP tools reference.md`,
@@ -268,6 +286,20 @@ const SURFACES = [
     ],
     notes: [DOCKER_HUB_OVERVIEW],
   },
+  {
+    id: "install-smoke-script",
+    label: "The install steps the smoke script follows",
+    // #569: scripts/smoke-install.sh is a hand-written copy of the Quick
+    // Start, so whatever changes those steps names it, and it names them.
+    paths: [...INSTALL_PAGES, "docker-compose.yml", ".env.example"],
+    notes: [SMOKE_INSTALL_SCRIPT],
+  },
+  {
+    id: "install-smoke-docs",
+    label: "The smoke script that follows the install steps",
+    paths: [SMOKE_INSTALL_SCRIPT],
+    notes: INSTALL_PAGES,
+  },
 ];
 
 const CHANGELOG = "CHANGELOG.md";
@@ -308,7 +340,7 @@ function shippedChanges(files) {
 // The `Changelog:` trailers on the branch's own commits. Only committed work
 // can carry one, so a waiver lands with the commit it explains.
 function changelogWaivers(mergeBase) {
-  const result = git([
+  const result = git(repositoryRoot, [
     "log",
     "--format=%(trailers:key=Changelog,valueonly,separator=%x00)%x00",
     `${mergeBase}..HEAD`,
@@ -320,79 +352,6 @@ function changelogWaivers(mergeBase) {
     .split("\0")
     .map((value) => value.trim())
     .filter((value) => value !== "");
-}
-
-function git(args) {
-  const result = spawnSync("git", args, {
-    cwd: repositoryRoot,
-    encoding: "utf8",
-  });
-  if (result.error) {
-    throw result.error;
-  }
-  return result;
-}
-
-// Every path this script reads comes from a NUL-separated `-z` listing. The
-// default line-based output is not usable here: `git status --porcelain`
-// c-quotes any path containing a space, and nearly every note under
-// `docs/user-vault` has spaces in its name, while `git diff --name-only`
-// leaves those same paths bare and octal-escapes non-ASCII instead. Parsing
-// both as lines made one file arrive under two spellings, and made a note
-// edited but not yet committed look untouched.
-function gitFields(args) {
-  const result = git(args);
-  if (result.status !== 0) {
-    throw new Error(
-      `git ${args.join(" ")} failed: ${result.stderr.trim() || "unknown error"}`,
-    );
-  }
-  return result.stdout.split("\0").filter((field) => field !== "");
-}
-
-function resolveBase(requested) {
-  for (const candidate of [requested, `origin/${requested}`]) {
-    const result = git([
-      "rev-parse",
-      "--verify",
-      "--quiet",
-      `${candidate}^{commit}`,
-    ]);
-    if (result.status === 0) {
-      return candidate;
-    }
-  }
-  return null;
-}
-
-// Each `-z` status record is `XY <path>`. A rename or copy adds the original
-// path as its own following field, which describes where the content came
-// from rather than what changed now, so it is skipped. `-uall` expands
-// untracked directories, which the default output collapses to a bare
-// `newdir/` that would match no surface prefix.
-function workingTreePaths() {
-  const fields = gitFields(["status", "--porcelain", "-z", "-uall"]);
-  const paths = [];
-
-  for (let index = 0; index < fields.length; index += 1) {
-    const record = fields[index];
-    const status = record.slice(0, 2);
-    paths.push(record.slice(3));
-    if (status.includes("R") || status.includes("C")) {
-      index += 1;
-    }
-  }
-
-  return paths;
-}
-
-function changedPaths(mergeBase) {
-  return [
-    ...new Set([
-      ...gitFields(["diff", "--name-only", "-z", mergeBase, "HEAD"]),
-      ...workingTreePaths(),
-    ]),
-  ].sort();
 }
 
 function matches(file, prefix) {
@@ -456,11 +415,15 @@ async function deadTableEntries() {
   return [...new Set(dead)].sort();
 }
 
+// A test file changes nothing a user sees, so it names no surface, the same
+// way it needs no changelog entry (#743).
 function touchedSurfaces(files) {
   return SURFACES.map((surface) => ({
     ...surface,
-    changedFiles: files.filter((file) =>
-      surface.paths.some((prefix) => matches(file, prefix)),
+    changedFiles: files.filter(
+      (file) =>
+        !isTestFile(file) &&
+        surface.paths.some((prefix) => matches(file, prefix)),
     ),
   })).filter((surface) => surface.changedFiles.length > 0);
 }
@@ -528,7 +491,7 @@ if (validateTable) {
   process.exit(0);
 }
 
-const base = resolveBase(requestedBase);
+const base = resolveBase(repositoryRoot, requestedBase);
 if (base === null) {
   console.error(
     `Documentation freshness check failed: no ref named ${requestedBase} or origin/${requestedBase}.`,
@@ -537,16 +500,15 @@ if (base === null) {
   process.exit(2);
 }
 
-const mergeBaseResult = git(["merge-base", base, "HEAD"]);
-if (mergeBaseResult.status !== 0) {
+const mergeBase = mergeBaseOf(repositoryRoot, base);
+if (mergeBase === null) {
   console.error(
     `Documentation freshness check failed: no merge base between ${base} and HEAD.`,
   );
   process.exit(2);
 }
-const mergeBase = mergeBaseResult.stdout.trim();
 
-const files = changedPaths(mergeBase);
+const files = changedPaths(repositoryRoot, mergeBase);
 const surfaces = touchedSurfaces(files);
 
 const shipped = shippedChanges(files);

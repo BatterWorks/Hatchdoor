@@ -248,6 +248,48 @@ pub(super) const WRITE_OPS: &[&str] = &[
     "delete_tag",
 ];
 
+/// What a write inside `batch` passes as `expected_content_hash` to mean "the
+/// hash an earlier item in this same call read for this note" (#599). `batch`
+/// swaps it for that hash before the item reaches [`dispatch_write_tool`]. It
+/// can never be a real hash, which always starts with its algorithm's name.
+pub(super) const FROM_BATCH_HASH: &str = "from_batch";
+
+/// The code a write carries when it reaches dispatch still holding
+/// [`FROM_BATCH_HASH`].
+const BATCH_HASH_UNAVAILABLE_CODE: &str = "batch_hash_unavailable";
+
+/// Refuses a write whose `expected_content_hash` is still the
+/// [`FROM_BATCH_HASH`] marker: a batch item with no earlier read or write of
+/// that note in its call, or a standalone call, where there is no batch to
+/// take a hash from. A code of its own, not `write_conflict`, because the
+/// note did not change and retrying with the hash a conflict reports would
+/// teach the caller to write without having read.
+fn refuse_unresolved_batch_hash(vault: &McpVault, arguments: &Value) -> Result<(), JsonRpcFailure> {
+    if !asks_for_batch_hash(arguments) {
+        return Ok(());
+    }
+    Err(mutation_error(VaultOperationError::new(
+        BATCH_HASH_UNAVAILABLE_CODE,
+        "Nothing was written: expected_content_hash \"from_batch\" stands for the hash an earlier \
+         item in the same batch call returned for this note, and there is none. Read the note \
+         earlier in the same batch with get_note, get_note_outline, get_note_section or \
+         get_frontmatter, using the same vault_id and slug as this write, or pass the note's \
+         real content_hash. Only the tools that change, move or delete an existing note take \
+         \"from_batch\"; create_upload_link needs the real hash.",
+        Some(vault.vault_id),
+        false,
+    )))
+}
+
+/// Whether a write's arguments carry [`FROM_BATCH_HASH`] as their
+/// `expected_content_hash`.
+pub(super) fn asks_for_batch_hash(arguments: &Value) -> bool {
+    arguments
+        .get("expected_content_hash")
+        .and_then(Value::as_str)
+        == Some(FROM_BATCH_HASH)
+}
+
 /// Dispatches one write op to its underlying tool function. Shared by the
 /// top-level MCP dispatcher (`mod.rs`, one call per request) and the `batch`
 /// tool (`batch.rs`, one call per item): both resolve the target Vault and
@@ -261,6 +303,7 @@ pub(super) async fn dispatch_write_tool(
     arguments: Value,
     config: &McpConfig,
 ) -> Result<Value, JsonRpcFailure> {
+    refuse_unresolved_batch_hash(vault, &arguments)?;
     match op {
         "create_note" => create_note_tool(state, vault, arguments).await,
         "update_note" => update_note_tool(state, vault, arguments).await,
@@ -322,7 +365,7 @@ pub(super) async fn update_note_tool(
     let slug = non_empty_argument("slug", args.slug)?;
     let outcome = vault
         .mutation(args.commit_summary)
-        .update_note(&slug, &args.content, &args.expected_content_hash)
+        .update_note(&slug, &args.content, &args.expected_content_hash, None)
         .await
         .map_err(mutation_error)?;
     Ok(note_write_result(vault.vault_id, outcome))
@@ -551,15 +594,14 @@ pub(super) async fn import_attachment_tool(
     // so anything longer than that for the cap cannot decode to an allowed size.
     // Rejecting up front avoids decoding a deliberately oversized payload; the
     // authoritative check on the decoded length runs in import_attachment_bytes.
-    let max_encoded = config
-        .max_base64_bytes
+    let max_base64_bytes = config.base64_limit();
+    let max_encoded = max_base64_bytes
         .saturating_mul(4)
         .div_ceil(3)
         .saturating_add(4);
     if content.len() as u64 > max_encoded {
         return Err(JsonRpcFailure::invalid_params(format!(
-            "attachment exceeds max size: base64 content is larger than the {}-byte base64 limit allows",
-            config.max_base64_bytes
+            "attachment exceeds max size: base64 content is larger than the {max_base64_bytes}-byte base64 limit allows"
         )));
     }
 
@@ -574,7 +616,7 @@ pub(super) async fn import_attachment_tool(
         .import_attachment(
             &target_relative_path,
             bytes,
-            config.max_base64_bytes,
+            max_base64_bytes,
             args.overwrite.unwrap_or(false),
         )
         .await
@@ -952,7 +994,7 @@ pub(super) fn write_tools_list() -> Vec<Value> {
         }),
         json!({
             "name": "rename_note",
-            "description": "Rename a note within its current folder, rewrite wikilink backlinks, carry along the assets that live inside the note's own folder, or a subfolder of it, and rewrite other notes' references to them. An asset kept elsewhere, such as a shared attachments folder, stays where it is and only this note's own link to it is repointed. A note sitting at the vault root has the whole Vault as its own folder, so every asset it references travels with it. A link in the note's own body pointing at itself is retargeted by the same rules as anyone else's link to it, so the note's own text can change; rewritten_notes counts only the other notes, and the returned content_hash is the one to use for the next write. Requires expected_content_hash from get_note, or from get_frontmatter when the body is not needed. If a note that is not valid UTF-8 text links to this note, or to an asset that moves with it, that link cannot be rewritten in place: the call is refused with link_rewrite_unsupported, naming each such note, and nothing is written.",
+            "description": "Rename a note within its current folder, rewrite wikilink backlinks, carry along the assets that live inside the note's own folder, or a subfolder of it, and rewrite other notes' references to them. An asset kept elsewhere, such as a shared attachments folder, stays where it is and only this note's own link to it is repointed. A note sitting at the vault root has the whole Vault as its own folder, so an asset it references travels with it only when no other note embeds or links to that asset; one another note uses stays where it is. A link in the note's own body pointing at itself is retargeted by the same rules as anyone else's link to it, so the note's own text can change; rewritten_notes counts only the other notes, and the returned content_hash is the one to use for the next write. An Obsidian canvas (.canvas) card that shows this note or a carried asset is repointed too; a canvas that cannot be read as JSON is left untouched and named in quality_warnings. Requires expected_content_hash from get_note, or from get_frontmatter when the body is not needed. If a note that is not valid UTF-8 text links to this note, or to an asset that moves with it, that link cannot be rewritten in place: the call is refused with link_rewrite_unsupported, naming each such note, and nothing is written.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -968,7 +1010,7 @@ pub(super) fn write_tools_list() -> Vec<Value> {
         }),
         json!({
             "name": "move_note",
-            "description": "Move a note to a target vault-relative folder, rewrite wikilink backlinks, carry along the assets that live inside the note's own folder, or a subfolder of it, and rewrite other notes' references to them. An asset kept elsewhere, such as a shared attachments folder, stays where it is and only this note's own link to it is repointed. A note sitting at the vault root has the whole Vault as its own folder, so every asset it references travels with it. A link in the note's own body pointing at itself is retargeted by the same rules as anyone else's link to it, so the note's own text can change; rewritten_notes counts only the other notes, and the returned content_hash is the one to use for the next write. Requires expected_content_hash from get_note, or from get_frontmatter when the body is not needed. If a note that is not valid UTF-8 text links to this note, or to an asset that moves with it, that link cannot be rewritten in place: the call is refused with link_rewrite_unsupported, naming each such note, and nothing is written.",
+            "description": "Move a note to a target vault-relative folder, rewrite wikilink backlinks, carry along the assets that live inside the note's own folder, or a subfolder of it, and rewrite other notes' references to them. An asset kept elsewhere, such as a shared attachments folder, stays where it is and only this note's own link to it is repointed. A note sitting at the vault root has the whole Vault as its own folder, so an asset it references travels with it only when no other note embeds or links to that asset; one another note uses stays where it is. A link in the note's own body pointing at itself is retargeted by the same rules as anyone else's link to it, so the note's own text can change; rewritten_notes counts only the other notes, and the returned content_hash is the one to use for the next write. An Obsidian canvas (.canvas) card that shows this note or a carried asset is repointed too; a canvas that cannot be read as JSON is left untouched and named in quality_warnings. Requires expected_content_hash from get_note, or from get_frontmatter when the body is not needed. If a note that is not valid UTF-8 text links to this note, or to an asset that moves with it, that link cannot be rewritten in place: the call is refused with link_rewrite_unsupported, naming each such note, and nothing is written.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -984,7 +1026,7 @@ pub(super) fn write_tools_list() -> Vec<Value> {
         }),
         json!({
             "name": "move_rename_note",
-            "description": "Move and rename a note to a target vault-relative Markdown path in one operation, rewrite wikilink backlinks, carry along the assets that live inside the note's own folder, or a subfolder of it, and rewrite other notes' references to them. An asset kept elsewhere, such as a shared attachments folder, stays where it is and only this note's own link to it is repointed. A note sitting at the vault root has the whole Vault as its own folder, so every asset it references travels with it. A link in the note's own body pointing at itself is retargeted by the same rules as anyone else's link to it, so the note's own text can change; rewritten_notes counts only the other notes, and the returned content_hash is the one to use for the next write. Requires expected_content_hash from get_note, or from get_frontmatter when the body is not needed. If a note that is not valid UTF-8 text links to this note, or to an asset that moves with it, that link cannot be rewritten in place: the call is refused with link_rewrite_unsupported, naming each such note, and nothing is written.",
+            "description": "Move and rename a note to a target vault-relative Markdown path in one operation, rewrite wikilink backlinks, carry along the assets that live inside the note's own folder, or a subfolder of it, and rewrite other notes' references to them. An asset kept elsewhere, such as a shared attachments folder, stays where it is and only this note's own link to it is repointed. A note sitting at the vault root has the whole Vault as its own folder, so an asset it references travels with it only when no other note embeds or links to that asset; one another note uses stays where it is. A link in the note's own body pointing at itself is retargeted by the same rules as anyone else's link to it, so the note's own text can change; rewritten_notes counts only the other notes, and the returned content_hash is the one to use for the next write. An Obsidian canvas (.canvas) card that shows this note or a carried asset is repointed too; a canvas that cannot be read as JSON is left untouched and named in quality_warnings. Requires expected_content_hash from get_note, or from get_frontmatter when the body is not needed. If a note that is not valid UTF-8 text links to this note, or to an asset that moves with it, that link cannot be rewritten in place: the call is refused with link_rewrite_unsupported, naming each such note, and nothing is written.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1000,7 +1042,7 @@ pub(super) fn write_tools_list() -> Vec<Value> {
         }),
         json!({
             "name": "archive_note",
-            "description": "Archive a note by moving it to Hatchdoor's configured archive folder, rewrite wikilink backlinks, carry along the assets that live inside the note's own folder, or a subfolder of it, and rewrite other notes' references to them. An asset kept elsewhere, such as a shared attachments folder, stays where it is and only this note's own link to it is repointed. A note sitting at the vault root has the whole Vault as its own folder, so every asset it references travels with it. A link in the note's own body pointing at itself is retargeted by the same rules as anyone else's link to it, so the note's own text can change; rewritten_notes counts only the other notes, and the returned content_hash is the one to use for the next write. Requires expected_content_hash from get_note, or from get_frontmatter when the body is not needed. If a note that is not valid UTF-8 text links to this note, or to an asset that moves with it, that link cannot be rewritten in place: the call is refused with link_rewrite_unsupported, naming each such note, and nothing is written.",
+            "description": "Archive a note by moving it to Hatchdoor's configured archive folder, rewrite wikilink backlinks, carry along the assets that live inside the note's own folder, or a subfolder of it, and rewrite other notes' references to them. An asset kept elsewhere, such as a shared attachments folder, stays where it is and only this note's own link to it is repointed. A note sitting at the vault root has the whole Vault as its own folder, so an asset it references travels with it only when no other note embeds or links to that asset; one another note uses stays where it is. A link in the note's own body pointing at itself is retargeted by the same rules as anyone else's link to it, so the note's own text can change; rewritten_notes counts only the other notes, and the returned content_hash is the one to use for the next write. An Obsidian canvas (.canvas) card that shows this note or a carried asset is repointed too; a canvas that cannot be read as JSON is left untouched and named in quality_warnings. Requires expected_content_hash from get_note, or from get_frontmatter when the body is not needed. If a note that is not valid UTF-8 text links to this note, or to an asset that moves with it, that link cannot be rewritten in place: the call is refused with link_rewrite_unsupported, naming each such note, and nothing is written.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1015,7 +1057,7 @@ pub(super) fn write_tools_list() -> Vec<Value> {
         }),
         json!({
             "name": "delete_note",
-            "description": "Trash a note by moving it to .hatchdoor-trash, remove wikilink backlinks to the deleted note, trash the assets that live inside the note's own folder, or a subfolder of it, and rewrite other notes' references to them. An asset kept elsewhere, such as a shared attachments folder, stays where it is and only the trashed note's own link to it is repointed. A note sitting at the vault root has the whole Vault as its own folder, so every asset it references is trashed with it. The trashed copy keeps the link it holds to itself as written, since the note it names is gone either way. Requires expected_content_hash from get_note, or from get_frontmatter when the body is not needed. If a note that is not valid UTF-8 text links to this note, or to an asset that moves with it, that link cannot be rewritten in place: the call is refused with link_rewrite_unsupported, naming each such note, and nothing is written.",
+            "description": "Trash a note by moving it to .hatchdoor-trash, remove wikilink backlinks to the deleted note, trash the assets that live inside the note's own folder, or a subfolder of it, and rewrite other notes' references to them. An asset kept elsewhere, such as a shared attachments folder, stays where it is and only the trashed note's own link to it is repointed. A note sitting at the vault root has the whole Vault as its own folder, so an asset it references is trashed with it only when no other note embeds or links to that asset; one another note uses stays where it is. The trashed copy keeps the link it holds to itself as written, since the note it names is gone either way. Requires expected_content_hash from get_note, or from get_frontmatter when the body is not needed. If a note that is not valid UTF-8 text links to this note, or to an asset that moves with it, that link cannot be rewritten in place: the call is refused with link_rewrite_unsupported, naming each such note, and nothing is written.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1062,7 +1104,7 @@ pub(super) fn write_tools_list() -> Vec<Value> {
         }),
         json!({
             "name": "move_attachment",
-            "description": "Move an existing attachment to a new vault-relative path and rewrite all note references to it. Any file the Vault already holds qualifies, whatever its extension and even with none: the upload allowlist gates import_attachment only. A Markdown note is refused - use the note tools - as is a .hatchdoor-layer marker or anything under .git or a folder this Vault excludes as noise. If a note that is not valid UTF-8 text references this attachment, that reference cannot be rewritten in place: the call is refused with link_rewrite_unsupported, naming each such note, and nothing is written.",
+            "description": "Move an existing attachment to a new vault-relative path and rewrite all note references to it, and every Obsidian canvas (.canvas) card that shows it; a canvas that cannot be read as JSON is left untouched and named in cleanup_warning. Any file the Vault already holds qualifies, whatever its extension and even with none: the upload allowlist gates import_attachment only. A Markdown note is refused - use the note tools - as is a .hatchdoor-layer marker or anything under .git or a folder this Vault excludes as noise. If a note that is not valid UTF-8 text references this attachment, that reference cannot be rewritten in place: the call is refused with link_rewrite_unsupported, naming each such note, and nothing is written.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1077,7 +1119,7 @@ pub(super) fn write_tools_list() -> Vec<Value> {
         }),
         json!({
             "name": "rename_attachment",
-            "description": "Rename an existing attachment in its current folder and rewrite all note references to it. Any file the Vault already holds qualifies, whatever its extension and even with none: the upload allowlist gates import_attachment only. A Markdown note is refused - use the note tools - as is a .hatchdoor-layer marker or anything under .git or a folder this Vault excludes as noise. If a note that is not valid UTF-8 text references this attachment, that reference cannot be rewritten in place: the call is refused with link_rewrite_unsupported, naming each such note, and nothing is written.",
+            "description": "Rename an existing attachment in its current folder and rewrite all note references to it, and every Obsidian canvas (.canvas) card that shows it; a canvas that cannot be read as JSON is left untouched and named in cleanup_warning. Any file the Vault already holds qualifies, whatever its extension and even with none: the upload allowlist gates import_attachment only. A Markdown note is refused - use the note tools - as is a .hatchdoor-layer marker or anything under .git or a folder this Vault excludes as noise. If a note that is not valid UTF-8 text references this attachment, that reference cannot be rewritten in place: the call is refused with link_rewrite_unsupported, naming each such note, and nothing is written.",
             "inputSchema": {
                 "type": "object",
                 "properties": {

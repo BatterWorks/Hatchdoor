@@ -62,8 +62,8 @@ pub(crate) struct MutationGuardHandoff {
 
 /// Whether a snapshot read carries the Markdown text of its notes.
 ///
-/// Bodies are the expensive half of the notes table and only the detailed
-/// stats report counts anything in them, so every other read omits them. They
+/// Bodies are the expensive half of the notes table. Detailed statistics and
+/// broken-link findings need them; structural reads omit them. They
 /// are a flag on the snapshot read rather than a read of their own because
 /// they must describe the same published generation the note list does: read
 /// separately, an Index turn landing in between would pair one generation's
@@ -130,18 +130,41 @@ pub(crate) struct PublishedVaultSnapshot {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 /// One published note's structural row. Deliberately without its Markdown
-/// body: every collection read projects these, and only the detailed stats
-/// report reads bodies at all, so it fetches them separately through
+/// body: every collection read projects these, while detailed statistics and
+/// broken-link findings also fetch bodies through
 /// [`SqliteCache::read_vault_note_bodies`] rather than making every tree,
 /// recent, graph, and query read carry the whole Vault's text.
 pub(crate) struct VaultSnapshotNote {
     pub(crate) title: String,
     pub(crate) slug: String,
+    /// The Vault-relative path without the note file's extension.
     pub(crate) relative_path: String,
+    /// The note file's extension as its name spells it: `md` in any case,
+    /// since a `.MD` file is a note too (#637, #675).
+    pub(crate) extension: String,
     pub(crate) size_bytes: i64,
     pub(crate) mtime_ns: i64,
     pub(crate) layer: Option<String>,
     pub(crate) metadata: NoteMetadata,
+}
+
+impl VaultSnapshotNote {
+    /// The Vault-relative path of the note's file, its extension spelled as
+    /// on disk (#675).
+    pub(crate) fn file_path(&self) -> String {
+        format!("{}.{}", self.relative_path, self.extension)
+    }
+}
+
+/// The extension a note file's indexed path ends in, which is `md` in some
+/// case for every note; a path that somehow does not reads as `md`.
+fn note_extension(absolute_path: &str) -> String {
+    std::path::Path::new(absolute_path)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .filter(|extension| extension.eq_ignore_ascii_case("md"))
+        .unwrap_or("md")
+        .to_string()
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -294,7 +317,10 @@ impl<'a> SavedEmbeddings<'a> {
                 pruned,
                 "Dropped saved embeddings this Vault no longer needs"
             ),
-            Err(error) => tracing::warn!(%error, "could not prune saved embedding progress"),
+            Err(error) => {
+                self.cache.report_corruption(&error);
+                tracing::warn!(%error, "could not prune saved embedding progress")
+            }
         }
     }
 
@@ -362,6 +388,7 @@ impl<'a> SavedEmbeddings<'a> {
         match saved {
             Ok(()) => self.pending.clear(),
             Err(error) => {
+                self.cache.report_corruption(&error);
                 tracing::warn!(%error, "could not save embedding progress; it will be retried")
             }
         }
@@ -523,6 +550,7 @@ impl SqliteCache {
                 true,
                 freshness,
             )
+            .inspect_err(|message| self.report_corruption(message))
         })();
         // A pause is not a failure. The retained generation was marked stale
         // when the turn began, which is all an unfinished rebuild shows.
@@ -594,6 +622,7 @@ impl SqliteCache {
                 false,
                 VaultSnapshotFreshness::Fresh,
             )
+            .inspect_err(|message| self.report_corruption(message))
         })();
         if result.is_err() {
             self.mark_vault_snapshot_stale_if_current(vault_id, attempt)?;
@@ -672,14 +701,19 @@ impl SqliteCache {
     /// Vault can neither publish nor save progress after the rows are gone.
     pub(crate) fn disconnect_vault_snapshot(&self, vault_id: VaultId) -> Result<(), String> {
         self.begin_vault_snapshot_attempt(vault_id)?;
-        let mut conn = self.connection()?;
-        let tx = conn
-            .transaction()
-            .map_err(|error| format!("start Vault snapshot disconnect: {error}"))?;
-        delete_vault_snapshot(&tx, &vault_id.to_string())?;
-        delete_saved_embeddings(&tx, &vault_id.to_string())?;
-        tx.commit()
-            .map_err(|error| format!("commit Vault snapshot disconnect: {error}"))
+        // A failed statement rolls the transaction back, which clears the
+        // connection's error, so report corruption from the returned message.
+        (|| {
+            let mut conn = self.connection()?;
+            let tx = conn
+                .transaction()
+                .map_err(|error| format!("start Vault snapshot disconnect: {error}"))?;
+            delete_vault_snapshot(&tx, &vault_id.to_string())?;
+            delete_saved_embeddings(&tx, &vault_id.to_string())?;
+            tx.commit()
+                .map_err(|error| format!("commit Vault snapshot disconnect: {error}"))
+        })()
+        .inspect_err(|message| self.report_corruption(message))
     }
 
     pub(crate) fn snapshot_note_count(&self, vault_id: VaultId) -> Result<usize, String> {
@@ -854,7 +888,7 @@ impl SqliteCache {
         let mut notes_statement = conn
             .prepare(&format!(
                 "SELECT title, slug, relative_path, size_bytes, mtime_ns, layer, \
-                 aliases_json, {frontmatter_column} \
+                 aliases_json, {frontmatter_column}, absolute_path \
                  FROM vault_notes WHERE vault_id = ?1 ORDER BY relative_path"
             ))
             .map_err(|error| format!("prepare Vault snapshot notes: {error}"))?;
@@ -864,6 +898,7 @@ impl SqliteCache {
                     title: row.get(0)?,
                     slug: row.get(1)?,
                     relative_path: row.get(2)?,
+                    extension: note_extension(&row.get::<_, String>(8)?),
                     size_bytes: row.get(3)?,
                     mtime_ns: row.get(4)?,
                     layer: row.get(5)?,
@@ -1261,9 +1296,8 @@ fn copy_notes(
 ) -> Result<(), String> {
     let mut statement = source
         .prepare(
-            "SELECT slug, title, normalized_title, relative_path, normalized_relative_path, \
-                    absolute_path, content, content_hash, layer, aliases_json, frontmatter_json, \
-                    mtime_ns, size_bytes, indexed_at FROM notes",
+            "SELECT slug, title, relative_path, absolute_path, content, content_hash, layer, \
+                    aliases_json, frontmatter_json, mtime_ns, size_bytes, indexed_at FROM notes",
         )
         .map_err(|error| format!("prepare candidate notes: {error}"))?;
     let rows = statement
@@ -1275,14 +1309,12 @@ fn copy_notes(
                 row.get::<_, String>(3)?,
                 row.get::<_, String>(4)?,
                 row.get::<_, String>(5)?,
-                row.get::<_, String>(6)?,
+                row.get::<_, Option<String>>(6)?,
                 row.get::<_, String>(7)?,
-                row.get::<_, Option<String>>(8)?,
-                row.get::<_, String>(9)?,
-                row.get::<_, String>(10)?,
+                row.get::<_, String>(8)?,
+                row.get::<_, i64>(9)?,
+                row.get::<_, i64>(10)?,
                 row.get::<_, i64>(11)?,
-                row.get::<_, i64>(12)?,
-                row.get::<_, i64>(13)?,
             ))
         })
         .map_err(|error| format!("query candidate notes: {error}"))?;
@@ -1290,9 +1322,7 @@ fn copy_notes(
         let (
             slug,
             title,
-            normalized_title,
             relative_path,
-            normalized_relative_path,
             absolute_path,
             content,
             content_hash,
@@ -1304,17 +1334,15 @@ fn copy_notes(
             indexed_at,
         ) = row.map_err(|error| format!("read candidate note: {error}"))?;
         tx.execute(
-            "INSERT INTO vault_notes(vault_id, slug, title, normalized_title, relative_path, \
-             normalized_relative_path, absolute_path, content, content_hash, layer, aliases_json, \
-             frontmatter_json, mtime_ns, size_bytes, indexed_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+            "INSERT INTO vault_notes(vault_id, slug, title, relative_path, absolute_path, \
+             content, content_hash, layer, aliases_json, frontmatter_json, mtime_ns, size_bytes, \
+             indexed_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             params![
                 vault_id,
                 slug,
                 title,
-                normalized_title,
                 relative_path,
-                normalized_relative_path,
                 absolute_path,
                 content,
                 content_hash,
@@ -1377,9 +1405,8 @@ fn seed_notes(
 ) -> Result<(), String> {
     let mut statement = source
         .prepare(
-            "SELECT slug, title, normalized_title, relative_path, normalized_relative_path, \
-                    absolute_path, content, content_hash, layer, aliases_json, frontmatter_json, \
-                    mtime_ns, size_bytes, indexed_at FROM vault_notes WHERE vault_id = ?1",
+            "SELECT slug, title, relative_path, absolute_path, content, content_hash, layer, \
+                    aliases_json, frontmatter_json, mtime_ns, size_bytes, indexed_at FROM vault_notes WHERE vault_id = ?1",
         )
         .map_err(|error| format!("prepare snapshot notes: {error}"))?;
     let rows = statement
@@ -1391,14 +1418,12 @@ fn seed_notes(
                 row.get::<_, String>(3)?,
                 row.get::<_, String>(4)?,
                 row.get::<_, String>(5)?,
-                row.get::<_, String>(6)?,
+                row.get::<_, Option<String>>(6)?,
                 row.get::<_, String>(7)?,
-                row.get::<_, Option<String>>(8)?,
-                row.get::<_, String>(9)?,
-                row.get::<_, String>(10)?,
+                row.get::<_, String>(8)?,
+                row.get::<_, i64>(9)?,
+                row.get::<_, i64>(10)?,
                 row.get::<_, i64>(11)?,
-                row.get::<_, i64>(12)?,
-                row.get::<_, i64>(13)?,
             ))
         })
         .map_err(|error| format!("query snapshot notes: {error}"))?;
@@ -1406,9 +1431,7 @@ fn seed_notes(
         let (
             slug,
             title,
-            normalized_title,
             relative_path,
-            normalized_relative_path,
             absolute_path,
             content,
             content_hash,
@@ -1421,17 +1444,15 @@ fn seed_notes(
         ) = row.map_err(|error| format!("read snapshot note: {error}"))?;
         let note_id: i64 = tx
             .query_row(
-                "INSERT INTO notes(slug, title, normalized_title, relative_path, \
-                 normalized_relative_path, absolute_path, content, content_hash, layer, \
-                 aliases_json, frontmatter_json, mtime_ns, size_bytes, indexed_at) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14) \
+                "INSERT INTO notes(slug, title, relative_path, absolute_path, content, \
+                 content_hash, layer, aliases_json, frontmatter_json, mtime_ns, size_bytes, \
+                 indexed_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12) \
                  RETURNING id",
                 params![
                     slug,
                     title,
-                    normalized_title,
                     relative_path,
-                    normalized_relative_path,
                     absolute_path,
                     content,
                     content_hash,
@@ -1676,8 +1697,8 @@ fn copy_chunks_and_vectors(
         let chunk_id: i64 = tx
             .query_row(
                 "INSERT INTO vault_chunks(vault_id, note_slug, ordinal, heading_path, content, \
-                 byte_start, byte_end, content_hash, tags, aliases) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10) RETURNING id",
+                 byte_start, byte_end, content_hash, tags, aliases, keyword_text) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11) RETURNING id",
                 params![
                     vault_id,
                     note_slug,
@@ -1689,6 +1710,7 @@ fn copy_chunks_and_vectors(
                     content_hash,
                     tags,
                     aliases,
+                    super::keyword::keyword_index_text(&content),
                 ],
                 |row| row.get(0),
             )
@@ -1726,6 +1748,16 @@ mod tests {
     use crate::vault::VaultIndex;
     use crate::vault_registry::VaultId;
     use rusqlite::params;
+
+    /// A snapshot row keeps the case its note's extension is written in
+    /// (#675).
+    #[test]
+    fn a_note_extension_is_read_from_its_indexed_path() {
+        assert_eq!(super::note_extension("/v/a/Upper.MD"), "MD");
+        assert_eq!(super::note_extension("/v/Mixed.Md"), "Md");
+        assert_eq!(super::note_extension("/v/plain.md"), "md");
+        assert_eq!(super::note_extension("/v/odd"), "md");
+    }
 
     struct NamedEmbedder {
         inner: StubEmbedder,
@@ -3173,14 +3205,22 @@ mod tests {
 
     /// A note a build cannot read is missing from its workload, not gone from
     /// the Vault, so its saved vectors survive the prune.
+    #[cfg(unix)]
     #[test]
     fn an_unreadable_note_keeps_its_saved_vectors() {
+        use std::os::unix::fs::PermissionsExt;
+        // SAFETY: `geteuid` reads the process's effective user and cannot fail.
+        if unsafe { libc::geteuid() } == 0 {
+            return; // root reads a file whatever its permissions say
+        }
         let cache = SqliteCache::in_memory(384).expect("open cache");
         let id = vault_id("12345678-1234-4567-89ab-1234567890ab");
         let (directory, index_before) = index(THREE_NOTES);
 
         interrupted_build(&cache, id, &index_before, "stub-384", 2);
-        std::fs::write(directory.path().join("A.md"), b"# A\n\n\xff\xfe not text")
+        // Not invalid UTF-8: such a note is now indexed lossily (#637).
+        let note = directory.path().join("A.md");
+        std::fs::set_permissions(&note, std::fs::Permissions::from_mode(0o000))
             .expect("make A unreadable");
         let index_after = VaultIndex::build(directory.path()).expect("rebuild index");
 
@@ -3191,6 +3231,7 @@ mod tests {
             2,
             "A's saved vector outlives a pass that could not read A"
         );
+        std::fs::set_permissions(&note, std::fs::Permissions::from_mode(0o644)).expect("restore A");
     }
 
     /// Removing a Vault deletes its saved progress; disabling keeps it, the

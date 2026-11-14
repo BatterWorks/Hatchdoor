@@ -40,6 +40,10 @@ import {
   setStoredUnfoldedVault,
   vaultFolderUpdate,
 } from "./vaultAccordion";
+import {
+  ALL_SIDEBAR_SECTIONS,
+  type SidebarSections,
+} from "../features/settings";
 import type {
   ExplorerFolder,
   ModifiedNote,
@@ -547,6 +551,10 @@ type ExplorerPaneProps = {
   /** Given below 920px only (#530): the phone's top bar has no Help slot, so
    * the rail carries it as its last item. */
   onToggleHelp?: () => void;
+  /** Which of the two lists above the tree this instance shows (#684). A
+   * list switched off draws nothing at all; its stored fold is left alone
+   * for when it comes back. */
+  sections?: SidebarSections;
 };
 
 export function ExplorerPane({
@@ -588,6 +596,7 @@ export function ExplorerPane({
   startupProgress,
   demoMode = false,
   onToggleHelp,
+  sections = ALL_SIDEBAR_SECTIONS,
 }: ExplorerPaneProps) {
   // Local, not lifted: the shell already carries a large prop surface, and the
   // module map is explicit that this is a coordination seam rather than an
@@ -753,26 +762,30 @@ export function ExplorerPane({
           onScrollTopChange(event.currentTarget.scrollTop);
         }}
       >
-        <ChangesPanel
-          notes={modifiedNotes}
-          onNavigate={onCloseDrawer}
-          vaults={vaults}
-          scope={scope}
-          partial={modifiedNotesPartial}
-          missingVaultNames={modifiedNotesMissingVaults}
-          error={modifiedNotesError}
-          onRetry={onRetryModifiedNotes}
-          collapsed={changesCollapsed}
-          onToggleCollapsed={toggleChangesCollapsed}
-        />
+        {sections.changedOnDisk ? (
+          <ChangesPanel
+            notes={modifiedNotes}
+            onNavigate={onCloseDrawer}
+            vaults={vaults}
+            scope={scope}
+            partial={modifiedNotesPartial}
+            missingVaultNames={modifiedNotesMissingVaults}
+            error={modifiedNotesError}
+            onRetry={onRetryModifiedNotes}
+            collapsed={changesCollapsed}
+            onToggleCollapsed={toggleChangesCollapsed}
+          />
+        ) : null}
 
-        <RecentNotesList
-          notes={recentNotes}
-          onNavigate={onCloseDrawer}
-          collapsed={recentCollapsed}
-          onToggleCollapsed={() => onRecentCollapsedChange(!recentCollapsed)}
-          vaults={vaults}
-        />
+        {sections.recentlyViewed ? (
+          <RecentNotesList
+            notes={recentNotes}
+            onNavigate={onCloseDrawer}
+            collapsed={recentCollapsed}
+            onToggleCollapsed={() => onRecentCollapsedChange(!recentCollapsed)}
+            vaults={vaults}
+          />
+        ) : null}
 
         {showTreeSkeleton ? <ExplorerSkeleton /> : null}
         {!showTreeSkeleton && !loadingTree && treeError && !tree ? (

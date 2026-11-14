@@ -1,11 +1,10 @@
 use std::collections::{HashMap, HashSet};
-use std::fs;
 
 use crate::cache::parse::for_non_code_line;
 
 use super::link_style::LinkFormCounts;
 use super::markdown_links::{local_image_count, note_dir, note_link_destinations};
-use super::paths::{normalize_link_target, normalize_title, slugify, split_wikilink_note_body};
+use super::paths::split_wikilink_note_body;
 use super::types::{NoteEntry, VaultIndex};
 
 pub fn build_link_graph(
@@ -25,7 +24,9 @@ pub fn build_link_graph(
             continue;
         };
 
-        let Ok(content) = fs::read_to_string(&note.path) else {
+        // Bounded and non-blocking (#636): the path may have become a FIFO
+        // since the walk, and a note over the bound adds no links.
+        let Ok(content) = super::read_note_text(&note.path) else {
             continue;
         };
 
@@ -36,10 +37,12 @@ pub fn build_link_graph(
         // resolver: a wikilink names a title, a Markdown link a path relative
         // to the note it was written in.
         let (wikilink_targets, _) = extract_wikilink_targets(&content);
-        let wikilinks = wikilink_targets.into_iter().filter_map(|target| {
-            resolve_target_slug(&target, by_slug, &index.by_title, &index.by_path_title)
-        });
         let folder = note_dir(&note.relative_path);
+        let wikilinks = wikilink_targets.into_iter().filter_map(|target| {
+            index
+                .resolve_wikilink_from(&target, folder)
+                .map(|entry| entry.slug.clone())
+        });
         let markdown_links = note_link_destinations(&content)
             .into_iter()
             .filter_map(|destination| index.resolve_note_link(destination, folder))
@@ -70,6 +73,30 @@ pub fn build_link_graph(
     }
 
     (outgoing_by_slug, backlinks_by_slug)
+}
+
+impl VaultIndex {
+    /// Missing or ambiguous note targets, preserving their written spelling.
+    /// Uses the graph's scanners and resolvers without changing its edges.
+    pub(crate) fn unresolved_note_targets(&self, content: &str, folder: &str) -> Vec<String> {
+        let (wiki, _) = extract_wikilink_targets(content);
+        let mut targets: Vec<String> = wiki
+            .into_iter()
+            .filter(|target| {
+                self.resolve_wikilink_match(target, folder)
+                    .is_none_or(|found| !found.unique)
+            })
+            .collect();
+        targets.extend(
+            note_link_destinations(content)
+                .into_iter()
+                .filter(|destination| self.resolve_note_link(destination, folder).is_none())
+                .map(str::to_owned),
+        );
+        targets.sort();
+        targets.dedup();
+        targets
+    }
 }
 
 /// How many note links and attachment embeds one note writes in each form,
@@ -144,33 +171,4 @@ fn extract_line_wikilink_targets(line: &str, targets: &mut Vec<String>, embeds: 
 
         idx = end + 2;
     }
-}
-
-fn resolve_target_slug(
-    raw_target: &str,
-    by_slug: &HashMap<String, NoteEntry>,
-    by_title: &HashMap<String, String>,
-    by_path_title: &HashMap<String, String>,
-) -> Option<String> {
-    let normalized_target = normalize_link_target(raw_target);
-
-    if let Some(slug) = by_path_title.get(&normalize_title(&normalized_target)) {
-        return Some(slug.clone());
-    }
-
-    let base = normalized_target
-        .rsplit('/')
-        .next()
-        .unwrap_or(&normalized_target);
-
-    if let Some(slug) = by_title.get(&normalize_title(base)) {
-        return Some(slug.clone());
-    }
-
-    let slug = slugify(base);
-    if by_slug.contains_key(&slug) {
-        return Some(slug);
-    }
-
-    None
 }

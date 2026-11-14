@@ -1694,3 +1694,55 @@ describe("Single-Vault instances surface the Vault's health (#334)", () => {
     expect(notesHead).not.toHaveClass("is-pinned");
   });
 });
+
+describe("ExplorerPane sidebar switches (#684)", () => {
+  afterEach(cleanup);
+
+  const first = () =>
+    document.querySelector(".explorer-nav")?.firstElementChild ?? null;
+
+  it("shows both lists by default", () => {
+    renderPane();
+    expect(
+      screen.getByRole("button", { name: /^Changed on disk/ }),
+    ).toBeInTheDocument();
+    expect(screen.getByTestId("recent-notes")).toBeInTheDocument();
+  });
+
+  it("draws nothing of Changed on disk when it is switched off, heading included", () => {
+    renderPane({ sections: { changedOnDisk: false, recentlyViewed: true } });
+    expect(
+      screen.queryByRole("button", { name: /^Changed on disk/ }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("region", { name: "Recently changed notes" }),
+    ).not.toBeInTheDocument();
+    expect(screen.getByTestId("recent-notes")).toBeInTheDocument();
+  });
+
+  it("draws nothing of Recently viewed when it is switched off, heading included", () => {
+    renderPane({ sections: { changedOnDisk: true, recentlyViewed: false } });
+    expect(screen.queryByTestId("recent-notes")).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /^Recently viewed/ }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /^Changed on disk/ }),
+    ).toBeInTheDocument();
+  });
+
+  it("puts the tree first with both off, and leaves each list's stored fold alone", () => {
+    window.localStorage.setItem(CHANGES_COLLAPSED_KEY, "0");
+    renderPane({ sections: { changedOnDisk: false, recentlyViewed: false } });
+    expect(first()).not.toHaveClass("explorer-changes");
+    expect(first()).not.toHaveClass("recent-notes");
+    expect(screen.queryByTestId("recent-notes")).not.toBeInTheDocument();
+    expect(window.localStorage.getItem(CHANGES_COLLAPSED_KEY)).toBe("0");
+
+    cleanup();
+    renderPane();
+    expect(
+      screen.getByRole("button", { name: /^Changed on disk/ }),
+    ).toHaveAttribute("aria-expanded", "true");
+  });
+});

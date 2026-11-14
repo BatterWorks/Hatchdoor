@@ -14,11 +14,8 @@ import { readErrorMessage } from "../api/apiError";
 import rehypeKatex from "rehype-katex";
 
 import { noteInSyncConflict } from "../app/vaultSlotLogic";
-import {
-  parseFrontmatter,
-  stripBlockIds,
-  stripVaultNoteLinks,
-} from "../lib/markdown";
+import { DEFAULT_NOTE_WIDTH, type NoteWidth } from "../features/settings";
+import { parseFrontmatter, stripVaultNoteLinks } from "../lib/markdown";
 import {
   duplicateTitleHeadingLine,
   extractMarkdownHeadings,
@@ -29,6 +26,7 @@ import { NOTE_SYNTAX_PLUGINS } from "../lib/markdownSyntax";
 import { hideComments } from "../lib/noteComments";
 import { detectLineEnding, frontmatterLineOffset } from "../lib/sourceMap";
 import { useIsMobile } from "../hooks/useIsMobile";
+import type { NoteMovedHere } from "../hooks/useNoteActions";
 import { useNoteAutosave } from "../hooks/useNoteAutosave";
 import { holdAppReload } from "../lib/reloadGuard";
 import { safeGetItem, safeSetItem } from "../lib/storage";
@@ -50,14 +48,18 @@ import type {
 } from "../types";
 import {
   describeWriteOutcome,
+  isNoteMovedError,
   updateNote,
   uploadAttachment,
 } from "../api/writeApi";
 import {
   clearNoteDraft,
+  holdNoteDraft,
   listHeldDrafts,
   loadNoteDraft,
+  noteDraftKey,
   saveNoteDraft,
+  type NoteDraft,
 } from "../lib/writeDrafts";
 import { NoteEditor, type UploadedAttachment } from "./NoteEditor";
 import type { NoteCandidate } from "../lib/noteCandidates";
@@ -80,6 +82,7 @@ import {
   wikilinkLabel,
 } from "./note-page/live-editor/noteLinks";
 import { NotePreview } from "./note-page/NotePreview";
+import { NoteEmbedContext } from "./note-page/noteEmbeds";
 import { createNoteMarkdownComponents } from "./note-page/renderers";
 import { SavedQueryProvider } from "./note-page/SavedQueryBlock";
 import {
@@ -95,9 +98,11 @@ import {
 } from "./note-page/sections";
 import {
   cachedAssetHref,
+  findNoteAtPath,
   resolveAssetTargets,
   resolveNoteTargets,
   useResolvedWikilinks,
+  wikilinkAnchor,
 } from "./note-page/wikilinks";
 
 /** The browser remembers whether notes open rendered or in the editor. */
@@ -121,12 +126,22 @@ const DRAFT_WRITE_DEBOUNCE_MS = 700;
  */
 const KEEPALIVE_BODY_LIMIT_BYTES = 60_000;
 
+/** What the server said is at the opened note's path once its slug named
+ * another file (#627). */
+type MovedLookup =
+  | { kind: "pending" }
+  | { kind: "taken"; slug: string }
+  | { kind: "gone" }
+  | { kind: "unknown" };
+
 /** Which note a scheduled draft write belongs to, and the version it is an
  * edit of. Captured when the write is scheduled, so a pending write cannot
  * follow the page onto the next note. */
 type DraftTarget = {
   vaultId: string;
-  slug: string;
+  /** The note's Vault-relative path, its identity (#627): its slug can move
+   * to a same-named note while it is open. */
+  relativePath: string;
   baseContentHash: string;
 };
 
@@ -184,6 +199,7 @@ export function NotePage({
   demoMode = false,
   noteCandidates = [],
   vaults,
+  noteWidth = DEFAULT_NOTE_WIDTH,
 }: {
   onActiveNoteChange: (meta: ActiveNoteMeta | null) => void;
   /** The open note's headings as the table of contents lists them (#530),
@@ -208,6 +224,9 @@ export function NotePage({
   demoMode?: boolean;
   noteCandidates?: NoteCandidate[];
   vaults: VaultSummary[];
+  /** The Layout setting's cap on the note column (#698), drawn by
+   * `note-content.css` from `data-note-width`. */
+  noteWidth?: NoteWidth;
 }) {
   const params = useParams<{ vaultId: string; slug: string }>();
   const location = useLocation();
@@ -273,6 +292,11 @@ export function NotePage({
     note: Note;
   } | null>(null);
   const [noteChangedOnDisk, setNoteChangedOnDisk] = useState(false);
+  // The URL's slug now names a different file than the note this page opened
+  // (#627). Slugs move when a same-named note appears earlier in path order
+  // (ADR-24); from then on every read and write by slug would reach that other
+  // note, so the page stops saving and points at where its note went.
+  const [noteMoved, setNoteMoved] = useState(false);
   const [editorError, setEditorError] = useState<string | null>(null);
   const [inlineDirty, setInlineDirty] = useState(false);
   // The live editor has focus: text may be sitting in it that no save has
@@ -306,14 +330,28 @@ export function NotePage({
   // Pre-#137 drafts recovered into Settings (#151): named here, not silently
   // acted on. Dismissing is per view, not persisted — it returns on every
   // load until the last held draft is dealt with.
-  const [heldDraftsPresent] = useState(() => listHeldDrafts().length > 0);
+  const [heldDraftsPresent, setHeldDraftsPresent] = useState(
+    () => listHeldDrafts().length > 0,
+  );
   const [heldDraftsBannerDismissed, setHeldDraftsBannerDismissed] =
     useState(false);
   const [searchHitCount, setSearchHitCount] = useState(0);
   const [activeSearchHit, setActiveSearchHit] = useState(0);
   const noteBodyRef = useRef<HTMLDivElement | null>(null);
   const searchHitsRef = useRef<HTMLSpanElement[]>([]);
-  const noteKey = `${vaultId}:${slug}`;
+  // Bumped on every arrival at a note, and to open the address afresh: the
+  // "gone" notice's button (#627), which must not carry this note's editor
+  // state, pending saves or draft target onto the file the address names now.
+  // A return to a note is a new visit too, so a save still out from the last
+  // one is never booked against it (#658). Adjusted during render, so no
+  // render ever pairs the new address with the old visit.
+  const [visit, setVisit] = useState(0);
+  const [visitedAddress, setVisitedAddress] = useState(`${vaultId}:${slug}`);
+  if (visitedAddress !== `${vaultId}:${slug}`) {
+    setVisitedAddress(`${vaultId}:${slug}`);
+    setVisit((current) => current + 1);
+  }
+  const noteKey = `${vaultId}:${slug}#${visit}`;
   const currentNoteKeyRef = useRef(noteKey);
   // Only ever the open note's own disk version, whatever is left in state.
   const conflictNote =
@@ -329,6 +367,10 @@ export function NotePage({
   // `null` until a revision is known. The first one observed is the revision
   // the open note was already read at, not a change to it.
   const lastHandledRevisionRef = useRef<number | null>(null);
+  const autosaveRef = useRef<ReturnType<typeof useNoteAutosave> | null>(null);
+  const editVersionRef = useRef(0);
+  const editingRef = useRef(isEditing);
+  editingRef.current = isEditing;
   const autosaveStatusRef = useRef<string>("idle");
   const editorFocusedRef = useRef(false);
   const latestContentRef = useRef("");
@@ -346,7 +388,7 @@ export function NotePage({
   draftTargetRef.current = note
     ? {
         vaultId,
-        slug: note.slug,
+        relativePath: note.relative_path,
         baseContentHash: isEditing
           ? editBaseHash || note.content_hash
           : note.content_hash,
@@ -360,6 +402,15 @@ export function NotePage({
     content: string;
   } | null>(null);
   const draftTimerRef = useRef<number | null>(null);
+  // Only copies written by this visit may advance through our save chain.
+  // Matching the timestamp and text leaves another tab's held edit alone.
+  const lastWrittenDraftRef = useRef<NoteDraft | null>(null);
+  // The last copy each visit wrote, kept past leaving its note: that note's
+  // save can come back after the page moved on, and its newer held edit is
+  // still based on our own write (#695). Keyed by `noteDraftKey`; an entry
+  // is kept only while the store holds that copy, and goes when the note's
+  // next save reply is booked.
+  const leftDraftsRef = useRef<Map<string, NoteDraft>>(new Map());
   // The last document the vault confirmed it holds. A debounced write can be
   // scheduled before a save and fire after it, and recreating the draft then
   // would leave text the vault already has sitting in the store under a hash
@@ -401,15 +452,27 @@ export function NotePage({
     if (content === savedContentRef.current) {
       return;
     }
-    const stored = saveNoteDraft(target.vaultId, target.slug, {
+    const draft: NoteDraft = {
       vaultId: target.vaultId,
-      slug: target.slug,
+      relativePath: target.relativePath,
       content,
       baseContentHash: target.baseContentHash,
       savedAt: Date.now(),
-    });
+    };
+    const stored = saveNoteDraft(
+      target.vaultId,
+      target.relativePath,
+      draft,
+      () => {
+        setHeldDraftsPresent(true);
+        setHeldDraftsBannerDismissed(false);
+        setRecoveredDraftNotice(null);
+      },
+    );
     if (!stored) {
       setDraftStorageBlocked(true);
+    } else {
+      lastWrittenDraftRef.current = draft;
     }
   }, []);
 
@@ -457,13 +520,66 @@ export function NotePage({
   // render where the key changes `note` still holds the previous note until
   // the new one's read lands.
   const noteLoadedForRef = useRef<string | null>(null);
+  // The path of the note open under this key, the note's identity (#627).
+  // Every read below goes by slug, which can come back naming another file.
+  const openPathRef = useRef<string | null>(null);
+  openPathRef.current =
+    note && noteLoadedForRef.current === noteKey ? note.relative_path : null;
+  // The same value, fixed for this render's save closures: a queued save
+  // drained after navigation must carry the path of the slug it was made
+  // with, not the next note's.
+  const openPathAtRender = openPathRef.current ?? undefined;
+  const noteMovedRef = useRef(false);
+  noteMovedRef.current = noteMoved;
+  // A Rename, Move or Archive made here names where it took the note
+  // (`useNoteActions`' router state), which is the one way this page can tell
+  // its own note moving under a kept slug from another file taking the slug.
+  const movedHere = location.state as NoteMovedHere | null;
+  const movedHereRef = useRef(movedHere);
+  movedHereRef.current = movedHere;
+
+  /** A note read by slug, kept only when it is still the note this page
+   * opened. Anything else is the slug's new holder: the page flags the move
+   * and shows none of it, since its text would be offered as this note's. */
+  const ownNoteOrMoved = useCallback(
+    (
+      read: Note,
+      openPath: string | null = openPathRef.current,
+    ): Note | null => {
+      const handoff = movedHereRef.current;
+      const movedByThisApp =
+        handoff?.movedFrom === openPath &&
+        handoff.movedTo === read.relative_path;
+      if (
+        openPath !== null &&
+        read.relative_path !== openPath &&
+        !movedByThisApp
+      ) {
+        setNoteMoved(true);
+        return null;
+      }
+      // The slug names this note again, as when the note that took it was
+      // deleted: saving can carry on from the version just read.
+      if (noteMovedRef.current) {
+        setNoteMoved(false);
+      }
+      return read;
+    },
+    [],
+  );
 
   const notePath = `/api/v1/vaults/${encodeURIComponent(vaultId)}/notes/${encodeURIComponent(slug)}`;
 
   const loadNote = useCallback(
-    async (hardReload: boolean) => {
+    /** Resolves true when the read became this page's note. */
+    async (hardReload: boolean, protectEdits = false): Promise<boolean> => {
+      const editVersion = editVersionRef.current;
       setError(null);
-      if (hardReload) {
+      // Taken before the skeleton clears `note`: reopening the same note after
+      // the source editor closes is still a reload of this note (#627).
+      const openPath = openPathRef.current;
+      // Kept while this note is open, so a refused read still has it to show.
+      if (hardReload && openPath === null) {
         setNote(null);
       }
 
@@ -473,17 +589,39 @@ export function NotePage({
           throw new Error(await readErrorMessage(res, "Failed loading note"));
         }
         const json = (await res.json()) as VaultQualifiedNote;
-        if (noteKey !== currentNoteKeyRef.current) return;
+        if (noteKey !== currentNoteKeyRef.current) return false;
+        // A reload never trades the open note for another one (#627). Only
+        // the first read under a key decides which note that is.
+        if (!ownNoteOrMoved(json.note, openPath)) {
+          return false;
+        }
+        // A clean editor when the request left may no longer be clean when
+        // it returns. Even an edit already saved during this read makes its
+        // snapshot too old to replace the editor or seed the next save hash.
+        if (
+          protectEdits &&
+          (editVersion !== editVersionRef.current ||
+            editingRef.current ||
+            editorFocusedRef.current ||
+            autosaveRef.current?.hasUnsaved())
+        ) {
+          if (!autosaveRef.current?.isOwnWrite(json.note.content_hash)) {
+            setNoteChangedOnDisk(true);
+          }
+          return false;
+        }
         noteLoadedForRef.current = noteKey;
         setNote((prev) => (isNoteEqual(prev, json.note) ? prev : json.note));
+        return true;
       } catch (err) {
-        if (noteKey !== currentNoteKeyRef.current) return;
+        if (noteKey !== currentNoteKeyRef.current) return false;
         setError(
           err instanceof Error ? err.message : "Unknown note loading error",
         );
+        return false;
       }
     },
-    [noteKey, notePath],
+    [noteKey, notePath, ownNoteOrMoved],
   );
 
   const loadNoteLinks = useCallback(async () => {
@@ -526,6 +664,11 @@ export function NotePage({
   }, [loadNote, loadNoteLinks]);
 
   useEffect(() => {
+    // A draft write still waiting out its debounce belongs to the note just
+    // left. Written now, before the next note's read lands and looks for its
+    // own draft: "Open it" (#627) opens the same file, often within the
+    // debounce of the last keystroke.
+    writeDraftNow();
     setIsEditing(false);
     setDraftContent("");
     setEditBaseHash("");
@@ -534,13 +677,27 @@ export function NotePage({
     setConflict(false);
     setConflictDisk(null);
     setNoteChangedOnDisk(false);
+    setNoteMoved(false);
     setEditorError(null);
     setSaving(false);
     setInlineDirty(false);
     setRecoveredDraftNotice(null);
     setRestoredCommit(null);
     savedContentRef.current = null;
-  }, [noteKey]);
+    const left = lastWrittenDraftRef.current;
+    const stored = left && loadNoteDraft(left.vaultId, left.relativePath);
+    if (
+      left &&
+      stored?.savedAt === left.savedAt &&
+      stored.content === left.content
+    ) {
+      leftDraftsRef.current.set(
+        noteDraftKey(left.vaultId, left.relativePath),
+        left,
+      );
+    }
+    lastWrittenDraftRef.current = null;
+  }, [noteKey, writeDraftNow]);
 
   useEffect(() => {
     if (
@@ -601,7 +758,7 @@ export function NotePage({
       return;
     }
 
-    void loadNote(false);
+    void loadNote(false, true);
     void loadNoteLinks();
   }, [loadNote, loadNoteLinks, vaultRevision, isEditing, inlineDirty]);
 
@@ -624,7 +781,7 @@ export function NotePage({
       return;
     }
 
-    const storedDraft = loadNoteDraft(vaultId, note.slug);
+    const storedDraft = loadNoteDraft(vaultId, note.relative_path);
     if (storedDraft && storedDraft.content !== note.content) {
       const stale = storedDraft.baseContentHash !== note.content_hash;
       setDraftContent(storedDraft.content);
@@ -746,11 +903,10 @@ export function NotePage({
   // What a reader sees of the body: comments hidden (#573), lines kept, so
   // every rendered block still maps to its line in the file.
   const visibleBody = useMemo(() => hideComments(parsed.body), [parsed.body]);
-  const renderInput = stripBlockIds(visibleBody);
   const noteRelativePath = note?.relative_path ?? "";
   const { resolved: markdown, resolvedFor } = useResolvedWikilinks(
     vaultId,
-    renderInput,
+    visibleBody,
     noteRelativePath,
   );
   // The live editor's wikilinks, resolved by the server through the reading
@@ -764,7 +920,7 @@ export function NotePage({
   );
   // While resolution is in flight the rendered tree still describes the
   // previous document, so every block range on screen is stale (D28).
-  const settling = resolvedFor !== renderInput;
+  const settling = resolvedFor !== visibleBody;
   const searchQuery = useMemo(
     () => normalizeSearchQuery(new URLSearchParams(location.search).get("q")),
     [location.search],
@@ -825,6 +981,18 @@ export function NotePage({
     !isEditing,
   );
 
+  // Where this note's embeds start counting depth and cycles from (#699).
+  const embedScope = useMemo(
+    () => ({
+      vaultId,
+      // The note's own slug, which a resolved embed of it names, not the
+      // address, which can be another spelling of it.
+      chain: [note?.slug ?? slug],
+      revision: vaultRevision,
+    }),
+    [vaultId, slug, note?.slug, vaultRevision],
+  );
+
   const markdownComponents = useMemo(
     () =>
       createNoteMarkdownComponents(
@@ -836,12 +1004,11 @@ export function NotePage({
     [vaultId, note?.relative_path, headingIdsBySourceLine, hiddenHeadingLine],
   );
 
-  const autosaveRef = useRef<ReturnType<typeof useNoteAutosave> | null>(null);
-
   // The document differs from the one on disk, from this keystroke on. Read
   // by the revision guard, which must not refetch over unsaved text, and by
   // the reload hold.
   const markDirty = () => {
+    editVersionRef.current += 1;
     if (note && !inlineDirty) {
       setEditBaseHash(note.content_hash);
       setInlineDirty(true);
@@ -877,65 +1044,138 @@ export function NotePage({
   // a page that comes back has a current hash instead of conflicting on the
   // next keystroke. A page that is really gone never sees it resolve, which is
   // what the draft above covers.
+  /** The notice a refused save raises, shown only while the note it was for is
+   * still open: a late refusal for the note just left is not this one's (#658).
+   * Same defense-in-depth backstop as every other write path (#152): autosave
+   * stops either way, but a demo refusal must show the app's one sentence, not
+   * the generic "could not reach the vault" banner. */
+  const refuseSaveFor = useCallback(
+    (sentFor: string, error: unknown) => {
+      if (sentFor !== currentNoteKeyRef.current) {
+        return;
+      }
+      if (onDemoRefusal?.(error)) {
+        setAutosaveDemoRefusal(true);
+      } else if (isNoteMovedError(error)) {
+        setNoteMoved(true);
+      }
+    },
+    [onDemoRefusal],
+  );
+
   const flushSave = useCallback(
     async (content: string, expectedHash: string) => {
+      const sentFor = noteKey;
       writeDraftNow(content);
       const keepalive =
         new TextEncoder().encode(content).length < KEEPALIVE_BODY_LIMIT_BYTES;
       try {
         const outcome = await updateNote(vaultId, slug, content, expectedHash, {
           keepalive,
+          expectedRelativePath: openPathAtRender,
         });
-        savedContentRef.current = content;
+        if (sentFor === currentNoteKeyRef.current) {
+          savedContentRef.current = content;
+        }
         return outcome;
       } catch (error) {
-        if (onDemoRefusal?.(error)) {
-          setAutosaveDemoRefusal(true);
-        }
+        refuseSaveFor(sentFor, error);
         throw error;
       }
     },
-    [onDemoRefusal, slug, vaultId, writeDraftNow],
+    [openPathAtRender, refuseSaveFor, slug, vaultId, writeDraftNow, noteKey],
   );
 
   const autosave = useNoteAutosave({
+    // Each note gets its own autosave: a reply for the note just left never
+    // moves this one's hash or stops its saving (#658).
+    noteKey,
     baseHash: note?.content_hash ?? "",
-    enabled: inlineEditingEnabled,
+    // Once the slug names another note nothing is sent by it; the text stays
+    // in the editor and in the draft filed under this note's path (#627).
+    enabled: inlineEditingEnabled && !noteMoved,
     save: async (nextContent, expectedHash) => {
+      const sentFor = noteKey;
       try {
         const outcome = await updateNote(
           vaultId,
           slug,
           nextContent,
           expectedHash,
+          { expectedRelativePath: openPathAtRender },
         );
-        savedContentRef.current = nextContent;
+        if (sentFor === currentNoteKeyRef.current) {
+          savedContentRef.current = nextContent;
+        }
         return outcome;
       } catch (error) {
-        // Same defense-in-depth backstop as every other write path (#152):
-        // the hook's own catch still stops autosave for this session either
-        // way, but the notice shown for it must be the app's one sentence,
-        // not the generic "could not reach the vault" banner below.
-        if (onDemoRefusal?.(error)) {
-          setAutosaveDemoRefusal(true);
-        }
+        refuseSaveFor(sentFor, error);
         throw error;
       }
     },
     flushSave,
-    onSaved: (result) => {
-      setNote((prev) =>
-        prev && result.content_hash
-          ? { ...prev, content_hash: result.content_hash }
-          : prev,
-      );
-      setInlineDirty(false);
+    onSaved: (result, savedContent, sentAgainst) => {
+      // Captured with this render, so a reply landing after the user opened
+      // another note still names the note it was for (#658).
+      const savedFor = noteKey;
+      const stillOpen = savedFor === currentNoteKeyRef.current;
+      if (stillOpen) {
+        setNote((prev) =>
+          prev && result.content_hash
+            ? { ...prev, content_hash: result.content_hash }
+            : prev,
+        );
+        setInlineDirty(latestContentRef.current !== savedContent);
+      }
       // The vault holds this text now, so the local copy has nothing left to
       // rescue. A debounced write scheduled since carries newer text and
       // legitimately recreates it a moment later; one carrying the text that
       // was just saved is skipped by `writeDraftNow` instead of resurrecting
       // this key against a hash that has already moved.
-      clearNoteDraft(vaultId, note?.slug ?? slug);
+      // Cleared for the file the server wrote, which a reply landing after
+      // navigation still names correctly (#627).
+      if (result.relative_path) {
+        clearNoteDraft(vaultId, result.relative_path, savedContent);
+        // Typing that continued during this save is based on our own write,
+        // not a displaced edit from another visit. Advance that local copy's
+        // base too, without archiving an ordinary intermediate keystroke.
+        if (result.content_hash) {
+          const pending = draftPendingRef.current;
+          if (
+            pending?.target.vaultId === vaultId &&
+            pending.target.relativePath === result.relative_path &&
+            pending.content === latestContentRef.current
+          ) {
+            pending.target = {
+              ...pending.target,
+              baseContentHash: result.content_hash,
+            };
+          }
+          const draft = loadNoteDraft(vaultId, result.relative_path);
+          // A reply for the note just left finds that visit's last copy
+          // among the left ones, and moves it only when it was based on
+          // the hash this save replaced (#695).
+          const leftKey = noteDraftKey(vaultId, result.relative_path);
+          const local = stillOpen
+            ? lastWrittenDraftRef.current
+            : leftDraftsRef.current.get(leftKey);
+          leftDraftsRef.current.delete(leftKey);
+          if (
+            draft &&
+            local &&
+            (stillOpen || draft.baseContentHash === sentAgainst) &&
+            draft.vaultId === local.vaultId &&
+            draft.relativePath === local.relativePath &&
+            draft.savedAt === local.savedAt &&
+            draft.content === local.content
+          ) {
+            saveNoteDraft(vaultId, result.relative_path, {
+              ...draft,
+              baseContentHash: result.content_hash,
+            });
+          }
+        }
+      }
     },
   });
 
@@ -943,6 +1183,113 @@ export function NotePage({
     autosaveRef.current = autosave;
     autosaveStatusRef.current = autosave.status;
   }, [autosave]);
+
+  // The slug names another file, but that alone does not say whose move it
+  // was (#627), so the server is asked who is at the opened path now.
+  // `taken`: another slug is there, so the slug changed hands and the notice
+  // offers that slug. `gone`: nobody is there, or the path matched only
+  // loosely (case, Unicode form) under this very slug. The note moved or was
+  // renamed outside this page, or it was deleted and a namesake inherited
+  // the slug; nothing tells those apart, so the notice asks before the
+  // address is opened afresh. `unknown`: the server could not be asked.
+  const [movedLookup, setMovedLookup] = useState<MovedLookup>({
+    kind: "pending",
+  });
+  const [lookupAttempt, setLookupAttempt] = useState(0);
+  const handoffTriedRef = useRef<NoteMovedHere | null>(null);
+  useEffect(() => {
+    if (!noteMoved || openPathAtRender === undefined) {
+      setMovedLookup({ kind: "pending" });
+      return;
+    }
+    let cancelled = false;
+    void (async () => {
+      // This app's own Move landed after the refresh that flagged it: the
+      // refresh accepts the file it names (`ownNoteOrMoved`). Tried once, so
+      // a hand-off that does not match falls through to the lookup.
+      if (
+        movedHere?.movedFrom === openPathAtRender &&
+        handoffTriedRef.current !== movedHere
+      ) {
+        handoffTriedRef.current = movedHere;
+        if ((await loadNote(false)) || cancelled) {
+          return;
+        }
+      }
+      const found = await findNoteAtPath(vaultId, openPathAtRender);
+      if (cancelled) {
+        return;
+      }
+      if (found === undefined) {
+        setMovedLookup({ kind: "unknown" });
+      } else if (found === null || found === slug) {
+        setMovedLookup({ kind: "gone" });
+        if (found === slug) {
+          // Perhaps it came back: a read naming the opened path clears this.
+          void loadNote(false);
+        }
+      } else {
+        setMovedLookup({ kind: "taken", slug: found });
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    noteMoved,
+    openPathAtRender,
+    movedHere,
+    vaultId,
+    slug,
+    loadNote,
+    lookupAttempt,
+  ]);
+
+  // The hand-off is spent once the page holds the note it names, and stale
+  // once the page holds a note it does not mention; either way it leaves the
+  // history entry, so going back to it later cannot vouch for another file.
+  useEffect(() => {
+    if (
+      movedHere &&
+      openPathAtRender !== undefined &&
+      openPathAtRender !== movedHere.movedFrom
+    ) {
+      navigate(`${location.pathname}${location.search}${location.hash}`, {
+        replace: true,
+        state: null,
+      });
+    }
+  }, [
+    movedHere,
+    openPathAtRender,
+    navigate,
+    location.pathname,
+    location.search,
+    location.hash,
+  ]);
+
+  /** The "gone" notice's button: whatever this address names now is opened
+   * as a fresh visit. The unsaved edit for the file this page opened goes to
+   * Settings' held drafts first, since no page will look for it under that
+   * path again. */
+  const openAddressAfresh = () => {
+    writeDraftNow();
+    autosave.discard();
+    if (openPathAtRender !== undefined) {
+      holdNoteDraft(vaultId, openPathAtRender);
+    }
+    setVisit((current) => current + 1);
+  };
+
+  // A refused save stopped autosave. When the page has its note back under
+  // this slug, saving carries on from the version read.
+  const wasMovedRef = useRef(false);
+  useEffect(() => {
+    if (wasMovedRef.current && !noteMoved && note) {
+      autosaveRef.current?.resume(note.content_hash);
+    }
+    wasMovedRef.current = noteMoved;
+  }, [noteMoved, note]);
 
   // Hold off the service worker's own reload while an edit is in the air
   // (#330). A nightly build activates and reloads the page with no prompt, and
@@ -982,6 +1329,13 @@ export function NotePage({
     if (!note || !writeEnabled || isEditing) {
       return;
     }
+    // The route reuses this page, so the first render under a new key still
+    // holds the previous note. Checked against that one, a draft for the same
+    // file (as when "Open it" follows a note to its new slug, #627) looked
+    // already applied and was never offered again.
+    if (noteLoadedForRef.current !== noteKey) {
+      return;
+    }
     if (draftRecoveredForRef.current === noteKey) {
       return;
     }
@@ -992,7 +1346,7 @@ export function NotePage({
     }
     draftRecoveredForRef.current = noteKey;
 
-    const stored = loadNoteDraft(vaultId, note.slug);
+    const stored = loadNoteDraft(vaultId, note.relative_path);
     if (!stored || stored.content === note.content) {
       return;
     }
@@ -1034,6 +1388,7 @@ export function NotePage({
   // rather than waiting for blur, and written to the local draft on the same
   // schedule, which is what survives the vault refusing it (#330).
   const handleInProgressChange = (nextContent: string) => {
+    latestContentRef.current = nextContent;
     scheduleDraftWrite(nextContent);
     autosaveRef.current?.touch(nextContent);
   };
@@ -1083,7 +1438,10 @@ export function NotePage({
         const res = await apiFetch(notePath);
         if (res.ok) {
           const json = (await res.json()) as VaultQualifiedNote;
-          showConflictFor(reviewedKey, json.note);
+          const disk = ownNoteOrMoved(json.note);
+          if (disk) {
+            showConflictFor(reviewedKey, disk);
+          }
         }
       } catch {
         // The banner already said what happened; source mode still holds the draft.
@@ -1215,7 +1573,7 @@ export function NotePage({
     }
 
     cancelDraftWrite();
-    clearNoteDraft(vaultId, note.slug);
+    clearNoteDraft(vaultId, note.relative_path);
     setDraftContent(note.content);
     setEditorError(null);
     setDraftNotice(null);
@@ -1254,11 +1612,14 @@ export function NotePage({
       if (reloadKey !== currentNoteKeyRef.current) {
         return;
       }
+      if (!ownNoteOrMoved(json.note)) {
+        return;
+      }
       setNote(json.note);
       setEditBaseHash(json.note.content_hash);
-      saveNoteDraft(vaultId, json.note.slug, {
+      saveNoteDraft(vaultId, json.note.relative_path, {
         vaultId,
-        slug: json.note.slug,
+        relativePath: json.note.relative_path,
         content: draftContent,
         baseContentHash: json.note.content_hash,
         savedAt: Date.now(),
@@ -1289,15 +1650,18 @@ export function NotePage({
     try {
       const outcome = await updateNote(
         vaultId,
-        note.slug,
+        slug,
         draftContent,
         editBaseHash,
+        { expectedRelativePath: note.relative_path },
       );
-      clearNoteDraft(vaultId, note.slug);
+      clearNoteDraft(vaultId, note.relative_path, draftContent);
       if (savedKey !== currentNoteKeyRef.current) {
         return;
       }
       cancelDraftWrite();
+      autosave.discard();
+      autosave.resume(outcome.content_hash ?? note.content_hash);
       setConflict(false);
       setConflictDisk(null);
       setNoteChangedOnDisk(false);
@@ -1330,6 +1694,13 @@ export function NotePage({
       } else if (savedKey !== currentNoteKeyRef.current) {
         // The draft for the note that failed is still in its store.
         return;
+      } else if (isNoteMovedError(saveError)) {
+        // Nothing was written. The draft stays filed under this note's path
+        // and comes back when the note is opened at its new address (#627).
+        setNoteMoved(true);
+        setEditorError(
+          "This note's address now opens a different note, so nothing was saved. Your draft is kept for this note's file.",
+        );
       } else if (
         saveError instanceof Error &&
         saveError.name === "ConflictError"
@@ -1343,7 +1714,10 @@ export function NotePage({
           const res = await apiFetch(notePath);
           if (res.ok) {
             const json = (await res.json()) as VaultQualifiedNote;
-            showConflictFor(savedKey, json.note);
+            const disk = ownNoteOrMoved(json.note);
+            if (disk) {
+              showConflictFor(savedKey, disk);
+            }
           }
         } catch {
           // The generic conflict error still leaves the draft safe in the editor.
@@ -1366,9 +1740,9 @@ export function NotePage({
     setNote(conflictNote);
     setDraftContent(conflictNote.content);
     setEditBaseHash(conflictNote.content_hash);
-    saveNoteDraft(vaultId, conflictNote.slug, {
+    saveNoteDraft(vaultId, conflictNote.relative_path, {
       vaultId,
-      slug: conflictNote.slug,
+      relativePath: conflictNote.relative_path,
       content: conflictNote.content,
       baseContentHash: conflictNote.content_hash,
       savedAt: Date.now(),
@@ -1387,9 +1761,9 @@ export function NotePage({
     }
     setNote(conflictNote);
     setEditBaseHash(conflictNote.content_hash);
-    saveNoteDraft(vaultId, conflictNote.slug, {
+    saveNoteDraft(vaultId, conflictNote.relative_path, {
       vaultId,
-      slug: conflictNote.slug,
+      relativePath: conflictNote.relative_path,
       content: draftContent,
       baseContentHash: conflictNote.content_hash,
       savedAt: Date.now(),
@@ -1424,6 +1798,9 @@ export function NotePage({
   const vaultNoteCandidates = noteCandidates.filter(
     (candidate) => candidate.vault_id === vaultId,
   );
+  // Where this note answers now, once its slug went to another note (#627).
+  const movedTo =
+    noteMoved && movedLookup.kind === "taken" ? movedLookup.slug : null;
 
   // A wikilink in the editor resolves the way the reading view's does (#544):
   // the server answers by title, alias or path, and the label is the target
@@ -1436,23 +1813,18 @@ export function NotePage({
       missing: !hit,
     };
   };
-  // Opens the note at the heading when the target names one. A `^block`
-  // reference carries its id as the fragment, the way the reading view's
-  // link does; neither view has a block to scroll to, so it opens at the top.
+  // Opens the note at the heading or the block the target names, by the
+  // anchor the reading view's link carries. The editor has no block to scroll
+  // to, so a block link opened into it lands at the top.
   const openNoteTarget = async (target: string) => {
     const hit = await resolveNoteLink(target);
     if (!hit) {
       return;
     }
-    const hashIdx = target.indexOf("#");
-    const caretIdx = target.indexOf("^");
-    const anchor =
-      hashIdx >= 0
-        ? `#${slugifyHeading(target.slice(hashIdx + 1))}`
-        : caretIdx >= 0
-          ? `#${target.slice(caretIdx + 1)}`
-          : "";
-    navigate(`/v/${encodeURIComponent(vaultId)}/n/${hit.slug}${anchor}`);
+    const anchor = wikilinkAnchor(target);
+    navigate(
+      `/v/${encodeURIComponent(vaultId)}/n/${hit.slug}${anchor ? `#${anchor}` : ""}`,
+    );
   };
 
   const formatNoteLink = (candidate: ExplorerNote): string => {
@@ -1472,14 +1844,56 @@ export function NotePage({
   };
 
   return (
-    <div className="note-page-layout">
+    <div className="note-page-layout" data-note-width={noteWidth}>
       <article className="note-content" data-tail={tailArmed}>
         <div className="note-page-heading">
           <h2 className="note-page-title">{note.title}</h2>
         </div>
         {error ? <StatusBadge tone="warn" text="Showing cached note" /> : null}
-        {autosave.status === "conflict" ||
-        (autosave.status === "error" && !autosaveDemoRefusal) ? (
+        {noteMoved && movedLookup.kind === "gone" ? (
+          <div className="write-notice" role="status">
+            <div className="write-notice-messages">
+              This address now opens a different file than {note.relative_path}.
+              Hatchdoor cannot tell whether this note was moved or another file
+              took its address, so it stopped saving here. Opening what is here
+              now keeps your unsaved edit in Settings, under Unsaved drafts.
+            </div>
+            <UiButton className="close-note" onClick={openAddressAfresh}>
+              Open what is here now
+            </UiButton>
+          </div>
+        ) : null}
+        {noteMoved &&
+        (movedLookup.kind === "taken" || movedLookup.kind === "unknown") ? (
+          <div className="write-notice" role="status">
+            <div className="write-notice-messages">
+              This address now opens a different note, so Hatchdoor stopped
+              saving here. Your edits are kept for {note.relative_path}.
+            </div>
+            {movedTo ? (
+              <UiButton
+                className="close-note"
+                onClick={() =>
+                  navigate(
+                    `/v/${encodeURIComponent(vaultId)}/n/${encodeURIComponent(movedTo)}`,
+                  )
+                }
+              >
+                Open it
+              </UiButton>
+            ) : (
+              <UiButton
+                className="close-note"
+                onClick={() => setLookupAttempt((current) => current + 1)}
+              >
+                Try again
+              </UiButton>
+            )}
+          </div>
+        ) : null}
+        {!noteMoved &&
+        (autosave.status === "conflict" ||
+          (autosave.status === "error" && !autosaveDemoRefusal)) ? (
           <div className="write-notice" role="status">
             <div className="write-notice-messages">
               {autosave.status === "conflict"
@@ -1599,8 +2013,8 @@ export function NotePage({
           <div className="write-notice" role="status">
             <div className="write-notice-messages">
               <span>
-                Unsaved drafts from before the move to multiple Vaults are being
-                held — <Link to="/settings">find them in Settings</Link>.
+                Unsaved drafts are being held.{" "}
+                <Link to="/settings">Find them in Settings</Link>.
               </span>
             </div>
             <button
@@ -1652,6 +2066,7 @@ export function NotePage({
                 vaultName={vaultName}
                 content={value}
                 relativePath={note.relative_path}
+                slug={note.slug}
               />
             )}
           />
@@ -1700,19 +2115,21 @@ export function NotePage({
           </div>
         ) : (
           <div ref={noteBodyRef} className="note-body" dir="auto">
-            <SavedQueryProvider
-              state={savedQueries}
-              vaultId={vaultId}
-              markdown={renderedMarkdown}
-            >
-              <ReactMarkdown
-                remarkPlugins={NOTE_REMARK_PLUGINS}
-                rehypePlugins={rehypePlugins}
-                components={markdownComponents}
+            <NoteEmbedContext.Provider value={embedScope}>
+              <SavedQueryProvider
+                state={savedQueries}
+                vaultId={vaultId}
+                markdown={renderedMarkdown}
               >
-                {renderedMarkdown}
-              </ReactMarkdown>
-            </SavedQueryProvider>
+                <ReactMarkdown
+                  remarkPlugins={NOTE_REMARK_PLUGINS}
+                  rehypePlugins={rehypePlugins}
+                  components={markdownComponents}
+                >
+                  {renderedMarkdown}
+                </ReactMarkdown>
+              </SavedQueryProvider>
+            </NoteEmbedContext.Provider>
           </div>
         )}
         {/* Links come after the text (#530): backlinks are what a reader

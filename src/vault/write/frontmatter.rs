@@ -207,6 +207,7 @@ pub(super) fn edit_frontmatter_block(
             "updated frontmatter values may not serialize a line containing only '---'".to_string(),
         ));
     }
+    crate::cache::parse::validate_frontmatter_size(&edited).map_err(WriteError::InvalidInput)?;
     // The edit is textual surgery on someone else's YAML, so prove it landed:
     // the block that comes back has to parse to exactly the merge that was
     // asked for, or nothing is written.
@@ -236,6 +237,7 @@ fn unserializable(error: serde_yaml_ng::Error) -> WriteError {
 }
 
 fn parse_block(block: &str, relative_path: &str) -> Result<Map<String, Value>, WriteError> {
+    crate::cache::parse::validate_frontmatter_size(block).map_err(WriteError::InvalidInput)?;
     if block.trim().is_empty() {
         return Ok(Map::new());
     }
