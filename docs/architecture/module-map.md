@@ -5908,7 +5908,12 @@ extends the tree (`caretAwareField`'s `refindOnParse`), and colours the
 table widget's cell
 highlights in the DOM, wrapping the emoji so the cell's text is unchanged;
 all three read `focusState.ts`, so a blur
-renders everything the way the inline preview does; the mermaid, saved-query
+renders everything the way the inline preview does; #783: these layers and
+`imageWidgets.ts` read the note's tree through `focusState.ts`'s
+`treeSoFar`, which hands back what is parsed so far when the 50 ms parse
+runs out and keeps one answer per state, so the layers share that budget,
+and look again as the parser extends the tree (`refindOnParse`, `treeGrew`),
+so a long note's later blocks draw without an edit; the mermaid, saved-query
 and PDF widgets are the reading view's own components, drawn through
 `widgetPortals.ts`'s registry and `WidgetPortals.tsx`'s portals so they keep
 the page's router and saved-query contexts, and every widget is view-only;
@@ -6078,7 +6083,9 @@ code-carrying cases), editor, action dialog, upload, draft, path,
 frontmatter, conflict, and autocomplete tests; `sourceMap`,
 `useNoteAutosave`, `attachmentDrop`, `live-editor/LiveEditor`,
 `live-editor/commands`, `live-editor/renderedBlocks` (#544: each block kind
-and callout, with the caret off and on), `live-editor/noteLinks`, and
+and callout, with the caret off and on), `live-editor/longNoteParse`
+(#783: each layer draws past the first parse once parsing goes on),
+`live-editor/noteLinks`, and
 `properties` tests;
 `useNoteActions.test.tsx` (#152); plus `App.write-mode.test.tsx`,
 `App.demo-mode.test.tsx` (#152), and full frontend checks.

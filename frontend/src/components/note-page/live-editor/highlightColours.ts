@@ -12,7 +12,6 @@
 // DOM. It wraps the emoji in a span that CSS hides, which leaves the cell's
 // text, the source the widget reads back, unchanged.
 
-import { ensureSyntaxTree, syntaxTree } from "@codemirror/language";
 import type { EditorState, Extension } from "@codemirror/state";
 import {
   Decoration,
@@ -25,7 +24,7 @@ import {
   highlightColourMarker,
   type HighlightColour,
 } from "../../../lib/markdownSyntax";
-import { caretAwareField, caretTouches } from "./focusState";
+import { caretAwareField, caretTouches, treeSoFar } from "./focusState";
 
 type ColouredHighlight = {
   colour: HighlightColour;
@@ -38,10 +37,7 @@ type ColouredHighlight = {
 
 function colouredHighlightsIn(state: EditorState): ColouredHighlight[] {
   const found: ColouredHighlight[] = [];
-  // What is parsed so far when the whole note takes longer; the field looks
-  // again as the parser goes on (`refindOnParse`).
-  const tree =
-    ensureSyntaxTree(state, state.doc.length, 50) ?? syntaxTree(state);
+  const tree = treeSoFar(state);
   tree.iterate({
     enter: (node) => {
       if (node.name !== "Highlight") {
