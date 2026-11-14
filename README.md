@@ -199,9 +199,9 @@ Two other things are wanted but not slotted to a version yet:
   beside the commit it produced, and one-click revert. Today git is the whole
   answer: each commit names the agent that made it, but reading a commit log is
   not the same as seeing what an agent did to your note.
-- **Vault integrity checks.** A vault-scoped lint for orphaned notes, broken
-  wikilinks, and layer markers whose declaration has vanished, so a vault an
-  agent maintains unattended cannot quietly drift out of shape.
+- **Vault integrity checks.** Agents can already list a Vault's broken links,
+  isolated notes and dead ends with `find_link_problems`. Still to come: layer
+  markers whose declaration has vanished, and the same checks in the Web UI.
 
 The [product roadmap](docs/roadmap/product-roadmap.md) has the full set of
 workstreams and where each one stands.
