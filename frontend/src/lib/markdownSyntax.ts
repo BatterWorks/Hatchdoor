@@ -29,7 +29,7 @@ import type {
 } from "micromark-util-types";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
-import type { Processor } from "unified";
+import { type Processor, unified } from "unified";
 
 import { blockAnchorId } from "./noteHeadings";
 
@@ -407,17 +407,35 @@ export const NOTE_SYNTAX_PLUGINS = [
   remarkBlockIds,
 ];
 
-/** Plain text with each `==highlight==`'s signs dropped, for a search
- * snippet, which shows the words and draws no highlight. A colour emoji
- * opening a highlight goes with the signs (#577). It parses the text
- * with the same construct the page renders with, so code, escapes and stray
- * signs keep theirs exactly where the page keeps them. */
+/** The parser extensions `NOTE_SYNTAX_PLUGINS` register, read once from a
+ * processor that never runs, so a plain-text read parses as the page does. */
+let noteParseExtensions:
+  | { extensions: Extension[]; mdastExtensions: FromMarkdownExtension[] }
+  | undefined;
+
+function noteSyntaxParseExtensions() {
+  if (!noteParseExtensions) {
+    const data = unified().use(NOTE_SYNTAX_PLUGINS).freeze().data() as {
+      micromarkExtensions?: Extension[];
+      fromMarkdownExtensions?: FromMarkdownExtension[];
+    };
+    noteParseExtensions = {
+      extensions: data.micromarkExtensions ?? [],
+      mdastExtensions: data.fromMarkdownExtensions ?? [],
+    };
+  }
+  return noteParseExtensions;
+}
+
+/** Plain text with each `==highlight==`'s signs dropped, for text that shows
+ * the words and draws no highlight: a search snippet, a Help excerpt and a
+ * heading in the note outline (#782). A colour emoji opening a highlight goes
+ * with the signs (#577). It parses the text with the note syntax the page
+ * renders with, so code, math, bare URLs, escapes and stray signs keep theirs
+ * exactly where the page keeps them. */
 export function stripHighlights(text: string): string {
   if (!text.includes("==")) return text;
-  const tree = fromMarkdown(text, {
-    extensions: [highlightSyntax],
-    mdastExtensions: [highlightFromMarkdown],
-  });
+  const tree = fromMarkdown(text, noteSyntaxParseExtensions());
   const cuts: Array<{ at: number; length: number }> = [];
   const collect = (node: Nodes) => {
     if (node.type === "highlight" && node.position) {

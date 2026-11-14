@@ -5614,8 +5614,12 @@ theirs; one of Obsidian's six colour emoji (`HIGHLIGHT_COLOURS`,
 `highlightColourMarker`, #577) written straight after the opening signs adds
 `note-highlight-<colour>` and is taken out of the drawn text, never the
 file; `stripHighlights` drops the signs, and such an emoji with them, from
-plain-text excerpts outside code spans, for the search dialog's snippets and
-the Help reader's search excerpts. Its `remarkBlockIds` (#578) is what reads Obsidian's block ids, on
+plain-text excerpts, parsing them with `NOTE_SYNTAX_PLUGINS`' extensions so
+code, math and bare URLs keep theirs, for the search dialog's snippets, the
+Help reader's search excerpts and `extractMarkdownHeadings`' outline text
+(#782), which keeps a heading that would be left empty as written. The
+`noteHeadings` and `markdownSyntax` imports of each other are used only inside
+functions, so neither may be called at module load. Its `remarkBlockIds` (#578) is what reads Obsidian's block ids, on
 the parsed tree and not the text, so a `^id` in code or math is left alone and
 no line moves: a ` ^id` closing a paragraph, a list item's own line or a quote,
 or a `^id` alone on a line under a paragraph, a quote or a table, is taken out
