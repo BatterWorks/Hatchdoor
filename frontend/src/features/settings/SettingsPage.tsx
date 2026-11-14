@@ -86,29 +86,37 @@ const SECTIONS = [
     manual: CONTEXTUAL_HELP.notesSettings,
   },
   {
-    id: "agents",
+    id: "sidebar",
     number: "02",
+    title: "Sidebar",
+    blurb:
+      "Which lists sit above the Vault tree, for everyone who uses this server.",
+    manual: CONTEXTUAL_HELP.notesSettings,
+  },
+  {
+    id: "agents",
+    number: "03",
     title: "Agent access (MCP)",
     blurb: "Whether AI assistants can reach this vault, and what they may do.",
     manual: CONTEXTUAL_HELP.agentSettings,
   },
   {
     id: "uploads",
-    number: "03",
+    number: "04",
     title: "Uploads",
     blurb: "How large a file may be attached to a note.",
     manual: CONTEXTUAL_HELP.uploadSettings,
   },
   {
     id: "updates",
-    number: "04",
+    number: "05",
     title: "Updates",
     blurb: "Whether Hatchdoor tells you when a newer version is out.",
     manual: CONTEXTUAL_HELP.upgrade,
   },
   {
     id: "usage",
-    number: "05",
+    number: "06",
     title: "Usage report",
     blurb:
       "Whether this server tells Hatchdoor's maintainer how it is set up. This is telemetry, and it is off unless you turn it on.",
@@ -154,6 +162,16 @@ const COPY: Record<
     section: "notes",
     label: "Public demo mode",
     help: "Read-only public browsing with every write surface disabled. Set for this deployment; there is nothing to change from here.",
+  },
+  HATCHDOOR_SIDEBAR_CHANGED_ON_DISK: {
+    section: "sidebar",
+    label: "Show Changed on disk",
+    help: "The notes most recently changed on disk, listed above the Vault tree and on Home. Off removes the list for everyone. Hatchdoor keeps noticing changes, so turning it back on shows them all.",
+  },
+  HATCHDOOR_SIDEBAR_RECENTLY_VIEWED: {
+    section: "sidebar",
+    label: "Show Recently viewed",
+    help: "The notes last opened in each browser, listed above the Vault tree and on Home. Off removes the list for everyone. Each browser keeps its list, so turning it back on shows it as it was.",
   },
   HATCHDOOR_MCP_ENABLED: {
     section: "agents",

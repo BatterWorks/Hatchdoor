@@ -136,4 +136,28 @@ describe("HomePage (#530)", () => {
     ).toBeInTheDocument();
     expect(screen.getByText(/Notes you open show up here/)).toBeInTheDocument();
   });
+
+  it("leaves out a list the sidebar switches off (#684)", () => {
+    renderHome({ sections: { changedOnDisk: false, recentlyViewed: true } });
+    expect(
+      screen.queryByRole("region", { name: "Changed on disk" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("region", { name: "Recently viewed" }),
+    ).toBeInTheDocument();
+
+    cleanup();
+    renderHome({ sections: { changedOnDisk: true, recentlyViewed: false } });
+    expect(
+      screen.getByRole("region", { name: "Changed on disk" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("region", { name: "Recently viewed" }),
+    ).not.toBeInTheDocument();
+
+    cleanup();
+    renderHome({ sections: { changedOnDisk: false, recentlyViewed: false } });
+    expect(screen.queryAllByRole("region")).toHaveLength(0);
+    expect(screen.getByRole("button", { name: "Search" })).toBeInTheDocument();
+  });
 });

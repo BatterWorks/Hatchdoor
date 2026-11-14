@@ -38,6 +38,22 @@ const settings = [
     kind: "switch",
   },
   {
+    key: "HATCHDOOR_SIDEBAR_CHANGED_ON_DISK",
+    value: "true",
+    source: "default",
+    locked: null,
+    class: "instant",
+    kind: "switch",
+  },
+  {
+    key: "HATCHDOOR_SIDEBAR_RECENTLY_VIEWED",
+    value: "true",
+    source: "default",
+    locked: null,
+    class: "instant",
+    kind: "switch",
+  },
+  {
     key: "HATCHDOOR_MCP_ENABLED",
     value: "false",
     source: "default",
@@ -347,8 +363,33 @@ describe("SettingsPage", () => {
     expect(screen.getByLabelText("Recorded as (email)")).toHaveValue(
       "author@example.test",
     );
-    // The footer counts the rows the page renders: all thirteen, none hidden.
-    expect(screen.getByText(/13 editable here, 0 set in/)).toBeVisible();
+    // The footer counts the rows the page renders: all fifteen, none hidden.
+    expect(screen.getByText(/15 editable here, 0 set in/)).toBeVisible();
+  });
+
+  it("offers the sidebar's two switches in their own section, second (#684)", async () => {
+    mockPage();
+    renderSettingsPage();
+
+    const index = await screen.findByRole("button", { name: /Sidebar/ });
+    expect(index).toHaveTextContent("02");
+    expect(
+      screen.getByRole("button", { name: /Agent access/ }),
+    ).toHaveTextContent("03");
+    fireEvent.click(index);
+
+    expect(screen.getByRole("heading", { name: /Sidebar/ })).toBeVisible();
+    for (const label of ["Show Changed on disk", "Show Recently viewed"]) {
+      expect(screen.getByRole("button", { name: label })).toHaveAttribute(
+        "aria-pressed",
+        "true",
+      );
+    }
+    expect(
+      screen.queryByRole("button", {
+        name: "Meaning search in demoted layers",
+      }),
+    ).not.toBeInTheDocument();
   });
 
   it("offers the public address under Agent access", async () => {

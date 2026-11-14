@@ -26,6 +26,10 @@ pub fn live_settings_defaults() -> BTreeMap<String, String> {
         ("HATCHDOOR_ARCHIVE_PREFIX", "90-archive/"),
         ("HATCHDOOR_EXCLUDE", ""),
         ("HATCHDOOR_EMBED_LAYERS", "true"),
+        // #684: the two lists above the sidebar's tree. Only their display
+        // switches off; what feeds them keeps running.
+        ("HATCHDOOR_SIDEBAR_CHANGED_ON_DISK", "true"),
+        ("HATCHDOOR_SIDEBAR_RECENTLY_VIEWED", "true"),
         ("HATCHDOOR_MCP_ENABLED", "false"),
         ("HATCHDOOR_MCP_WRITE_ENABLED", "false"),
         ("HATCHDOOR_MAX_ATTACHMENT_BYTES", "10485760"),

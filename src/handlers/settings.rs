@@ -147,6 +147,8 @@ const SETTINGS: &[(&str, &str, &str)] = &[
     ("HATCHDOOR_ARCHIVE_PREFIX", "instant", "text"),
     ("HATCHDOOR_EXCLUDE", "reindex", "text"),
     ("HATCHDOOR_EMBED_LAYERS", "reindex", "switch"),
+    ("HATCHDOOR_SIDEBAR_CHANGED_ON_DISK", "instant", "switch"),
+    ("HATCHDOOR_SIDEBAR_RECENTLY_VIEWED", "instant", "switch"),
     ("HATCHDOOR_MCP_ENABLED", "instant", "switch"),
     ("HATCHDOOR_MCP_WRITE_ENABLED", "instant", "switch"),
     ("HATCHDOOR_MCP_RATE_LIMITS_ENABLED", "instant", "switch"),
@@ -879,6 +881,9 @@ mod tests {
             .map(|(key, _, _)| *key)
             .collect();
         assert!(switches.contains(&"HATCHDOOR_USAGE_REPORT_ENABLED"));
+        // #684: the sidebar's two lists are pinned from `.env` like any switch.
+        assert!(switches.contains(&"HATCHDOOR_SIDEBAR_CHANGED_ON_DISK"));
+        assert!(switches.contains(&"HATCHDOOR_SIDEBAR_RECENTLY_VIEWED"));
         let cases = [
             ("1", "true"),
             ("yes", "true"),
@@ -1053,6 +1058,56 @@ mod tests {
         let on = read(state).await;
         assert_eq!(on["update_check"]["enabled"], true);
         assert_eq!(on["update_check"]["update_available"]["version"], "99.0.0");
+    }
+
+    /// #684: the sidebar's two lists are switches, on unless turned off, and
+    /// a save turns one off without a restart.
+    #[tokio::test]
+    async fn the_sidebar_lists_are_switches_that_default_to_on() {
+        let (state, _worker, _directory) = test_state();
+        let read = |state: AppState| async move {
+            let response = get_settings_handler(State(state)).await.into_response();
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            serde_json::from_slice::<serde_json::Value>(&body).unwrap()
+        };
+        let value_of = |body: &serde_json::Value, key: &str| {
+            let setting = body["settings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|setting| setting["key"] == key)
+                .cloned()
+                .unwrap_or_else(|| panic!("{key} is editable from Settings"));
+            assert_eq!(setting["kind"], "switch", "{key}");
+            assert_eq!(setting["class"], "instant", "{key}");
+            setting["value"].clone()
+        };
+        let keys = [
+            "HATCHDOOR_SIDEBAR_CHANGED_ON_DISK",
+            "HATCHDOOR_SIDEBAR_RECENTLY_VIEWED",
+        ];
+
+        let before = read(state.clone()).await;
+        for key in keys {
+            assert_eq!(value_of(&before, key), "true", "{key} defaults to on");
+            assert!(
+                validate_updates(
+                    &state.runtime_snapshot(),
+                    &BTreeMap::from([(key.to_string(), "false".to_string())]),
+                )
+                .is_empty()
+            );
+        }
+        state
+            .runtime_config
+            .save(keys.map(|key| (key.to_string(), "false".to_string())))
+            .unwrap();
+        let after = read(state).await;
+        for key in keys {
+            assert_eq!(value_of(&after, key), "false", "{key} saved off");
+        }
     }
 
     #[tokio::test]

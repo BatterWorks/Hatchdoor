@@ -121,6 +121,8 @@ Server-wide instance configuration. Not present in demo mode (routes don't exist
 | `HATCHDOOR_ARCHIVE_PREFIX` | instant | text |
 | `HATCHDOOR_EXCLUDE` | reindex | text |
 | `HATCHDOOR_EMBED_LAYERS` | reindex | switch |
+| `HATCHDOOR_SIDEBAR_CHANGED_ON_DISK` | instant | switch |
+| `HATCHDOOR_SIDEBAR_RECENTLY_VIEWED` | instant | switch |
 | `HATCHDOOR_MCP_ENABLED` | instant | switch |
 | `HATCHDOOR_MCP_WRITE_ENABLED` | instant | switch |
 | `HATCHDOOR_MCP_RATE_LIMITS_ENABLED` | instant | switch |

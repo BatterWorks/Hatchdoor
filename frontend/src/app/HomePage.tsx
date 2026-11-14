@@ -2,7 +2,11 @@ import { Link } from "react-router-dom";
 
 import { SideHead } from "../components/Explorer";
 import { UiButton, VaultPrefix } from "../components/ui";
-import { formatWhen } from "../features/settings";
+import {
+  ALL_SIDEBAR_SECTIONS,
+  formatWhen,
+  type SidebarSections,
+} from "../features/settings";
 import type {
   ModifiedNote,
   RecentNote,
@@ -41,6 +45,7 @@ export function HomePage({
   writeEnabled,
   onNewNote,
   onOpenSearch,
+  sections = ALL_SIDEBAR_SECTIONS,
 }: {
   vaults: VaultSummary[];
   scope: VaultScope;
@@ -50,6 +55,8 @@ export function HomePage({
   writeEnabled: boolean;
   onNewNote: () => void;
   onOpenSearch: () => void;
+  /** The sidebar's switches (#684): a list off there is off here too. */
+  sections?: SidebarSections;
 }) {
   const inScope =
     scope === "all"
@@ -122,18 +129,22 @@ export function HomePage({
       </div>
 
       <div className="home-grid">
-        <HomeList
-          label="Changed on disk"
-          rows={changed}
-          vaults={vaults}
-          empty="Nothing has changed on disk yet."
-        />
-        <HomeList
-          label="Recently viewed"
-          rows={recent}
-          vaults={vaults}
-          empty="Notes you open show up here. Pick one from the explorer, or search."
-        />
+        {sections.changedOnDisk ? (
+          <HomeList
+            label="Changed on disk"
+            rows={changed}
+            vaults={vaults}
+            empty="Nothing has changed on disk yet."
+          />
+        ) : null}
+        {sections.recentlyViewed ? (
+          <HomeList
+            label="Recently viewed"
+            rows={recent}
+            vaults={vaults}
+            empty="Notes you open show up here. Pick one from the explorer, or search."
+          />
+        ) : null}
       </div>
     </div>
   );
