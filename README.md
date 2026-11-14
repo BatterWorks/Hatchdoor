@@ -302,7 +302,7 @@ version you are running.
 The image is published on [Docker Hub](https://hub.docker.com/r/battermanz/hatchdoor):
 
 ```text
-battermanz/hatchdoor:latest          # also version tags, e.g. 2.9.0
+battermanz/hatchdoor:latest          # also version tags, e.g. 2.10.0
 ```
 
 The runtime image is **distroless and rootless**. It is built on

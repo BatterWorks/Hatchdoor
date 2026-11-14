@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v2.10.0 - 2026-11-14
 
 ### Added
 - Settings → Layout has a new **Note width** choice for how wide a note's text may run in the Reading view and the editor, for everyone using the server: Default (today's width, about 80 characters a line), Wide (about 100) or Full (the whole pane). Each is an upper limit, so a screen narrower than it looks the same with all three, and phones are unchanged. Source keeps its own wider column unless Full is picked, and Help's manual stays at the default width. A change shows the next time a note is drawn, with no reload. In `.env` it is `HATCHDOOR_NOTE_WIDTH=default|wide|full`. [#698]
