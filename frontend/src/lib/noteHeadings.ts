@@ -1,3 +1,5 @@
+import { stripHighlights } from "./markdownSyntax";
+
 export type NoteHeading = {
   level: number;
   text: string;
@@ -27,7 +29,11 @@ export function extractMarkdownHeadings(markdown: string): NoteHeading[] {
     }
 
     const level = match[1].length;
-    const text = normalizeHeadingText(match[2]);
+    // A heading that is nothing but highlight signs and a colour emoji keeps
+    // them, so it stays in the outline with the anchor it had.
+    const text =
+      normalizeHeadingText(stripHighlights(match[2])) ||
+      normalizeHeadingText(match[2]);
     if (!text) {
       continue;
     }
@@ -181,6 +187,10 @@ export function fragmentAnchor(fragment: string): string {
     : slugifyHeading(text);
 }
 
+/** The heading as the outline shows it: links shown by their labels and
+ * emphasis marks dropped. Highlight signs go before this, while code spans
+ * still mark where `==` is literal (#782); the anchor slugs this text, and
+ * `slugifyHeading` drops `=` and emoji itself, so that moves no anchor. */
 function normalizeHeadingText(value: string): string {
   return value
     .replace(/\[\[([^[\]]+)\]\]/g, (_whole, body: string) =>
