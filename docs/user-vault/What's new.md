@@ -14,7 +14,7 @@ Agents read this page with `read_docs` and the page name `whats-new`.
 - **Action needed:** Hatchdoor can no longer be shown inside another page, so a dashboard tile or Home Assistant iframe panel that embeds it must link to it instead.
 - **Action needed:** A script that passes the web token as `?access_token=` must send an `Authorization: Bearer` header instead, except for attachments, note downloads and the live update stream.
 - **Action needed:** Podman installs now use the same image as Docker, so switch an `image:` line on a `podman-` tag to the plain tag before those tags stop, three releases from now. [[Install Hatchdoor with Docker Compose]]
-- A note can now show another note inside it with `![[Other note]]`, and a link to a block such as `[[Note#^id]]` opens the note at that paragraph.
+- A note can now show another note's content inside it, the way Obsidian embeds do, and a link to a block opens the note at that paragraph.
 - Highlights can now be coloured the Obsidian way, such as `==🔴text==` for red.
 - Settings has a new Layout section that sets how wide notes run and can hide the Changed on disk and Recently viewed lists.
 
