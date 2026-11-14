@@ -27,7 +27,7 @@ import { SettingsModal } from "./SettingsModal";
 import { UnsavedDrafts, type RestoreCreateDraft } from "./UnsavedDrafts";
 import { VaultSettingsDetail, VaultSettingsIndex } from "./VaultSettingsIndex";
 
-type SettingKind = "switch" | "number" | "text" | "secret" | "mode";
+type SettingKind = "switch" | "number" | "text" | "secret" | "mode" | "choice";
 type Setting = {
   key: string;
   value: string | null;
@@ -86,11 +86,11 @@ const SECTIONS = [
     manual: CONTEXTUAL_HELP.notesSettings,
   },
   {
-    id: "sidebar",
+    id: "layout",
     number: "02",
-    title: "Sidebar",
+    title: "Layout",
     blurb:
-      "Which lists sit above the Vault tree, for everyone who uses this server.",
+      "Which lists sit above the Vault tree and how wide notes run, for everyone who uses this server.",
     manual: CONTEXTUAL_HELP.notesSettings,
   },
   {
@@ -139,6 +139,9 @@ const COPY: Record<
     note?: string;
     /** The manual page that explains this setting on its own (#423). */
     manual?: ContextualHelp;
+    /** A `choice` setting's options, in order, by the value the server
+     * stores (#698). */
+    choices?: { value: string; label: string }[];
   }
 > = {
   HATCHDOOR_ARCHIVE_PREFIX: {
@@ -164,14 +167,24 @@ const COPY: Record<
     help: "Read-only public browsing with every write surface disabled. Set for this deployment; there is nothing to change from here.",
   },
   HATCHDOOR_SIDEBAR_CHANGED_ON_DISK: {
-    section: "sidebar",
+    section: "layout",
     label: "Show Changed on disk",
     help: "The notes most recently changed on disk, listed above the Vault tree and on Home. Off removes the list for everyone. Hatchdoor keeps noticing changes, so turning it back on shows them all.",
   },
   HATCHDOOR_SIDEBAR_RECENTLY_VIEWED: {
-    section: "sidebar",
+    section: "layout",
     label: "Show Recently viewed",
     help: "The notes last opened in each browser, listed above the Vault tree and on Home. Off removes the list for everyone. Each browser keeps its list, so turning it back on shows it as it was.",
+  },
+  HATCHDOOR_NOTE_WIDTH: {
+    section: "layout",
+    label: "Note width",
+    help: "How wide a note's text may run in the Reading view and the editor, for everyone who uses this server. Default keeps lines at a comfortable reading length. Wide allows about a quarter more. Full uses the whole pane. On a screen narrower than the limit, all three look the same.",
+    choices: [
+      { value: "default", label: "Default" },
+      { value: "wide", label: "Wide" },
+      { value: "full", label: "Full" },
+    ],
   },
   HATCHDOOR_MCP_ENABLED: {
     section: "agents",
@@ -309,6 +322,12 @@ function plaqueValue(setting: Setting): string {
   if (setting.kind === "secret") return setting.configured ? "set" : "not set";
   const value = setting.value ?? "";
   if (setting.kind === "switch") return value === "true" ? "On" : "Off";
+  if (setting.kind === "choice") {
+    return (
+      COPY[setting.key]?.choices?.find((choice) => choice.value === value)
+        ?.label ?? value
+    );
+  }
   if (setting.key.includes("BYTES")) return `${toMb(value)} MB`;
   return value || "empty";
 }
@@ -626,6 +645,27 @@ export function SettingsPage({
           </span>
           <span>{on ? "On" : "Off"}</span>
         </button>
+      );
+    }
+
+    if (setting.kind === "choice") {
+      return (
+        <div
+          className="settings-segmented"
+          role="group"
+          aria-label={copy.label}
+        >
+          {(copy.choices ?? []).map((choice) => (
+            <button
+              key={choice.value}
+              type="button"
+              aria-pressed={value === choice.value}
+              onClick={() => edit(setting.key, choice.value)}
+            >
+              {choice.label}
+            </button>
+          ))}
+        </div>
       );
     }
 

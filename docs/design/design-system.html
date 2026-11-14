@@ -157,6 +157,8 @@
     --radius-pill: 999px;
     --radius-none: 0;
     --pdf-page: #ffffff;
+    --note-measure-default: 38rem;
+    --note-measure-wide: 48rem;
     --dur-fast: 120ms;
     --dur: 200ms;
     --ease: cubic-bezier(.2,.8,.2,1);
@@ -1976,6 +1978,8 @@
           <table class="kv-table" style="margin-top: 0.8rem;">
             <tr><th colspan="2">Fixed</th></tr>
             <tr><td class="name">--pdf-page</td><td class="val">#ffffff · a rendered PDF page, both themes</td></tr>
+            <tr><td class="name">--note-measure-default</td><td class="val">38rem · note column, Default width</td></tr>
+            <tr><td class="name">--note-measure-wide</td><td class="val">48rem · note column, Wide width</td></tr>
           </table>
         </div>
       </div>
@@ -2326,7 +2330,8 @@
     <section class="doc-section" id="body-text">
       <div class="doc-section-num">§10</div>
       <h2>Prose &amp; inline elements</h2>
-      <p class="blurb"><b>Reading measure: 38rem, about 75 characters.</b> The note column is capped at <span class="key">--note-measure</span>, set on <span class="key">.note-page-layout</span>. At the body serif&rsquo;s 1.18rem that holds about 75 characters a line, the top of the range typographic convention gives for a single column (45 to 75) and inside the 80 that WCAG 1.4.8 allows; uncapped, a 1440px window ran to about 100 and a wide one past 120. <b>The whole column takes the cap, not the paragraphs alone</b>: title, Properties rule, tables, callouts, code and diagrams share one right edge. An earlier revision of this section rejected a cap because a narrow text column beside full-width bordered boxes reads as broken alignment; capping the column keeps the alignment, and its cost is the one named then, that a wide table reaches horizontal scrolling sooner. <b>Source</b> and the conflict review keep the 1120px column: they show Markdown in a monospace face, and the review sets two versions side by side.</p>
+      <p class="blurb"><b>Reading measure: 38rem, about 75 to 80 characters.</b> The note column is capped at <span class="key">--note-measure</span>, set on <span class="key">.note-page-layout</span>. At the body serif&rsquo;s 1.18rem that holds about 75 characters a line, the top of the range typographic convention gives for a single column (45 to 75) and inside the 80 that WCAG 1.4.8 allows; uncapped, a 1440px window ran to about 100 and a wide one past 120. <b>The whole column takes the cap, not the paragraphs alone</b>: title, Properties rule, tables, callouts, code and diagrams share one right edge. An earlier revision of this section rejected a cap because a narrow text column beside full-width bordered boxes reads as broken alignment; capping the column keeps the alignment, and its cost is the one named then, that a wide table reaches horizontal scrolling sooner. <b>Source</b> and the conflict review keep the 1120px column: they show Markdown in a monospace face, and the review sets two versions side by side.</p>
+      <p class="blurb"><b>The operator can widen the measure (#698).</b> The Layout setting <i>Note width</i> sets <span class="key">data-note-width</span> on <span class="key">.note-page-layout</span>, and the tokens in <span class="key">base.css</span> hold the values. <span class="key">default</span> is <span class="key">--note-measure-default</span> (38rem, as above). <span class="key">wide</span> is <span class="key">--note-measure-wide</span>, 48rem: about 100 characters a line, near where screen-reading studies find lines read fastest (Dyson &amp; Kipping 1998), although readers prefer shorter ones, which is why it is not the default. <span class="key">full</span> lifts the cap: the column takes the pane less its padding and the outline. Each is an upper limit, so on a screen narrower than the cap all three look the same. Wide leaves Source&rsquo;s 1120px column alone, and Full lifts that one too. The manual in the Help panel never takes the setting.</p>
       <p class="blurb">Body paragraphs use Newsreader serif at 1.18rem / lh 1.62. Inline links underline with a 2px hot rail (hovering inverts: hot fill, paper text). Inline code uses a paper-2 surface. Broken links show dashed underline in error color.</p>
       <div class="stage stage-note paper">
         <div class="note-body">

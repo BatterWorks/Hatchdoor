@@ -197,6 +197,12 @@
      document's own author drew it. Not a palette colour, so it sits here
      rather than in a theme block. */
   --pdf-page: #ffffff;
+  /* The note column's reading measures (#698), picked by the Layout setting
+     Note width. Default holds about 80 characters of the body serif at
+     1.18rem; Wide about 100, near where screen-reading studies find lines
+     read fastest. Full has no token: it lifts the cap. */
+  --note-measure-default: 38rem;
+  --note-measure-wide: 48rem;
   --dur-fast: 120ms;
   --dur: 200ms;
   --ease: cubic-bezier(0.2, 0.8, 0.2, 1);

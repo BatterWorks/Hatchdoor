@@ -30,6 +30,10 @@ pub fn live_settings_defaults() -> BTreeMap<String, String> {
         // switches off; what feeds them keeps running.
         ("HATCHDOOR_SIDEBAR_CHANGED_ON_DISK", "true"),
         ("HATCHDOOR_SIDEBAR_RECENTLY_VIEWED", "true"),
+        // #698: how wide a note's text may run, one of its `CHOICES` in
+        // `handlers/settings.rs`. `default` is the reading measure notes
+        // always had.
+        ("HATCHDOOR_NOTE_WIDTH", "default"),
         ("HATCHDOOR_MCP_ENABLED", "false"),
         ("HATCHDOOR_MCP_WRITE_ENABLED", "false"),
         ("HATCHDOOR_MAX_ATTACHMENT_BYTES", "10485760"),

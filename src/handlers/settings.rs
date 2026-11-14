@@ -143,12 +143,38 @@ struct PatchPlan {
     mcp_write_toggled: bool,
 }
 
+/// The values a `choice`-kind setting takes, the first being its default.
+/// `HATCHDOOR_NOTE_WIDTH` (#698) caps a note's text in the Reading view and
+/// the editor: `default` is the reading measure, `wide` a longer line, `full`
+/// no cap.
+const CHOICES: &[(&str, &[&str])] = &[("HATCHDOOR_NOTE_WIDTH", &["default", "wide", "full"])];
+
+fn choices_of(key: &str) -> &'static [&'static str] {
+    CHOICES
+        .iter()
+        .find(|(known, _)| *known == key)
+        .map_or(&[], |(_, values)| values)
+}
+
+/// A choice as the server acts on it: `Wide` pinned by `.env` reads as `wide`,
+/// and a value that is none of the choices reads as the first, the default.
+fn resolved_choice(key: &str, value: &str) -> String {
+    let choices = choices_of(key);
+    let value = value.trim().to_ascii_lowercase();
+    if choices.contains(&value.as_str()) {
+        value
+    } else {
+        choices.first().copied().unwrap_or_default().to_string()
+    }
+}
+
 const SETTINGS: &[(&str, &str, &str)] = &[
     ("HATCHDOOR_ARCHIVE_PREFIX", "instant", "text"),
     ("HATCHDOOR_EXCLUDE", "reindex", "text"),
     ("HATCHDOOR_EMBED_LAYERS", "reindex", "switch"),
     ("HATCHDOOR_SIDEBAR_CHANGED_ON_DISK", "instant", "switch"),
     ("HATCHDOOR_SIDEBAR_RECENTLY_VIEWED", "instant", "switch"),
+    ("HATCHDOOR_NOTE_WIDTH", "instant", "choice"),
     ("HATCHDOOR_MCP_ENABLED", "instant", "switch"),
     ("HATCHDOOR_MCP_WRITE_ENABLED", "instant", "switch"),
     ("HATCHDOOR_MCP_RATE_LIMITS_ENABLED", "instant", "switch"),
@@ -435,6 +461,8 @@ fn settings_response(
             // `1`, `yes` or `on` pinned by `.env` reads as On (#581).
             let value = if kind == "switch" {
                 crate::runtime_config::is_truthy(&setting.value).to_string()
+            } else if kind == "choice" {
+                resolved_choice(key, &setting.value)
             } else {
                 setting.value.clone()
             };
@@ -535,6 +563,12 @@ fn validate_updates(
         }
         if *kind == "switch" && !matches!(value.trim(), "true" | "false") {
             errors.push(FieldError::on(key, "Choose on or off."));
+        }
+        if *kind == "choice" && !choices_of(key).contains(&value.trim()) {
+            errors.push(FieldError::on(
+                key,
+                format!("Choose one of: {}.", choices_of(key).join(", ")),
+            ));
         }
     }
     if updates.keys().any(|key| {
@@ -1058,6 +1092,93 @@ mod tests {
         let on = read(state).await;
         assert_eq!(on["update_check"]["enabled"], true);
         assert_eq!(on["update_check"]["update_available"]["version"], "99.0.0");
+    }
+
+    /// #698: the note width is a choice of three, Default unless changed. A
+    /// save of any of the three applies without a restart, anything else is
+    /// refused, and a value pinned from `.env` reads as the choice it names.
+    #[tokio::test]
+    async fn the_note_width_is_a_choice_of_three_that_defaults_to_default() {
+        let (state, _worker, _directory) = test_state();
+        let key = "HATCHDOOR_NOTE_WIDTH";
+        let read = |state: AppState| async move {
+            let response = get_settings_handler(State(state)).await.into_response();
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let body = serde_json::from_slice::<serde_json::Value>(&body).unwrap();
+            let setting = body["settings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|setting| setting["key"] == "HATCHDOOR_NOTE_WIDTH")
+                .cloned()
+                .expect("the note width is editable from Settings");
+            assert_eq!(setting["kind"], "choice");
+            assert_eq!(setting["class"], "instant");
+            setting["value"].as_str().unwrap().to_string()
+        };
+
+        assert_eq!(read(state.clone()).await, "default");
+        for value in ["default", "wide", "full"] {
+            assert!(
+                validate_updates(
+                    &state.runtime_snapshot(),
+                    &BTreeMap::from([(key.to_string(), value.to_string())]),
+                )
+                .is_empty(),
+                "{value} is a choice"
+            );
+        }
+        for value in ["", "narrow", "1200px"] {
+            let errors = validate_updates(
+                &state.runtime_snapshot(),
+                &BTreeMap::from([(key.to_string(), value.to_string())]),
+            );
+            assert_eq!(errors.len(), 1, "{value:?} is refused");
+        }
+        state
+            .runtime_config
+            .save([(key.to_string(), "wide".to_string())])
+            .unwrap();
+        assert_eq!(read(state).await, "wide");
+    }
+
+    /// #698: a width pinned from `.env` is locked on the page and read the
+    /// way the server acts on it: case and spaces do not matter, and a value
+    /// that is none of the three reads as the default.
+    #[test]
+    fn a_note_width_pinned_from_env_reads_as_the_choice_it_names() {
+        for (raw, expected) in [
+            ("wide", "wide"),
+            (" Wide ", "wide"),
+            ("FULL", "full"),
+            ("default", "default"),
+            ("huge", "default"),
+        ] {
+            let directory = tempdir().expect("test settings directory");
+            let snapshot = RuntimeConfig::load(
+                directory.path().join("settings.json"),
+                Environment::from_values([("HATCHDOOR_NOTE_WIDTH".to_string(), raw.to_string())]),
+                live_settings_defaults(),
+            )
+            .expect("runtime config")
+            .snapshot();
+            let response = settings_response(
+                &snapshot,
+                false,
+                None,
+                Default::default(),
+                Default::default(),
+            );
+            let setting = response
+                .settings
+                .iter()
+                .find(|setting| setting.key == "HATCHDOOR_NOTE_WIDTH")
+                .expect("the note width is listed");
+            assert_eq!(setting.value.as_deref(), Some(expected), "{raw:?}");
+            assert_eq!(setting.locked, Some("environment"), "{raw:?}");
+        }
     }
 
     /// #684: the sidebar's two lists are switches, on unless turned off, and

@@ -3774,7 +3774,10 @@ that `docs_bundle::page` resolves it and that *Connect your agent*'s example
 skill names the same page, and `server_instructions_fit_what_claude_code_keeps`
 keeps the instructions plus the version line within 2,000 characters (#480).
 `settings.rs` owns the additive `/api/settings` document: effective
-value/provenance/lock/class/kind metadata, a `switch`-kind value always sent
+value/provenance/lock/class/kind metadata, a `choice`-kind value (#698,
+`HATCHDOOR_NOTE_WIDTH`) always sent as one of its `CHOICES`, lower-cased, a
+value that is none of them as the first, and a save of anything else refused
+with a field error, a `switch`-kind value always sent
 as `"true"` or `"false"` by `is_truthy` on the resolved value (#581), and
 partial PATCH saves returning the full refreshed document, plus the read-only `last_agent` (#426) and
 `update_check` (#425, `update_check::status` read from the instance state file
@@ -4533,10 +4536,11 @@ already holds for the sidebar (Changed on disk, Recently viewed, each capped
 at six rows with the shared `VaultPrefix` and Settings' `formatWhen`), the
 scope's name and Vault and note counts (a note count only once every Vault in
 scope has reported one), and New note and Search; it replaced the "Select any
-note" empty state. `App.tsx` reads Settings' `useSidebarSections` once (#684)
-and passes it as `sections` to both `HomePage` and `ExplorerPane`, which leave
-out whichever of the two lists the Sidebar settings switch off, in the
-sidebar, the phone drawer and Home alike. `pageName` in `app/pageTitle.ts` names the fixed pages for
+note" empty state. `App.tsx` reads Settings' `useLayoutSettings` once (#684,
+#698), passes its `sidebarSections` as `sections` to both `HomePage` and
+`ExplorerPane`, which leave out whichever of the two lists the Layout
+settings switch off, in the sidebar, the phone drawer and Home alike, and
+passes its `noteWidth` to `NotePage`. `pageName` in `app/pageTitle.ts` names the fixed pages for
 the topbar's breadcrumb, and `App.tsx` hands `AppTopbar` a null `activeNote`
 off the note route, so Stats, Graph and Settings never read "Notes Explorer"
 with a note's actions behind the "…" menu. That menu is about the open note
@@ -5709,6 +5713,13 @@ reads it to add trailing scroll space only for that jump, so a heading near the
 end of a note can reach the top of the pane. It resets when the note changes
 and otherwise stays armed for the rest of the visit, since removing the space
 would clamp `scrollTop` and pull the heading back down.
+
+`NotePage` takes the Layout setting's `noteWidth` (#698) from the shell and
+renders it as `data-note-width` on `.note-page-layout`; `styles/note-content.css`
+reads it to set `--note-measure` from `base.css`'s `--note-measure-default`
+(38rem) or `--note-measure-wide` (48rem, not in Source's 1120px column), or,
+for `full`, to drop the layout's `max-width` in every view. Help's manual is
+drawn outside this layout and keeps the default measure.
 A note whose first heading is an H1 equal to its title, with nothing but
 blank lines before it, keeps that heading in the file and the DOM but does
 not draw or list it (#530): `lib/noteHeadings.ts`'s `duplicateTitleHeadingLine`
@@ -6169,8 +6180,8 @@ route tests, and full frontend checks.
 
 - `frontend/src/features/settings/index.ts`
 - `frontend/src/features/settings/settingsApi.ts`
-- `frontend/src/features/settings/sidebarSections.ts`
-- `frontend/src/features/settings/sidebarSections.test.ts`
+- `frontend/src/features/settings/layoutSettings.ts`
+- `frontend/src/features/settings/layoutSettings.test.ts`
 - `frontend/src/features/settings/SettingsPage.tsx`
 - `frontend/src/features/settings/VaultSettingsIndex.tsx`
 - `frontend/src/features/settings/VaultSettingsIndex.test.tsx`
@@ -6189,21 +6200,25 @@ route tests, and full frontend checks.
 
 **Public contract:** `frontend/src/features/settings/index.ts` is what other
 features may import (#419): `FolderPicker`, `formatWhen`, `createVault`,
-`baseSourceForKind`, `useSidebarSections` with its `SidebarSections` type and
-`ALL_SIDEBAR_SECTIONS`, and `settingsApi.ts`'s `patchSettings` and
+`baseSourceForKind`, `useLayoutSettings` with its `SidebarSections` and
+`NoteWidth` types, `ALL_SIDEBAR_SECTIONS` and `DEFAULT_NOTE_WIDTH`, and `settingsApi.ts`'s `patchSettings` and
 `generateMcpTokenCandidate`, the one definition of the `PATCH /api/settings`
 and `POST /api/settings/mcp-token/generate` requests that the Settings page and
 the First-run checklist both send; the What's new pop-up sends the first for
 its usage report switch (ADR-48). A save the server accepts dispatches
-`SETTINGS_SAVED_EVENT` on `window`. `sidebarSections.ts`'s
-`useSidebarSections` (#684) is the shell's read of the Sidebar section's two
-switches, `HATCHDOOR_SIDEBAR_CHANGED_ON_DISK` and
-`HATCHDOOR_SIDEBAR_RECENTLY_VIEWED`: from `GET /api/settings` once Settings
-exist, again on that event and when the tab comes back into view, cached in
-`hatchdoor.sidebarSections` so a reload never flashes a hidden list, and both
-on in demo mode, where Settings do not exist. `ExplorerPane` and `HomePage`
-take the result as `sections` and draw nothing of a list switched off,
-leaving its stored fold untouched. The shell still imports `SettingsPage`
+`SETTINGS_SAVED_EVENT` on `window`. `layoutSettings.ts`'s
+`useLayoutSettings` (#684, #698) is the shell's read of the Layout section:
+the two switches `HATCHDOOR_SIDEBAR_CHANGED_ON_DISK` and
+`HATCHDOOR_SIDEBAR_RECENTLY_VIEWED`, and the choice `HATCHDOOR_NOTE_WIDTH`
+(`default`, `wide` or `full`, anything else read as `default`). It reads
+`GET /api/settings` once Settings exist, again on that event and when the tab
+comes back into view, caches the answer in `hatchdoor.sidebarSections` and
+`hatchdoor.noteWidth` so a reload never flashes a hidden list or a different
+width, and answers both lists on and the default width in demo mode, where
+Settings do not exist. `ExplorerPane` and `HomePage` take `sidebarSections`
+as `sections` and draw nothing of a list switched off, leaving its stored fold
+untouched; `NotePage` takes `noteWidth`. A `choice`-kind row draws its
+options, listed in `COPY`, as a `.settings-segmented` group. The shell still imports `SettingsPage`
 directly. The Settings page presents a two-level Vault-management index
 from `GET /api/v1/vaults`, including disabled Vaults only in Settings, and each
 selected Vault's condition, editable definition fields, identity facts, and

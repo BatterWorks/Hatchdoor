@@ -5,23 +5,33 @@ import { apiFetch } from "../../api/api";
 import { SETTINGS_SAVED_EVENT } from "./settingsApi";
 import {
   ALL_SIDEBAR_SECTIONS,
+  noteWidthFrom,
   sidebarSectionsFrom,
-  useSidebarSections,
-} from "./sidebarSections";
+  useLayoutSettings,
+} from "./layoutSettings";
 
 vi.mock("../../api/api", () => ({ apiFetch: vi.fn() }));
 const mockedApiFetch = vi.mocked(apiFetch);
 
-function answer(changed: string, recent: string): Response {
+function answer(changed: string, recent: string, width = "default"): Response {
   return new Response(
     JSON.stringify({
       settings: [
         { key: "HATCHDOOR_SIDEBAR_CHANGED_ON_DISK", value: changed },
         { key: "HATCHDOOR_SIDEBAR_RECENTLY_VIEWED", value: recent },
+        { key: "HATCHDOOR_NOTE_WIDTH", value: width },
       ],
     }),
     { status: 200 },
   );
+}
+
+// The hook's sidebar half, which the #684 cases below read.
+function useSidebarSections(options: {
+  settingsEnabled: boolean;
+  demoMode: boolean;
+}) {
+  return useLayoutSettings(options).sidebarSections;
 }
 
 describe("sidebar switches (#684)", () => {
@@ -104,5 +114,61 @@ describe("sidebar switches (#684)", () => {
     );
     expect(result.current).toEqual(ALL_SIDEBAR_SECTIONS);
     expect(mockedApiFetch).not.toHaveBeenCalled();
+  });
+});
+
+describe("note width (#698)", () => {
+  beforeEach(() => {
+    window.localStorage.clear();
+    mockedApiFetch.mockReset();
+  });
+  afterEach(() => window.localStorage.clear());
+
+  it("reads each of the three widths, and anything else as the default", () => {
+    const of = (value: string | null) =>
+      noteWidthFrom({ settings: [{ key: "HATCHDOOR_NOTE_WIDTH", value }] });
+    expect(of("default")).toBe("default");
+    expect(of("wide")).toBe("wide");
+    expect(of("full")).toBe("full");
+    expect(of("huge")).toBe("default");
+    expect(of(null)).toBe("default");
+    expect(noteWidthFrom({})).toBe("default");
+  });
+
+  it("starts at the default, follows the server, and changes after a save without a reload", async () => {
+    mockedApiFetch.mockResolvedValueOnce(answer("true", "true", "wide"));
+    const { result } = renderHook(() =>
+      useLayoutSettings({ settingsEnabled: true, demoMode: false }),
+    );
+    expect(result.current.noteWidth).toBe("default");
+    await waitFor(() => expect(result.current.noteWidth).toBe("wide"));
+
+    mockedApiFetch.mockResolvedValueOnce(answer("true", "true", "full"));
+    act(() => {
+      window.dispatchEvent(new Event(SETTINGS_SAVED_EVENT));
+    });
+    await waitFor(() => expect(result.current.noteWidth).toBe("full"));
+  });
+
+  it("starts from the last width this browser had, so a note never jumps on reload", async () => {
+    mockedApiFetch.mockResolvedValueOnce(answer("true", "true", "full"));
+    const first = renderHook(() =>
+      useLayoutSettings({ settingsEnabled: true, demoMode: false }),
+    );
+    await waitFor(() => expect(first.result.current.noteWidth).toBe("full"));
+    first.unmount();
+
+    const second = renderHook(() =>
+      useLayoutSettings({ settingsEnabled: false, demoMode: false }),
+    );
+    expect(second.result.current.noteWidth).toBe("full");
+  });
+
+  it("keeps the default on a demo, which has no settings", () => {
+    window.localStorage.setItem("hatchdoor.noteWidth", "full");
+    const { result } = renderHook(() =>
+      useLayoutSettings({ settingsEnabled: false, demoMode: true }),
+    );
+    expect(result.current.noteWidth).toBe("default");
   });
 });
