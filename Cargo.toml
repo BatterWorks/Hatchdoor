@@ -89,7 +89,8 @@ required-features = ["eval"]
 # The dependencies the tests run hard build optimised even in debug and test
 # builds. Everything else stays at the default opt-level 0: Hatchdoor's own
 # crate, macros, build scripts, and dependencies the tests barely run, such as
-# vendored OpenSSL and libgit2 and the image crates fastembed pulls in.
+# libgit2's C build and the image crates fastembed pulls in. Vendored OpenSSL's
+# C code builds at -O2 whatever this says: `openssl-src` sets it.
 # Optimising every dependency made the cargo steps of `just check-full` take
 # 51 to 57 minutes from an empty target folder on a 4-core VM; this list takes
 # 27 to 29. The two warm test runs take 2 to 3% longer together, the
