@@ -1,5 +1,12 @@
 # Changelog
 
+[#797]: https://github.com/BatterWorks/Hatchdoor/pull/797
+
+## Unreleased
+
+### Fixed
+- The Docker verification stage now includes the frontend source read by the auth route allowlist test, so containerized Rust verification checks real query-token call sites instead of failing with none found. [#797]
+
 ## v2.10.0 - 2026-11-14
 
 ### Added
