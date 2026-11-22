@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+- Building the Dockerfile's `verification` target runs the test suite again. It stopped at a test that checks every web-token link in the web app's code, because the stage held none of that code; it now copies all of `frontend/src`. The runtime image is unchanged. [#797]
+
+[#797]: https://github.com/BatterWorks/Hatchdoor/pull/797
+
 ## v2.10.0 - 2026-11-14
 
 ### Added
