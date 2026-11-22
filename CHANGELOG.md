@@ -1,11 +1,11 @@
 # Changelog
 
-[#797]: https://github.com/BatterWorks/Hatchdoor/pull/797
-
 ## Unreleased
 
 ### Fixed
-- The Docker verification stage now includes the frontend source read by the auth route allowlist test, so containerized Rust verification checks real query-token call sites instead of failing with none found. [#797]
+- Building the Dockerfile's `verification` target runs the test suite again. It stopped at a test that checks every web-token link in the web app's code, because the stage held none of that code; it now copies all of `frontend/src`. The runtime image is unchanged. [#797]
+
+[#797]: https://github.com/BatterWorks/Hatchdoor/pull/797
 
 ## v2.10.0 - 2026-11-14
 

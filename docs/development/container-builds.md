@@ -17,14 +17,15 @@ same Cargo command outside Docker; feature-gated model/evaluation tests are not
 implicitly enabled. Production builds do not depend on this target. Callers
 that require tests before publication must run it first and propagate failure.
 The suite needs four things beyond the Rust sources and `docs/user-vault`: the
-`git` program, which `chef` installs; `frontend/src`, which the auth test scans
+`git` program, which `chef` installs; `frontend/src`, which the auth test
+`every_frontend_query_token_url_is_on_an_allowed_route` scans
 to check every frontend query-token URL against the server's route allowlist and
 which also holds the shared `noteComments.cases.json` cases for the link-preview
 test; `frontend/vite.config.ts`, which the SPA test compares with the backend's
 reserved prefixes; and `frontend/public/link-preview.png`, which the link-preview
-test reads to check the actual image's dimensions and size. These copied paths
-cover the current test inputs outside Rust `src/` and `docs/user-vault`; add a
-`COPY` if a test starts reading another path.
+test reads to check the actual image's dimensions and size. These inputs cover
+every file the tests read outside Rust `src/` and `docs/user-vault`. A new test
+that reads another file needs its own `COPY` here.
 `verification` derives from `chef` rather than from the dependency stage, so its
 first run on a builder compiles the test profile from scratch even when a release
 build is already cached. That is the expected cost of a separate profile, not a
