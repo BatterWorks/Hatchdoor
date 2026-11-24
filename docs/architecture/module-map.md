@@ -4010,8 +4010,9 @@ with `200`, `spa_note_handler` answers the note address
 `/cdn-cgi/` exclusion lets Cloudflare handle its own sign-in return (#798).
 That list mirrors the service worker's `navigateFallbackDenylist` in
 `frontend/vite.config.ts`, and a test in `spa.rs` fails if the two drift.
-Outside demo mode all three return the built `index.html` byte for byte. In demo mode they write a link preview (#512,
-ADR-47) in place of its `<title>`: `link_preview.rs` builds the tags, the
+Outside demo mode all three return the built `index.html` byte for byte. In
+demo mode they write a link preview (#512, ADR-47) in place of its `<title>`:
+`link_preview.rs` builds the tags, the
 general wording, and a note's description (its `description` property, else its
 opening prose reduced to plain text, cut to 200 characters), and escapes every
 value. Only `spa_note_handler` reads a note, through
