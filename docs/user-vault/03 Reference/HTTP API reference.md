@@ -70,9 +70,9 @@ A page marked `private: true` in its frontmatter answers `/docs/<page>.md` only 
 | Method | Path | Purpose |
 | --- | --- | --- |
 | GET | `/`, `/stats`, `/graph`, `/settings`, `/v/{vault_id}/n/{slug}` | The browser app, `200`. |
-| GET | any other path, outside `/api/`, `/vault-assets/`, `/docs/`, `/llms.txt` and paths starting `/health` | The browser app with a `404` status, when no built file matches. The app shows a not-found page with a way back to your notes. |
+| GET | any other path, outside `/api/`, `/vault-assets/`, `/docs/`, `/llms.txt`, `/cdn-cgi/` and paths starting `/health` | The browser app with a `404` status, when no built file matches. The app shows a not-found page with a way back to your notes. |
 
-Paths under `/api/`, `/vault-assets/` and `/docs/`, `/llms.txt`, and any path starting `/health`, never get the app. An unknown one there is a plain `404`, so a script calling a mistyped API path gets an error, not a page of HTML.
+Paths under `/api/`, `/vault-assets/`, `/docs/` and `/cdn-cgi/`, plus `/llms.txt` and any path starting `/health`, never get the app. An unknown one there is a plain `404`, so a script calling a mistyped API path gets an error, not a page of HTML. The service worker lets `/cdn-cgi/` navigations reach the network so Cloudflare can handle its own endpoints, including the Access sign-in return.
 
 The page is sent before any token is checked. Outside demo mode it is the same file for every address, so it names no note and no Vault.
 
