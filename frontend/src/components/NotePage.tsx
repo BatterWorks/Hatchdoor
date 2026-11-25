@@ -352,6 +352,12 @@ export function NotePage({
     setVisit((current) => current + 1);
   }
   const noteKey = `${vaultId}:${slug}#${visit}`;
+  // Which note a visit is of, for autosave: a return keeps it, so the return
+  // takes over a save the last visit left out instead of racing it (#803).
+  // Opening the address afresh changes it, since the address may name
+  // another file by then (#627).
+  const [freshOpens, setFreshOpens] = useState(0);
+  const noteId = `${vaultId}:${slug}~${freshOpens}`;
   const currentNoteKeyRef = useRef(noteKey);
   // Only ever the open note's own disk version, whatever is left in state.
   const conflictNote =
@@ -1090,6 +1096,7 @@ export function NotePage({
     // Each note gets its own autosave: a reply for the note just left never
     // moves this one's hash or stops its saving (#658).
     noteKey,
+    noteId,
     baseHash: note?.content_hash ?? "",
     // Once the slug names another note nothing is sent by it; the text stays
     // in the editor and in the draft filed under this note's path (#627).
@@ -1120,6 +1127,9 @@ export function NotePage({
       const savedFor = noteKey;
       const stillOpen = savedFor === currentNoteKeyRef.current;
       if (stillOpen) {
+        // Also reached for a save an earlier visit sent and this one took
+        // over (#803), which its own `save` never saw.
+        savedContentRef.current = savedContent;
         setNote((prev) =>
           prev && result.content_hash
             ? { ...prev, content_hash: result.content_hash }
@@ -1279,6 +1289,7 @@ export function NotePage({
       holdNoteDraft(vaultId, openPathAtRender);
     }
     setVisit((current) => current + 1);
+    setFreshOpens((current) => current + 1);
   };
 
   // A refused save stopped autosave. When the page has its note back under
@@ -1380,7 +1391,7 @@ export function NotePage({
       return;
     }
     setRestoredCommit(null);
-    autosaveRef.current?.commit(restoredCommit);
+    autosaveRef.current?.commitRestored(restoredCommit);
   }, [restoredCommit, inlineEditingEnabled]);
 
   // Text typed into the live editor has no other home in React state, so it is

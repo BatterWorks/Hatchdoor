@@ -5812,7 +5812,8 @@ writes out its draft, drops autosave's unsent edits (`useNoteAutosave`'s
 `discard`), moves the old path's draft to the held-draft store
 (`lib/writeDrafts.ts`'s `holdNoteDraft`, restorable from Settings as a note at
 that path) and bumps a visit counter that is part of the note key, so every
-per-note reset runs as on navigation. A lookup that could not be made shows
+per-note reset runs as on navigation, and the autosave `noteId` with it, so
+no save of the old file is taken over. A lookup that could not be made shows
 the first notice with **Try again**. A Rename, Move or Archive made in the app
 leaves `useNoteActions`' `NoteMovedHere` router state (`{movedFrom, movedTo}`),
 which the page accepts as its own note's new path without asking, once, and
@@ -6011,7 +6012,17 @@ note's edits back nor drains them, while its reply reaches only the `onSaved`
 captured for its own note; `NotePage`'s `onSaved` and its refusal notices act
 only while the note they were sent for is open, except that a late successful
 reply moves the left note's held draft onto the new hash when that draft is
-the last copy the left visit wrote and is based on `sentAgainst` (#695). `lib/reloadGuard.ts` is the seam that keeps the
+the last copy the left visit wrote and is based on `sentAgainst` (#695). A
+return to the same note is a new key but the same optional `noteId` (#803):
+the hook keeps each note's save still out, and how a save ended after its
+visit was left, by `noteId`; the return's first write waits for or reads it.
+Only a visit whose text came back from the held draft (`commitRestored`, the
+page's crash-recovery commit) takes that save's hash over, when it read the
+version the save replaced, and does not send the same text twice; any other
+text is written against the visit's own hash, so it conflicts rather than
+erasing the save's edit;
+`NotePage` changes the `noteId` only when **Open what is here now** opens the
+address afresh. `lib/reloadGuard.ts` is the seam that keeps the
 service worker from reloading over all of this: `NotePage` holds it while an
 edit is unsaved, a block is open, the source editor is open (#332), or a save
 is in flight, and `main.tsx`
