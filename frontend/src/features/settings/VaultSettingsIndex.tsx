@@ -281,6 +281,14 @@ const ACTION_CONFLICT_MESSAGE =
 const UNREACHABLE_MESSAGE =
   "Could not reach the server. Check the connection and try again.";
 
+/** A rolled-back change's failure, said to have changed nothing exactly
+ * once: some server refusals already open with it (#801). */
+function nothingChanged(reason: string) {
+  return /^nothing changed\b/i.test(reason)
+    ? reason
+    : `Nothing changed. ${reason}`;
+}
+
 function failureText(payload: Record<string, unknown>, fallback: string) {
   if (payload.code === "registry_revision_conflict")
     return ACTION_CONFLICT_MESSAGE;
@@ -742,7 +750,7 @@ export function VaultSettingsDetail({
       } else {
         setFailure(
           disablePayload.message
-            ? `Nothing changed. ${disablePayload.message}`
+            ? nothingChanged(disablePayload.message)
             : "Nothing changed — this Vault could not be paused for the edit.",
         );
       }
@@ -776,7 +784,9 @@ export function VaultSettingsDetail({
           );
         setFailure(
           editPayload.message
-            ? `Nothing changed. ${failureText(editResult.payload, editPayload.message)}`
+            ? nothingChanged(
+                failureText(editResult.payload, editPayload.message),
+              )
             : "Nothing changed.",
         );
       } else {
