@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Changed
+- The Docker image is built with the newest stable Rust, now 1.100, which it follows from now on instead of a pinned version, and on the newest build of its Debian 13 distroless runtime image.
+
 ### Fixed
 - Building the Dockerfile's `verification` target runs the test suite again. It stopped at a test that checks every web-token link in the web app's code, because the stage held none of that code; it now copies all of `frontend/src`. The runtime image is unchanged. [#797]
 - When Hatchdoor runs behind Cloudflare Access, the browser can complete sign-in after the service worker installs. The sign-in return under `/cdn-cgi/` goes to Cloudflare instead of loading Hatchdoor's "Page Not Found" page. [#798]
