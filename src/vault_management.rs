@@ -883,6 +883,7 @@ impl<'a> VaultCollectionManagement<'a> {
             commit_identity: request.commit_identity,
         };
         let mut retired = None;
+        let mut identity_changed = false;
         let snapshot = self
             .state
             .vault_registry
@@ -897,6 +898,7 @@ impl<'a> VaultCollectionManagement<'a> {
                         Some(vault_id),
                     )?;
                     retired = self.retire_managed_checkout(vault_id, &pending)?;
+                    identity_changed = pending.identity_changed;
                     Ok(())
                 },
             )
@@ -912,6 +914,14 @@ impl<'a> VaultCollectionManagement<'a> {
                 }
                 PreparedEditError::Prepare(error) => error,
             })?;
+        // The remembered sync belongs to the repository the Vault no longer
+        // names, whatever kind of source it was. Kept, it would put the new
+        // clone a whole poll interval after that repository's last sync and
+        // republish its status meanwhile (#802). Forgotten only now, once
+        // saved, so a refused edit keeps it.
+        if identity_changed {
+            self.state.managed_git.forget_persisted_state(vault_id);
+        }
 
         self.reconcile_after_commit(&snapshot)
             .await
@@ -971,12 +981,21 @@ impl<'a> VaultCollectionManagement<'a> {
             &author_email,
         )
         .map_err(|error| {
-            VaultOperationError::new(
-                "checkout_set_aside_failed",
+            let message = if error.code() == "managed_git_validation_failed" {
+                // Hatchdoor cannot commit in a checkout it cannot validate,
+                // so only moving it by hand gets the Vault past it (#802).
+                format!(
+                    "Nothing changed: the Vault's current checkout no longer matches what Hatchdoor cloned, so its notes cannot be committed, and it stays where it is. To change the repository anyway, pause the Vault, move the folder vaults/{vault_id}/repository out of Hatchdoor's state folder, and save again. See \"Changing the repository refused\" in How to troubleshoot common problems."
+                )
+            } else {
                 format!(
                     "Nothing changed: the Vault's current checkout could not be set aside, so it and its notes stay where they are. {}",
                     error.message()
-                ),
+                )
+            };
+            VaultOperationError::new(
+                "checkout_set_aside_failed",
+                message,
                 Some(vault_id),
                 error.retryable(),
             )
@@ -2040,6 +2059,193 @@ mod tests {
         assert!(refused.message.starts_with("Nothing changed"));
         assert_eq!(ready_snapshot(&state).revision(), revision, "nothing saved");
         assert!(checkout.join("Outside.md").is_file(), "nothing moved");
+    }
+
+    /// #802: a repository change made the way Settings makes it (pause,
+    /// save, resume) starts the fresh clone as soon as the Vault is back on,
+    /// rather than one poll interval after the old remote's last sync, and
+    /// the Vault does not claim the old remote's "ready" meanwhile.
+    #[tokio::test]
+    async fn resuming_after_a_repository_change_clones_at_once() {
+        let (state, mut worker, _directory) = test_state();
+        let (vault_id, _checkout) =
+            disabled_vault_with_checkout(&state, "https://example.test/owner/old.git", None).await;
+        let management = VaultCollectionManagement::new(&state);
+
+        // The Vault runs and syncs, which remembers that turn and arms the
+        // next one a day away.
+        management
+            .set_enabled(vault_id, ready_snapshot(&state).revision(), true)
+            .await
+            .expect("enable");
+        // Activation queues an Index turn and the first sync; run both.
+        while state.vault_work.has_work(vault_id, VaultWorkKind::Git) {
+            worker
+                .run_next(|_| async { Ok::<(), VaultWorkError>(()) })
+                .await
+                .expect("queued work");
+        }
+        state
+            .managed_git
+            .record_outcome(vault_id, &Ok(crate::git::ManagedGitOutcome::Synchronized));
+        state
+            .vaults
+            .runtime(vault_id)
+            .expect("active runtime")
+            .set_git_status(VaultGitStatus::Ready, None)
+            .expect("publish ready");
+        assert!(!state.vault_work.has_work(vault_id, VaultWorkKind::Git));
+
+        management
+            .set_enabled(vault_id, ready_snapshot(&state).revision(), false)
+            .await
+            .expect("pause");
+        management
+            .edit(
+                vault_id,
+                identity_edit(
+                    ready_snapshot(&state).revision(),
+                    two_way_source("https://example.test/owner/new.git", None),
+                ),
+            )
+            .await
+            .expect("the repository change saves");
+        management
+            .set_enabled(vault_id, ready_snapshot(&state).revision(), true)
+            .await
+            .expect("resume");
+
+        assert!(
+            state.vault_work.has_work(vault_id, VaultWorkKind::Git),
+            "the fresh clone is requested at once"
+        );
+        assert!(
+            state
+                .managed_git
+                .next_attempt_for_test(vault_id)
+                .expect("tracked")
+                <= std::time::Instant::now(),
+            "the Git turn is due now, not a poll interval after the old remote's sync"
+        );
+        assert_eq!(
+            state
+                .vaults
+                .runtime(vault_id)
+                .expect("active runtime")
+                .snapshot()
+                .git,
+            VaultGitStatus::Pending,
+            "the old remote's ready is not the new one's"
+        );
+    }
+
+    /// #802: a refused repository change leaves the Vault's remembered sync,
+    /// and so its schedule, as it was.
+    #[tokio::test]
+    async fn a_refused_repository_change_keeps_the_remembered_sync() {
+        let (state, _worker, _directory) = test_state();
+        let (vault_id, checkout) = disabled_vault_with_checkout(
+            &state,
+            "https://example.test/owner/old.git",
+            Some("vault"),
+        )
+        .await;
+        state
+            .managed_git
+            .activate(vault_id, std::time::Duration::from_secs(86_400));
+        state
+            .managed_git
+            .record_outcome(vault_id, &Ok(crate::git::ManagedGitOutcome::Synchronized));
+        state.managed_git.deactivate(vault_id);
+        std::fs::write(checkout.join("Outside.md"), "outside\n").expect("outside change");
+
+        VaultCollectionManagement::new(&state)
+            .edit(
+                vault_id,
+                identity_edit(
+                    ready_snapshot(&state).revision(),
+                    two_way_source("https://example.test/owner/new.git", Some("vault")),
+                ),
+            )
+            .await
+            .expect_err("the edit is refused");
+
+        let store = crate::vault_runtime_state::VaultRuntimeStateStore::beside_registry(
+            state.vault_registry.path(),
+        );
+        assert!(
+            store.last_git_turn(vault_id).is_some(),
+            "the remembered sync survives a refused change"
+        );
+
+        // Resuming, as Settings does after a refusal, brings back the old
+        // schedule and status rather than a fresh turn.
+        VaultCollectionManagement::new(&state)
+            .set_enabled(vault_id, ready_snapshot(&state).revision(), true)
+            .await
+            .expect("resume");
+        assert!(!state.vault_work.has_work(vault_id, VaultWorkKind::Git));
+        assert!(
+            state
+                .managed_git
+                .next_attempt_for_test(vault_id)
+                .expect("tracked")
+                > std::time::Instant::now() + std::time::Duration::from_secs(3600),
+            "the next sync stays a poll interval after the remembered one"
+        );
+        assert_eq!(
+            state
+                .vaults
+                .runtime(vault_id)
+                .expect("active runtime")
+                .snapshot()
+                .git,
+            VaultGitStatus::Ready
+        );
+    }
+
+    /// #802: an old checkout that no longer validates refuses the change,
+    /// moves nothing, and the message names the way out.
+    #[tokio::test]
+    async fn a_repository_change_over_a_checkout_that_does_not_validate_is_refused() {
+        let (state, _worker, _directory) = test_state();
+        let (vault_id, checkout) =
+            disabled_vault_with_checkout(&state, "https://example.test/owner/old.git", None).await;
+        std::fs::write(checkout.join("After.md"), "after\n").expect("pending note");
+        let repository = git2::Repository::open(&checkout).expect("checkout");
+        let head = repository.head().expect("HEAD").target().expect("commit");
+        repository.set_head_detached(head).expect("detach HEAD");
+        let revision = ready_snapshot(&state).revision();
+
+        let refused = VaultCollectionManagement::new(&state)
+            .edit(
+                vault_id,
+                identity_edit(
+                    revision,
+                    two_way_source("https://example.test/owner/new.git", None),
+                ),
+            )
+            .await
+            .expect_err("the edit is refused");
+
+        assert_eq!(refused.code, "checkout_set_aside_failed");
+        assert!(refused.message.starts_with("Nothing changed"));
+        assert!(
+            refused
+                .message
+                .contains(&format!("vaults/{vault_id}/repository")),
+            "the message names the folder to move: {}",
+            refused.message
+        );
+        assert!(
+            refused
+                .message
+                .contains("How to troubleshoot common problems"),
+            "the message points to the guide: {}",
+            refused.message
+        );
+        assert_eq!(ready_snapshot(&state).revision(), revision, "nothing saved");
+        assert!(checkout.join("After.md").is_file(), "nothing moved");
     }
 
     /// An edit that keeps the managed source's identity never touches the

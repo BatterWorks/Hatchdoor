@@ -130,7 +130,8 @@ impl VaultRuntimeStateStore {
     }
 
     /// Drop a Vault's record entirely — for a Vault that has left the
-    /// collection, not one that is merely disabled. A disabled Vault comes
+    /// collection, or one now naming another repository (#802),
+    /// not one that is merely disabled. A disabled Vault comes
     /// back to the same schedule; a disconnected one is gone, and leaving its
     /// record behind would hand a stale countdown to whatever reconnects
     /// under that Vault ID later.
