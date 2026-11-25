@@ -1386,6 +1386,55 @@ describe("NotePage conflict review and editing correctness (#331)", () => {
     expect(disk.home.content).toBe("Home edited.\n");
   });
 
+  it("takes over a save still out when returning from a page that is not a note (#807)", async () => {
+    const disk = {
+      home: { content: "Home body.\n", hash: "home-1" },
+      other: { content: "Other body.\n", hash: "other-1" },
+    };
+    const sent = mockTwoNotes(disk);
+    const held = holdHomeSaveInOrder(disk);
+    // No route matches Settings here, so going there unmounts the page, as
+    // the app's own Settings route does.
+    renderWithNav(
+      <>
+        <Link to="/settings">Settings</Link>
+        <Link to="/v/vault-1/n/home">Back home</Link>
+      </>,
+    );
+    await screen.findByRole("textbox", { name: "Note body" });
+    typeInOpenBlock("Home edited.\n");
+    fireEvent.blur(screen.getByRole("textbox", { name: "Note body" }));
+    await waitFor(() => expect(held.sent).toBe(true));
+    fireEvent.click(screen.getByRole("link", { name: "Settings" }));
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("textbox", { name: "Note body" }),
+      ).not.toBeInTheDocument(),
+    );
+    fireEvent.click(screen.getByRole("link", { name: "Back home" }));
+    await screen.findByText("Home edited.");
+
+    await act(async () => held.release());
+    await waitFor(() =>
+      expect(screen.queryByText("Saving")).not.toBeInTheDocument(),
+    );
+    expect(
+      screen.queryByText(/This note changed somewhere else/),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText("Not saving")).not.toBeInTheDocument();
+    expect(disk.home.content).toBe("Home edited.\n");
+
+    typeInOpenBlock("Home edited again.\n");
+    fireEvent.blur(screen.getByRole("textbox", { name: "Note body" }));
+    await waitFor(() => expect(disk.home.content).toBe("Home edited again.\n"));
+    const homePuts = homePutBodies(sent);
+    expect(homePuts.map((body) => body.content)).toEqual([
+      "Home edited.\n",
+      "Home edited again.\n",
+    ]);
+    expect(homePuts[1].expected_content_hash).toBe("home-saved");
+  });
+
   /** Home's first save goes out and is held; more typing queues behind it;
    * then the page moves to other before that save comes back (#695). */
   async function leaveHomeWithNewerEdit(

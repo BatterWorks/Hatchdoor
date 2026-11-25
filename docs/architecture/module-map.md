@@ -6022,7 +6022,14 @@ version the save replaced, and does not send the same text twice; any other
 text is written against the visit's own hash, so it conflicts rather than
 erasing the save's edit;
 `NotePage` changes the `noteId` only when **Open what is here now** opens the
-address afresh. `lib/reloadGuard.ts` is the seam that keeps the
+address afresh. The hook tells visits apart by a token of its own, since
+`NotePage`'s key restarts on a fresh mount; `NotePage` hands every mount one
+`saves` record (`createNoteSaves()`) and its per-address fresh-open count,
+both kept at module level. After an unmount the save loop already running
+finishes its queue and starts nothing new, and a return through Settings or
+search carries on from how it ended, from any version that loop wrote over
+(#807).
+`lib/reloadGuard.ts` is the seam that keeps the
 service worker from reloading over all of this: `NotePage` holds it while an
 edit is unsaved, a block is open, the source editor is open (#332), or a save
 is in flight, and `main.tsx`
