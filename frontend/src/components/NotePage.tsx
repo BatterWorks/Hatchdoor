@@ -27,7 +27,7 @@ import { hideComments } from "../lib/noteComments";
 import { detectLineEnding, frontmatterLineOffset } from "../lib/sourceMap";
 import { useIsMobile } from "../hooks/useIsMobile";
 import type { NoteMovedHere } from "../hooks/useNoteActions";
-import { useNoteAutosave } from "../hooks/useNoteAutosave";
+import { createNoteSaves, useNoteAutosave } from "../hooks/useNoteAutosave";
 import { holdAppReload } from "../lib/reloadGuard";
 import { safeGetItem, safeSetItem } from "../lib/storage";
 import {
@@ -185,6 +185,15 @@ function unwrapLinks(wire: VaultQualifiedLinks): NoteLinks {
 }
 
 const NOTE_REMARK_PLUGINS = [...NOTE_SYNTAX_PLUGINS, remarkHideQueryMarkers];
+
+// Kept outside the page, which is unmounted by any route that is not a note:
+// a return from Settings or search takes over a save the last mount left out
+// instead of racing it into a false conflict (#807).
+const noteSaves = createNoteSaves();
+// How many times each address was opened afresh (#627), for the same reason:
+// a fresh mount must not take over a save of the file the address named
+// before "Open what is here now".
+const freshOpensByAddress = new Map<string, number>();
 
 export function NotePage({
   onActiveNoteChange,
@@ -346,9 +355,10 @@ export function NotePage({
   // one is never booked against it (#658). Adjusted during render, so no
   // render ever pairs the new address with the old visit.
   const [visit, setVisit] = useState(0);
-  const [visitedAddress, setVisitedAddress] = useState(`${vaultId}:${slug}`);
-  if (visitedAddress !== `${vaultId}:${slug}`) {
-    setVisitedAddress(`${vaultId}:${slug}`);
+  const address = `${vaultId}:${slug}`;
+  const [visitedAddress, setVisitedAddress] = useState(address);
+  if (visitedAddress !== address) {
+    setVisitedAddress(address);
     setVisit((current) => current + 1);
   }
   const noteKey = `${vaultId}:${slug}#${visit}`;
@@ -356,8 +366,7 @@ export function NotePage({
   // takes over a save the last visit left out instead of racing it (#803).
   // Opening the address afresh changes it, since the address may name
   // another file by then (#627).
-  const [freshOpens, setFreshOpens] = useState(0);
-  const noteId = `${vaultId}:${slug}~${freshOpens}`;
+  const noteId = `${address}~${freshOpensByAddress.get(address) ?? 0}`;
   const currentNoteKeyRef = useRef(noteKey);
   // Only ever the open note's own disk version, whatever is left in state.
   const conflictNote =
@@ -1097,6 +1106,7 @@ export function NotePage({
     // moves this one's hash or stops its saving (#658).
     noteKey,
     noteId,
+    saves: noteSaves,
     baseHash: note?.content_hash ?? "",
     // Once the slug names another note nothing is sent by it; the text stays
     // in the editor and in the draft filed under this note's path (#627).
@@ -1288,8 +1298,12 @@ export function NotePage({
     if (openPathAtRender !== undefined) {
       holdNoteDraft(vaultId, openPathAtRender);
     }
+    freshOpensByAddress.set(
+      address,
+      (freshOpensByAddress.get(address) ?? 0) + 1,
+    );
+    // The new visit is also what renders the new `noteId`.
     setVisit((current) => current + 1);
-    setFreshOpens((current) => current + 1);
   };
 
   // A refused save stopped autosave. When the page has its note back under
