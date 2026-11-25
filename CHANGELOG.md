@@ -7,11 +7,13 @@
 - When Hatchdoor runs behind Cloudflare Access, the browser can complete sign-in after the service worker installs. The sign-in return under `/cdn-cgi/` goes to Cloudflare instead of loading Hatchdoor's "Page Not Found" page. [#798]
 - When a repository, branch or folder change to a managed Vault is refused because its current checkout cannot be set aside, Settings says "Nothing changed" once instead of twice. The HTTP API reference now says, as the MCP tools reference does, that an `existing_git` Vault in `local_history` mode may point at a plain folder, where Hatchdoor creates the repository. [#801]
 - After a repository, branch or folder change to a managed Vault, resuming the Vault clones the new repository at once and shows it as waiting for its first sync; it used to wait for the next scheduled sync, up to a day, while showing the old repository's "ready". When the old checkout no longer matches what Hatchdoor cloned, Hatchdoor now refuses the change and says how to move that checkout by hand; it used to move the checkout aside without committing its notes and report nothing left unpushed. [#802]
+- Going back to a note while its last save is still on its way no longer shows "Edits aren't saving. This note changed somewhere else." and stops saving for the rest of the visit. The return now waits for that save, does not send the same text a second time, and saves any newer edit after it. [#803]
 
 [#797]: https://github.com/BatterWorks/Hatchdoor/pull/797
 [#798]: https://github.com/BatterWorks/Hatchdoor/issues/798
 [#801]: https://github.com/BatterWorks/Hatchdoor/issues/801
 [#802]: https://github.com/BatterWorks/Hatchdoor/issues/802
+[#803]: https://github.com/BatterWorks/Hatchdoor/issues/803
 
 ## v2.10.0 - 2026-11-14
 
