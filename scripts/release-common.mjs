@@ -18,6 +18,26 @@ export function parseVersion(text) {
   return match ? match.slice(1).map(Number) : null;
 }
 
+// A minor or major release is titled `v<version> - <name>`, the name saying
+// what the release is about. A patch release usually keeps the bare
+// `v<version>` and is not checked. Returns why `title` does not fit, or null.
+export function releaseTitleProblem(version, title) {
+  const parts = parseVersion(version);
+  if (!parts) {
+    throw new Error(`not a version: ${version}`);
+  }
+  const tag = `v${version}`;
+  const trimmed = title.trim();
+  if (parts[2] !== 0) {
+    return null;
+  }
+  const prefix = `${tag} - `;
+  if (!trimmed.startsWith(prefix) || !trimmed.slice(prefix.length).trim()) {
+    return `a minor or major release is titled "${tag} - <name>", with a name saying what it is about, not "${trimmed}".`;
+  }
+  return null;
+}
+
 export function compareVersions(left, right) {
   const a = parseVersion(left);
   const b = parseVersion(right);
@@ -425,6 +445,7 @@ export const CHECKLIST_ITEMS = [
   DOCS_FRESHNESS_ITEM,
   "No ADR is contradicted by what shipped.",
   "An MCP conformance run is recorded, if MCP behavior changed.",
+  "The base images the release builds from are the newest.",
   "`just smoke-install` passed against an image built from the version-bump branch.",
   "The release title and notes are drafted.",
 ];

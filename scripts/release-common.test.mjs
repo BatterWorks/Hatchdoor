@@ -17,6 +17,7 @@ import {
   latestReleaseVersion,
   parseChecklist,
   parseVersion,
+  releaseTitleProblem,
   readVersions,
   readmeVersionExamples,
   readmeVersionProblems,
@@ -257,7 +258,7 @@ test("reads ticks, and reports edited or deleted items as missing", () => {
   assert.deepEqual(parsed.missing, [CHECKLIST_ITEMS[2], CHECKLIST_ITEMS[6]]);
   assert.deepEqual(
     parsed.items.map((item) => item.checked),
-    [true, true, false, false, false, false],
+    [true, true, false, false, false, false, false],
   );
 });
 
@@ -269,6 +270,13 @@ test("the checklist asks for a smoke-install run before the bump merges", () => 
     renderChecklist("").replace(`- [ ] ${item}`, `- [x] ${item}`),
   );
   assert.equal(parsed.items.find((entry) => entry.text === item).checked, true);
+});
+
+test("the checklist asks for the newest base images before the smoke-install run", () => {
+  const item = CHECKLIST_ITEMS.find((text) => text.includes("base images"));
+  assert.ok(item, "no base-images item");
+  const smoke = CHECKLIST_ITEMS.findIndex((text) => text.includes("just smoke-install"));
+  assert.ok(CHECKLIST_ITEMS.indexOf(item) < smoke);
 });
 
 test("a ticked box inside pasted output does not tick the real item", () => {
@@ -367,4 +375,14 @@ test("the README's version examples name the version Cargo.toml declares", async
     'README.md has no "e.g. <version>" example; update README_VERSION_EXAMPLE in release-common.mjs if the line changed',
   );
   assert.deepEqual(readmeVersionProblems(readme, version), []);
+});
+
+test("a minor or major release needs a name in its title; a patch does not", () => {
+  assert.equal(releaseTitleProblem("2.10.0", "v2.10.0 - Closer to Obsidian"), null);
+  assert.equal(releaseTitleProblem("3.0.0", "  v3.0.0 - Big one \n"), null);
+  for (const title of ["v2.10.0", "v2.10.0 - ", "v2.10.0 -  ", "Closer to Obsidian", "v2.10.0: Closer"]) {
+    assert.match(releaseTitleProblem("2.10.0", title), /v2\.10\.0 - <name>/, title);
+  }
+  assert.equal(releaseTitleProblem("2.10.1", "v2.10.1"), null);
+  assert.equal(releaseTitleProblem("2.6.1", "v2.6.1 - Sweeping up"), null);
 });

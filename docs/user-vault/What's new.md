@@ -9,6 +9,12 @@ What changed in each Hatchdoor release, in a few plain lines, newest release fir
 
 Agents read this page with `read_docs` and the page name `whats-new`.
 
+## v2.10.1 - 2026-11-25
+
+- Going back to a note while it is still saving no longer stops it saving with "Edits aren't saving. This note changed somewhere else."
+- Signing in through Cloudflare Access no longer ends on Hatchdoor's "Page Not Found" page in a browser that has opened Hatchdoor before.
+- Changing a managed Vault's repository, branch or folder now clones the new repository as soon as the Vault resumes, instead of up to a day later.
+
 ## v2.10.0 - 2026-11-14
 
 - **Action needed:** Hatchdoor can no longer be shown inside another page, so a dashboard tile or Home Assistant iframe panel that embeds it must link to it instead.

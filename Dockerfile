@@ -1,6 +1,6 @@
 # syntax=docker.io/docker/dockerfile:1.7
 
-FROM docker.io/library/rust:1.97-slim AS chef
+FROM docker.io/library/rust:slim-trixie AS chef
 WORKDIR /app
 RUN apt-get update && apt-get install -y git pkg-config libssl-dev g++ perl make && rm -rf /var/lib/apt/lists/*
 # Permission-sensitive tests must run without root; all Cargo stages share this user.
@@ -57,11 +57,10 @@ FROM chef AS verification
 COPY --chown=builder:builder Cargo.toml Cargo.lock ./
 COPY --chown=builder:builder src ./src
 COPY --chown=builder:builder docs/user-vault ./docs/user-vault
+# The auth regression test checks every query-token URL in the frontend source.
+COPY --chown=builder:builder frontend/src ./frontend/src
 # The SPA regression test compares reserved routes with the real worker denylist.
 COPY --chown=builder:builder frontend/vite.config.ts ./frontend/vite.config.ts
-# The link-preview test compares comment stripping with the frontend's shared cases.
-COPY --chown=builder:builder frontend/src/lib/noteComments.cases.json \
-    ./frontend/src/lib/noteComments.cases.json
 # The link-preview test checks the real picture's dimensions and file size.
 COPY --chown=builder:builder frontend/public/link-preview.png ./frontend/public/link-preview.png
 ARG GIT_SHA=""
@@ -77,7 +76,7 @@ RUN npm ci
 COPY frontend ./
 RUN npm run build
 
-FROM gcr.io/distroless/cc-debian13:nonroot@sha256:d97bc0a941b8d4be647dc0ee75b264ddbb772f1ac5ba690a4309c00723b23775 AS runtime
+FROM gcr.io/distroless/cc-debian13:nonroot@sha256:532c7a94f9e96ba9db75eb9388f4227751131c7cb0a411d1a8521af4096135de AS runtime
 WORKDIR /app
 
 # Keep Microsoft ONNX Runtime telemetry disabled if a future runtime includes it.

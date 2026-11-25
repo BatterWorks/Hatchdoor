@@ -1,6 +1,6 @@
 [package]
 name = "hatchdoor"
-version = "2.10.0"
+version = "2.10.1"
 edition = "2024"
 default-run = "hatchdoor"
 license = "AGPL-3.0-only"
@@ -86,15 +86,61 @@ name = "index_microbench"
 path = "src/bin/index_microbench.rs"
 required-features = ["eval"]
 
-# Dependencies build optimised even in debug and test builds; Hatchdoor's own
-# crate stays at the default opt-level 0. The test suite spends most of its time
-# inside dependencies (bundled SQLite, JSON, tokenizers), so this cut a default
-# test run from 23.5s to 14.9s on a 4-core machine. Rebuilding after an edit to
-# Hatchdoor itself is unchanged. The cost is a slower first build (15 minutes
-# instead of 3 for the test build on the same machine) and a slower rebuild of
-# whichever dependencies change. Release builds are unaffected.
-[profile.dev.package."*"]
-opt-level = 2
+# The dependencies the tests run hard build optimised even in debug and test
+# builds. Everything else stays at the default opt-level 0: Hatchdoor's own
+# crate, macros, build scripts, and dependencies the tests barely run, such as
+# libgit2's C build and the image crates fastembed pulls in. Vendored OpenSSL's
+# C code builds at -O2 whatever this says: `openssl-src` sets it.
+# Optimising every dependency made the cargo steps of `just check-full` take
+# 51 to 57 minutes from an empty target folder on a 4-core VM; this list takes
+# 27 to 29. The two warm test runs take 2 to 3% longer together, the
+# default-features one about 6% (1.6 s) on its own (#795). A dependency the
+# tests need fast and this list misses shows up as a slow or timed-out test:
+# compare per-test times with libtest's `--report-time` and add the crate whose
+# code the slow test runs. Release builds are unaffected; the image's
+# `verification` stage tests with this profile too.
+[profile.dev.package]
+# The database and its vector extension.
+rusqlite = { opt-level = 2 }
+libsqlite3-sys = { opt-level = 2 }
+sqlite-vec = { opt-level = 2 }
+# Tokenizing and chunking: the search models' tokenizers and the splitter.
+tokenizers = { opt-level = 2 }
+onig = { opt-level = 2 }
+onig_sys = { opt-level = 2 }
+esaxx-rs = { opt-level = 2 }
+spm_precompiled = { opt-level = 2 }
+daachorse = { opt-level = 2 }
+unicode-normalization-alignments = { opt-level = 2 }
+unicode_categories = { opt-level = 2 }
+regex = { opt-level = 2 }
+regex-automata = { opt-level = 2 }
+regex-syntax = { opt-level = 2 }
+aho-corasick = { opt-level = 2 }
+memchr = { opt-level = 2 }
+text-splitter = { opt-level = 2 }
+pulldown-cmark = { opt-level = 2 }
+unicode-segmentation = { opt-level = 2 }
+icu_segmenter = { opt-level = 2 }
+icu_collections = { opt-level = 2 }
+# Running the search models.
+fastembed = { opt-level = 2 }
+ort = { opt-level = 2 }
+ndarray = { opt-level = 2 }
+matrixmultiply = { opt-level = 2 }
+# Hashing, Unicode normal forms, frontmatter and JSON.
+blake3 = { opt-level = 2 }
+ring = { opt-level = 2 }
+unicode-normalization = { opt-level = 2 }
+serde_json = { opt-level = 2 }
+serde_yaml_ng = { opt-level = 2 }
+unsafe-libyaml = { opt-level = 2 }
+# Deflate, for the zip downloads.
+flate2 = { opt-level = 2 }
+miniz_oxide = { opt-level = 2 }
+zlib-rs = { opt-level = 2 }
+crc32fast = { opt-level = 2 }
+adler2 = { opt-level = 2 }
 
 [dev-dependencies]
 jsonschema = { version = "0.60", default-features = false }

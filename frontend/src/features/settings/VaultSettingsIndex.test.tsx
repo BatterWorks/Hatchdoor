@@ -649,6 +649,86 @@ describe("VaultSettingsDetail — the Git behaviour control", () => {
     await screen.findByText(/nothing changed.*this vault is busy right now/i);
   });
 
+  /** Runs an identity change whose pause or edit step the server refuses
+   * with `message`, and returns the alert the page then shows (#801). */
+  const refusedIdentityChange = async (
+    step: "pause" | "edit",
+    message: string,
+  ) => {
+    const refusal = () =>
+      new Response(JSON.stringify({ message }), {
+        status: 409,
+        headers: { "content-type": "application/json" },
+      });
+    mockDetail(baseVault({ type: "local", path: "/notes" }), {
+      extraRoutes:
+        step === "pause"
+          ? { [`/api/v1/vaults/${VAULT_ID}/disable POST`]: refusal }
+          : {
+              [`/api/v1/vaults/${VAULT_ID}/disable POST`]: () =>
+                json({ registry_revision: 4, collection_revision: 4 }),
+              [`/api/v1/vaults/${VAULT_ID} PATCH`]: refusal,
+              [`/api/v1/vaults/${VAULT_ID}/enable POST`]: () =>
+                json({
+                  vault: baseVault(
+                    { type: "local", path: "/notes" },
+                    { enabled: true },
+                  ),
+                  registry_revision: 5,
+                  collection_revision: 5,
+                }),
+            },
+    });
+    render(
+      <VaultSettingsDetail
+        vaultId={VAULT_ID}
+        serverIdentity={SERVER_IDENTITY}
+        onDisconnect={() => {}}
+      />,
+    );
+
+    await screen.findByRole("heading", { name: "Field notes" });
+    fireEvent.click(screen.getByRole("button", { name: "Local history" }));
+    fireEvent.click(screen.getByRole("button", { name: "Save Vault" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Go ahead" }));
+
+    const alert = (await screen.findByText(/nothing changed/i)).closest(
+      '[role="alert"]',
+    );
+    expect(alert).not.toBeNull();
+    return alert?.textContent ?? "";
+  };
+
+  const SET_ASIDE_REFUSAL =
+    "Nothing changed: the Vault's current checkout could not be set aside, so it and its notes stay where they are. Permission denied.";
+
+  it("says Nothing changed once when the server's refusal already says it (#801)", async () => {
+    const shown = await refusedIdentityChange("edit", SET_ASIDE_REFUSAL);
+    expect(shown.match(/nothing changed/gi)).toHaveLength(1);
+    expect(shown).toBe(SET_ASIDE_REFUSAL);
+  });
+
+  it("says Nothing changed once when a refused pause already says it (#801)", async () => {
+    const shown = await refusedIdentityChange("pause", SET_ASIDE_REFUSAL);
+    expect(shown.match(/nothing changed/gi)).toHaveLength(1);
+    expect(shown).toBe(SET_ASIDE_REFUSAL);
+  });
+
+  it("puts Nothing changed in front of an edit refusal that does not say it (#801)", async () => {
+    expect(
+      await refusedIdentityChange(
+        "edit",
+        "Something about this edit was refused.",
+      ),
+    ).toBe("Nothing changed. Something about this edit was refused.");
+  });
+
+  it("puts Nothing changed in front of a pause refusal that does not say it (#801)", async () => {
+    expect(
+      await refusedIdentityChange("pause", "This Vault is busy right now."),
+    ).toBe("Nothing changed. This Vault is busy right now.");
+  });
+
   it("rolls back and reports nothing changed, rather than hanging forever, when the edit step's request itself fails (network error, not just a bad response)", async () => {
     mockDetail(baseVault({ type: "local", path: "/notes" }), {
       extraRoutes: {

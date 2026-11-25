@@ -1231,6 +1231,210 @@ describe("NotePage conflict review and editing correctness (#331)", () => {
     expect(screen.queryByText("Not saving")).not.toBeInTheDocument();
   });
 
+  /** Like `holdHomeSave`, but every later save of home waits for the held
+   * one, as a server applies writes in the order they arrive (#803). */
+  function holdHomeSaveInOrder(
+    disk: Record<string, { content: string; hash: string }>,
+  ) {
+    const fetchMock = vi.mocked(globalThis.fetch);
+    const realImpl = fetchMock.getMockImplementation()!;
+    const held: { release: () => void; sent: boolean } = {
+      release: () => {},
+      sent: false,
+    };
+    let first: Promise<unknown> = Promise.resolve();
+    let homeSaves = 0;
+    fetchMock.mockImplementation(async (input, init) => {
+      if (init?.method === "PUT" && String(input).includes("/notes/home")) {
+        homeSaves += 1;
+        if (!held.sent) {
+          held.sent = true;
+          const answered = new Promise<void>((resolve) => {
+            held.release = resolve;
+          }).then(() => realImpl(input, init));
+          first = answered;
+          return answered;
+        }
+        await first;
+        // Each write moves the hash, as a real Vault's does.
+        const response = await realImpl(input, init);
+        if (response.ok) disk.home.hash = `home-saved-${homeSaves}`;
+        return response;
+      }
+      return realImpl(input, init);
+    });
+    return held;
+  }
+
+  function homePutBodies(sent: Sent[]) {
+    return sent
+      .filter((entry) => entry.url.includes("/notes/home"))
+      .map((entry) => JSON.parse(String(entry.init.body)));
+  }
+
+  async function returnHomeMidSave(
+    disk: Record<string, { content: string; hash: string }>,
+  ) {
+    const held = holdHomeSaveInOrder(disk);
+    renderWithNav(<Link to="/v/vault-1/n/home">Back home</Link>);
+    await screen.findByRole("textbox", { name: "Note body" });
+    typeInOpenBlock("Home edited.\n");
+    fireEvent.blur(screen.getByRole("textbox", { name: "Note body" }));
+    await waitFor(() => expect(held.sent).toBe(true));
+    fireEvent.click(screen.getByRole("link", { name: "Go to other" }));
+    await screen.findByText("Other body.");
+    fireEvent.click(screen.getByRole("link", { name: "Back home" }));
+    await screen.findByText("Home edited.");
+    return held;
+  }
+
+  it("takes over a save still out when returning to the same note (#803)", async () => {
+    const disk = {
+      home: { content: "Home body.\n", hash: "home-1" },
+      other: { content: "Other body.\n", hash: "other-1" },
+    };
+    const sent = mockTwoNotes(disk);
+    const held = await returnHomeMidSave(disk);
+
+    await act(async () => held.release());
+    await waitFor(() =>
+      expect(screen.queryByText("Saving")).not.toBeInTheDocument(),
+    );
+    expect(
+      screen.queryByText(/This note changed somewhere else/),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText("Not saving")).not.toBeInTheDocument();
+    expect(disk.home.content).toBe("Home edited.\n");
+
+    // Saving is still on, against the hash the first save produced.
+    typeInOpenBlock("Home edited again.\n");
+    fireEvent.blur(screen.getByRole("textbox", { name: "Note body" }));
+    await waitFor(() => expect(disk.home.content).toBe("Home edited again.\n"));
+    const homePuts = homePutBodies(sent);
+    expect(homePuts.map((body) => body.content)).toEqual([
+      "Home edited.\n",
+      "Home edited again.\n",
+    ]);
+    expect(homePuts[1].expected_content_hash).toBe("home-saved");
+    expect(
+      screen.queryByText(/This note changed somewhere else/),
+    ).not.toBeInTheDocument();
+  });
+
+  it("writes a newer edit made on the return after the save still out (#803)", async () => {
+    const disk = {
+      home: { content: "Home body.\n", hash: "home-1" },
+      other: { content: "Other body.\n", hash: "other-1" },
+    };
+    const sent = mockTwoNotes(disk);
+    const held = await returnHomeMidSave(disk);
+    typeInOpenBlock("Home edited on return.\n");
+    fireEvent.blur(screen.getByRole("textbox", { name: "Note body" }));
+
+    await act(async () => held.release());
+    await waitFor(() =>
+      expect(disk.home.content).toBe("Home edited on return.\n"),
+    );
+    const homePuts = homePutBodies(sent);
+    expect(homePuts).toHaveLength(2);
+    expect(homePuts[1]).toMatchObject({
+      content: "Home edited on return.\n",
+      expected_content_hash: "home-saved",
+    });
+    expect(
+      screen.queryByText(/This note changed somewhere else/),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText("Not saving")).not.toBeInTheDocument();
+  });
+
+  it("keeps the save still out when the return could not restore its edit (#803)", async () => {
+    const disk = {
+      home: { content: "Home body.\n", hash: "home-1" },
+      other: { content: "Other body.\n", hash: "other-1" },
+    };
+    mockTwoNotes(disk);
+    // Site data blocked: no draft is written, so the return shows the note as
+    // read, without the edit its first save carries.
+    const setItem = Storage.prototype.setItem;
+    vi.spyOn(Storage.prototype, "setItem").mockImplementation(function (
+      this: Storage,
+      key: string,
+      value: string,
+    ) {
+      if (key.startsWith("hatchdoor:draft:")) {
+        throw new DOMException("blocked", "SecurityError");
+      }
+      setItem.call(this, key, value);
+    });
+    const held = holdHomeSaveInOrder(disk);
+    renderWithNav(<Link to="/v/vault-1/n/home">Back home</Link>);
+    await screen.findByRole("textbox", { name: "Note body" });
+    typeInOpenBlock("Home edited.\n");
+    fireEvent.blur(screen.getByRole("textbox", { name: "Note body" }));
+    await waitFor(() => expect(held.sent).toBe(true));
+    fireEvent.click(screen.getByRole("link", { name: "Go to other" }));
+    await screen.findByText("Other body.");
+    fireEvent.click(screen.getByRole("link", { name: "Back home" }));
+    await screen.findByText("Home body.");
+
+    typeInOpenBlock("Home typed afresh.\n");
+    fireEvent.blur(screen.getByRole("textbox", { name: "Note body" }));
+    await act(async () => held.release());
+
+    // The first save's edit is not written over: the return is told instead.
+    await screen.findByText(/This note changed somewhere else/);
+    expect(disk.home.content).toBe("Home edited.\n");
+  });
+
+  it("takes over a save still out when returning from a page that is not a note (#807)", async () => {
+    const disk = {
+      home: { content: "Home body.\n", hash: "home-1" },
+      other: { content: "Other body.\n", hash: "other-1" },
+    };
+    const sent = mockTwoNotes(disk);
+    const held = holdHomeSaveInOrder(disk);
+    // No route matches Settings here, so going there unmounts the page, as
+    // the app's own Settings route does.
+    renderWithNav(
+      <>
+        <Link to="/settings">Settings</Link>
+        <Link to="/v/vault-1/n/home">Back home</Link>
+      </>,
+    );
+    await screen.findByRole("textbox", { name: "Note body" });
+    typeInOpenBlock("Home edited.\n");
+    fireEvent.blur(screen.getByRole("textbox", { name: "Note body" }));
+    await waitFor(() => expect(held.sent).toBe(true));
+    fireEvent.click(screen.getByRole("link", { name: "Settings" }));
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("textbox", { name: "Note body" }),
+      ).not.toBeInTheDocument(),
+    );
+    fireEvent.click(screen.getByRole("link", { name: "Back home" }));
+    await screen.findByText("Home edited.");
+
+    await act(async () => held.release());
+    await waitFor(() =>
+      expect(screen.queryByText("Saving")).not.toBeInTheDocument(),
+    );
+    expect(
+      screen.queryByText(/This note changed somewhere else/),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText("Not saving")).not.toBeInTheDocument();
+    expect(disk.home.content).toBe("Home edited.\n");
+
+    typeInOpenBlock("Home edited again.\n");
+    fireEvent.blur(screen.getByRole("textbox", { name: "Note body" }));
+    await waitFor(() => expect(disk.home.content).toBe("Home edited again.\n"));
+    const homePuts = homePutBodies(sent);
+    expect(homePuts.map((body) => body.content)).toEqual([
+      "Home edited.\n",
+      "Home edited again.\n",
+    ]);
+    expect(homePuts[1].expected_content_hash).toBe("home-saved");
+  });
+
   /** Home's first save goes out and is held; more typing queues behind it;
    * then the page moves to other before that save comes back (#695). */
   async function leaveHomeWithNewerEdit(

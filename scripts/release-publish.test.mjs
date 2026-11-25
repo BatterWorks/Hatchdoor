@@ -267,7 +267,7 @@ async function fixture({ reviewFix = false } = {}) {
         {
           tagName: TAG,
           isDraft: true,
-          name: TAG,
+          name: `${TAG} - A new thing`,
           body: "### Added\n- A new thing.\n",
           url: "https://github.test/releases/untagged-1",
         },
@@ -580,6 +580,17 @@ test("refuses a draft release with an empty title or body", async () => {
     assert.match(result.stderr, key === "name" ? /title/ : /notes/);
     await assertNothingDone(context);
   }
+});
+
+test("refuses a minor release titled with the version alone", async () => {
+  const context = await fixture();
+  await editState(context, (state) => {
+    state.releases[0].name = TAG;
+  });
+  const result = publish(context);
+  assertRefused(result, "draft release");
+  assert.match(result.stderr, /v1\.1\.0 - <name>/);
+  await assertNothingDone(context);
 });
 
 test("refuses a release that is already published before the merge", async () => {

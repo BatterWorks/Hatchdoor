@@ -67,8 +67,10 @@ Before the notes, rewrite the highlights if the first run did not already make y
 Edit the draft GitHub Release until its title and notes are what should go public:
 
 ```bash
-gh release edit v2.7.0 --title 'v2.7.0' --notes-file <file>
+gh release edit v2.7.0 --title 'v2.7.0 - Live tables, vault-wide tags and a month of fixes' --notes-file <file>
 ```
+
+A minor or major release is titled `v<version> - <name>`, the name saying in a few words what the release is about, as in `v2.9.0 - Where each change came from`. A patch release usually keeps the bare `v<version>` that `release-prepare` gives the draft. `release-publish` refuses a minor or major release whose title has no name.
 
 The notes start as the changelog section; rewrite them for readers of the release page where that helps, including any entry a review fix added. Then tick **The release title and notes are drafted.**
 
@@ -99,7 +101,7 @@ Before merging, it refuses unless all of these hold:
 - The release hook is set and is an executable file.
 - **Release v2.7.0** is open from `development` into `main` with that exact title.
 - The version-bump pull request from `docs/release-v2.7.0` has merged, and every checklist item on it is present in its exact wording, and ticked.
-- The draft release for `v2.7.0` exists, is still a draft, and has a title and notes.
+- The draft release for `v2.7.0` exists, is still a draft, and has a title and notes. For a minor or major release, the title is `v2.7.0 - <name>`.
 - `## Unreleased` on `development` has no entries.
 - The tip of `development` is the merge commit of the version-bump pull request.
 - No `v2.7.0` tag exists yet.
@@ -125,6 +127,11 @@ These are the checks only a reader can make. `release-prepare` puts them on the 
 - **The notes named by `just docs-freshness main` were read, and the review was recorded with `just docs-freshness-ack main`.** The command's output sits under this box on the pull request. Open every note it names, compare it with what the release changed, then run `just docs-freshness-ack main` on the bump branch. The pasted list is taken when the pull request opens; after a review fix, run `just docs-freshness main` on the bump branch again and read anything new it names before acknowledging.
 - **No ADR is contradicted by what shipped.** An ADR the release went against must be amended or superseded, not left stale. The same goes for the architecture records and the module map.
 - **An MCP conformance run is recorded, if MCP behavior changed.** If the release touches `/mcp`, the MCP tools or MCP-facing security, record a clean run per [`mcp-conformance-run.md`](./mcp-conformance-run.md): on the bump branch, `just dev-start`, `just dev-wait`, then `just conformance`. Write the account of the run beside the result directories it wrote, commit them all to the bump branch, and run `release-prepare` again, which refuses while they are uncommitted. Otherwise tick the box.
+- **The base images the release builds from are the newest.** A release ships whatever base images the Dockerfile names, and a pinned one never moves by itself: v2.10.0 went out on an old runtime digest and missed Debian's OpenSSL and zlib fixes. On the bump branch, bring each one up to date:
+  - The runtime, `gcr.io/distroless/cc-debian13:nonroot`, is pinned by digest. Set the digest to the one `docker buildx imagetools inspect gcr.io/distroless/cc-debian13:nonroot` prints on its `Digest:` line.
+  - Rust is not pinned. The Dockerfile builds on `rust:slim-trixie`, a moving tag for the newest stable Rust on Debian 13, the runtime's Debian, and `rust-toolchain.toml` names the `stable` channel. Before `just check-full`, run `rustup update stable` so the local build uses the same Rust the image will. A new Rust can bring new clippy warnings; `just check-full` finds them, and they are fixed on the bump branch. When the runtime moves to a newer Debian, move the builder's `-trixie` suffix with it.
+  - The frontend builder, `node:<major>-slim`, is a moving tag, so a build fetches its newest image. Check that its major is still supported upstream, and move it when a newer major is the current release.
+  - When nothing above changed, tick the box. Otherwise commit, add a line under the dated `## v<version>` section of `CHANGELOG.md` saying the image is built on updated base images, and run `release-prepare` again, as in step 2. The smoke-install run below then builds the image on them.
 - **`just smoke-install` passed against an image built from the version-bump branch.** On the bump branch, with no other build or test running, run `just smoke-install`. It builds the image with Docker, as the release does, and follows the README Quick Start with rootless Podman in a throwaway folder; [CONTRIBUTING.md](../../CONTRIBUTING.md#install-smoke-test) says what it needs and how long it takes. A failure names the step that broke: fix the install, the README or the guides on the bump branch, and run it again.
 - **The release title and notes are drafted.** Step 3.
 
@@ -183,6 +190,7 @@ The build machines, the internal registry and the servers that run releases are 
 
 - Build the image once, with Docker BuildKit, for amd64 and arm64, and push it under four tags: `<version>`, `latest`, `podman-<version>` and `podman-latest`. All four carry the same digest: the `podman-` tags are a second name for the same image, not a separate build, because Docker and Podman both run it (#705). The image carries no `HEALTHCHECK`: the health check is the Compose file's, which both engines apply.
 - Keep the `podman-` tags moving up to and including the third release after the one that first ships the single build, then stop publishing them.
+- Fetch every base image the Dockerfile names from its registry on each build, never reusing a copy the build machine already holds, so a moving tag such as `node:26-slim` gives its newest image.
 - Pass every build `--build-arg VERSION=<version>` and `--build-arg GIT_SHA=<the tagged commit>`. The Dockerfile writes them to the `org.opencontainers.image.version` and `org.opencontainers.image.revision` labels, which are empty without them. `VERSION` is also what makes the build a release: without it the published image reports `channel: dev` in the opt-in usage report.
 - Pass the build `--build-arg HATCHDOOR_IMAGE=published`. It marks the published image, which the opt-in usage report then sends as `image: docker` or `image: podman`, told apart at run time by the file Podman creates in every container. Without it a published image reports `source`. The older values `docker` and `podman` still count as `published`.
 - Copy them to Docker Hub from the fixed version tags, never from a moving tag such as `latest`.
@@ -231,7 +239,7 @@ While the version-bump pull request is open, the command opens nothing. It tests
 | `release hook` | `HATCHDOOR_RELEASE_HOOK` is set neither in the environment nor in `.release.env`, or does not name an executable file. | Set it to the hook's path in `.release.env`. |
 | `release pull request` | No open or merged pull request from `development` into `main` is titled exactly `Release v<version>`. | Restore the title if it was edited, or run `just release-prepare <version>`. |
 | `release checklist` | An item on the merged version-bump pull request is unticked, or its wording was changed or deleted. | Do the check and tick the box, or restore the item's exact text. The bump has merged, so a check that finds something to fix can no longer ship it in this release: stop and ask the maintainer. |
-| `draft release` | Before the merge: the draft has no title or notes. | Finish drafting it, and get the maintainer's approval again, since the text changed. |
+| `draft release` | Before the merge: the draft has no title or notes, or a minor or major release's title has no name after `v<version> - `. | Finish drafting it, and get the maintainer's approval again, since the text changed. |
 | `draft release` | Before the merge: there is no draft. | Run `just release-prepare <version>` to create it, redraft the title and notes, and get the maintainer's approval again. |
 | `draft release` | The release was published before its pull request merged, or the draft went missing after the merge. | `release-prepare` cannot repair either, because the version then counts as published or tagged. Stop and ask the maintainer. |
 | `changelog` | `## Unreleased` on `development` has entries merged after the bump. | Those changes are not in this release's notes. Stop and ask the maintainer: they belong to the next version. |

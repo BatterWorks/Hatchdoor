@@ -225,6 +225,7 @@ export default defineConfig({
           /^\/health/,
           /^\/docs\//,
           /^\/llms\.txt/,
+          /^\/cdn-cgi\//,
         ],
       },
     }),

@@ -65,7 +65,7 @@ To check a change by hand with the Playwright browser tools instead, run `just d
 
 ### Prototypes for a choice
 
-A ticket labelled `needs-a-choice` holds a decision only the maintainer makes: bring options, do not decide. When the choice is about a screen, answer it with a static prototype, never inside the running app, where the service worker and Vite's cache serve stale code. `just proto-new <issue>-<slug> <path>...` captures each path from the dev instance at phone, tablet and desktop size in light and dark into `.dev/prototypes/<issue>-<slug>/`; draw the options on top of those pages with plain HTML and CSS that uses the tokens in `frontend/src/styles/base.css`. `just proto-serve <issue>-<slug> <port>` serves the folder to the LAN with caching off. Hand over one link per option and state, then wait. The comment that records the choice names the chosen page, and review holds the build to it (`CODING_STANDARDS.md`).
+A ticket labelled `needs-a-choice` holds a decision only the maintainer makes, one that needs the built work in hand; it always rides with `ready-for-agent`, and a decision answerable before work starts is settled in triage instead. Bring options, do not decide. When the choice is about a screen, answer it with a static prototype, never inside the running app, where the service worker and Vite's cache serve stale code. `just proto-new <issue>-<slug> <path>...` captures each path from the dev instance at phone, tablet and desktop size in light and dark into `.dev/prototypes/<issue>-<slug>/`; draw the options on top of those pages with plain HTML and CSS that uses the tokens in `frontend/src/styles/base.css`. `just proto-serve <issue>-<slug> <port>` serves the folder to the LAN with caching off. Hand over one link per option and state, then wait. The comment that records the choice names the chosen page, and review holds the build to it (`CODING_STANDARDS.md`).
 
 ## CodeGraph
 
@@ -231,7 +231,7 @@ node scripts/check-docs-freshness.mjs --validate-table
 
 A release is cut with `just release-prepare <version>` and `just release-publish <version>`, following [`docs/maintenance/release-runbook.md`](docs/maintenance/release-runbook.md) (ADR-36).
 
-Only the maintainer approves a release. After working through the version-bump pull request's checklist, draft the GitHub Release title and notes on the draft release, give the maintainer that exact title and notes together with the release's section of `docs/user-vault/What's new.md` (ADR-42), and stop. Run `just release-publish` only after the maintainer replies "approved" to that draft in the current session. That approval also covers the deploy that `release-publish` runs.
+Only the maintainer approves a release. After working through the version-bump pull request's checklist, draft the GitHub Release title and notes on the draft release (a minor or major release is titled `v<version> - <name>`; a patch usually keeps the bare `v<version>`), give the maintainer that exact title and notes together with the release's section of `docs/user-vault/What's new.md` (ADR-42), and stop. Run `just release-publish` only after the maintainer replies "approved" to that draft in the current session. That approval also covers the deploy that `release-publish` runs.
 
 Ask again, and do not publish, when either holds:
 

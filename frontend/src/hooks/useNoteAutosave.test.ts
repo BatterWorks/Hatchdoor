@@ -1,7 +1,12 @@
 import { act, renderHook } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { type Sender, useNoteAutosave } from "./useNoteAutosave";
+import {
+  createNoteSaves,
+  type NoteSaves,
+  type Sender,
+  useNoteAutosave,
+} from "./useNoteAutosave";
 
 beforeEach(() => vi.useFakeTimers());
 afterEach(() => vi.useRealTimers());
@@ -520,5 +525,352 @@ describe("a reply for the note just left (#658)", () => {
     await act(async () => vi.advanceTimersByTime(5000));
     expect(save).not.toHaveBeenCalled();
     expect(hook.result.current.hasUnsaved()).toBe(false);
+  });
+});
+
+describe("a return to the note whose save is still out (#803)", () => {
+  function visits(save: Sender) {
+    const saved = vi.fn();
+    const hook = renderHook(
+      ({ noteKey, noteId, baseHash }) =>
+        useNoteAutosave({
+          noteKey,
+          noteId,
+          baseHash,
+          enabled: true,
+          save,
+          onSaved: (result, content, sentAgainst) =>
+            saved(noteKey, result, content, sentAgainst),
+        }),
+      { initialProps: { noteKey: "a#0", noteId: "a", baseHash: "a-1" } },
+    );
+    return { hook, saved };
+  }
+
+  function held() {
+    const replies: Array<(outcome: Error | { content_hash: string }) => void> =
+      [];
+    const save = vi.fn<Sender>(
+      () =>
+        new Promise<{ content_hash: string }>((resolve, reject) => {
+          replies.push((outcome) =>
+            outcome instanceof Error ? reject(outcome) : resolve(outcome),
+          );
+        }),
+    );
+    return { save, replies };
+  }
+
+  function conflict() {
+    const error = new Error("changed");
+    error.name = "ConflictError";
+    return error;
+  }
+
+  /** Commit in a, visit b, come back to a, all before a's save answers. */
+  async function returnMidSave(save: Sender) {
+    const visited = visits(save);
+    await act(async () => visited.hook.result.current.commit("a text"));
+    visited.hook.rerender({ noteKey: "b#1", noteId: "b", baseHash: "b-1" });
+    visited.hook.rerender({ noteKey: "a#2", noteId: "a", baseHash: "a-1" });
+    return visited;
+  }
+
+  it("does not send the same text again, and takes over the save's hash", async () => {
+    const { save, replies } = held();
+    const { hook, saved } = await returnMidSave(save);
+    await act(async () => hook.result.current.commitRestored("a text"));
+    expect(save).toHaveBeenCalledTimes(1);
+    expect(hook.result.current.status).toBe("saving");
+
+    await act(async () => replies[0]({ content_hash: "a-2" }));
+    expect(save).toHaveBeenCalledTimes(1);
+    expect(hook.result.current.status).toBe("saved");
+    expect(hook.result.current.hasUnsaved()).toBe(false);
+    expect(hook.result.current.isOwnWrite("a-2")).toBe(true);
+    // Booked for the visit that sent it, then for the visit that took it over.
+    expect(saved.mock.calls.map((call) => call[0])).toEqual(["a#0", "a#2"]);
+
+    await act(async () => hook.result.current.commit("a again"));
+    expect(save).toHaveBeenLastCalledWith("a again", "a-2");
+  });
+
+  it("writes a newer edit after the save, against the hash it produced", async () => {
+    const { save, replies } = held();
+    const { hook } = await returnMidSave(save);
+    await act(async () => hook.result.current.commitRestored("a newer"));
+    expect(save).toHaveBeenCalledTimes(1);
+
+    await act(async () => replies[0]({ content_hash: "a-2" }));
+    expect(save).toHaveBeenCalledTimes(2);
+    expect(save).toHaveBeenLastCalledWith("a newer", "a-2");
+    await act(async () => replies[1]({ content_hash: "a-3" }));
+    expect(hook.result.current.status).toBe("saved");
+  });
+
+  it("holds the same text unsaved, with saving on, when the save is refused", async () => {
+    const { save, replies } = held();
+    const { hook, saved } = await returnMidSave(save);
+    await act(async () => hook.result.current.commitRestored("a text"));
+
+    await act(async () => replies[0](conflict()));
+    expect(save).toHaveBeenCalledTimes(1);
+    expect(hook.result.current.status).toBe("idle");
+    expect(hook.result.current.hasUnsaved()).toBe(true);
+    expect(saved).not.toHaveBeenCalled();
+  });
+
+  it("sends a newer edit against its own hash when the save is refused", async () => {
+    const { save, replies } = held();
+    const { hook } = await returnMidSave(save);
+    await act(async () => hook.result.current.commitRestored("a newer"));
+
+    await act(async () => replies[0](conflict()));
+    expect(save).toHaveBeenLastCalledWith("a newer", "a-1");
+  });
+
+  it("keeps its own hash when it read another version than the save replaced", async () => {
+    const { save, replies } = held();
+    const visited = visits(save);
+    await act(async () => visited.hook.result.current.commit("a text"));
+    visited.hook.rerender({ noteKey: "b#1", noteId: "b", baseHash: "b-1" });
+    visited.hook.rerender({ noteKey: "a#2", noteId: "a", baseHash: "a-9" });
+    await act(async () => visited.hook.result.current.commitRestored("a text"));
+
+    await act(async () => replies[0]({ content_hash: "a-2" }));
+    expect(save).toHaveBeenLastCalledWith("a text", "a-9");
+    expect(visited.hook.result.current.isOwnWrite("a-2")).toBe(false);
+  });
+
+  it("waits for the save even when another note saved in between", async () => {
+    const { save, replies } = held();
+    const visited = visits(save);
+    await act(async () => visited.hook.result.current.commit("a text"));
+    visited.hook.rerender({ noteKey: "b#1", noteId: "b", baseHash: "b-1" });
+    await act(async () => visited.hook.result.current.commit("b text"));
+    visited.hook.rerender({ noteKey: "a#2", noteId: "a", baseHash: "a-1" });
+    await act(async () =>
+      visited.hook.result.current.commitRestored("a newer"),
+    );
+    expect(save).toHaveBeenCalledTimes(2);
+
+    await act(async () => replies[1]({ content_hash: "b-2" }));
+    expect(save).toHaveBeenCalledTimes(2);
+    await act(async () => replies[0]({ content_hash: "a-2" }));
+    expect(save).toHaveBeenLastCalledWith("a newer", "a-2");
+  });
+
+  it("carries on from a save that answered before the return wrote", async () => {
+    const { save, replies } = held();
+    const { hook, saved } = await returnMidSave(save);
+    await act(async () => replies[0]({ content_hash: "a-2" }));
+    expect(hook.result.current.status).toBe("idle");
+
+    await act(async () => hook.result.current.commitRestored("a text"));
+    expect(save).toHaveBeenCalledTimes(1);
+    expect(hook.result.current.status).toBe("saved");
+    expect(saved.mock.calls.map((call) => call[0])).toEqual(["a#0", "a#2"]);
+    await act(async () => hook.result.current.commit("a newer"));
+    expect(save).toHaveBeenLastCalledWith("a newer", "a-2");
+  });
+
+  it("carries on from a save that answered only once", async () => {
+    const { save, replies } = held();
+    const visited = await returnMidSave(save);
+    await act(async () => replies[0]({ content_hash: "a-2" }));
+    await act(async () => visited.hook.result.current.commitRestored("a text"));
+    expect(save).toHaveBeenCalledTimes(1);
+    visited.hook.rerender({ noteKey: "b#3", noteId: "b", baseHash: "b-1" });
+    visited.hook.rerender({ noteKey: "a#4", noteId: "a", baseHash: "a-1" });
+    await act(async () =>
+      visited.hook.result.current.commitRestored("a newer"),
+    );
+    expect(save).toHaveBeenLastCalledWith("a newer", "a-1");
+  });
+
+  it("does not take over the save's hash for text that was not restored", async () => {
+    const { save, replies } = held();
+    const { hook, saved } = await returnMidSave(save);
+    // Typed on the note as read, without the edit the earlier save carries.
+    await act(async () => hook.result.current.commit("a typed afresh"));
+    expect(save).toHaveBeenCalledTimes(1);
+
+    await act(async () => replies[0]({ content_hash: "a-2" }));
+    expect(save).toHaveBeenLastCalledWith("a typed afresh", "a-1");
+    expect(saved.mock.calls.map((call) => call[0])).toEqual(["a#0"]);
+  });
+
+  it("does not take over a save of another note id", async () => {
+    const { save } = held();
+    const visited = visits(save);
+    await act(async () => visited.hook.result.current.commit("a text"));
+    visited.hook.rerender({ noteKey: "a#1", noteId: "a~1", baseHash: "a-1" });
+    await act(async () => visited.hook.result.current.commitRestored("a text"));
+    expect(save).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("a return after the page itself was left (#807)", () => {
+  /** One mount of the page: the route to Settings unmounts it, and the next
+   * mount starts its visit counter at 0 again, so both use the same key. */
+  function mount(saves: NoteSaves, save: Sender, noteId = "a~0") {
+    const saved = vi.fn();
+    const hook = renderHook(() =>
+      useNoteAutosave({
+        noteKey: "a#0",
+        noteId,
+        baseHash: "a-1",
+        enabled: true,
+        save,
+        saves,
+        onSaved: (_result, content, sentAgainst) => saved(content, sentAgainst),
+      }),
+    );
+    return { hook, saved };
+  }
+
+  function held() {
+    const replies: Array<(outcome: { content_hash: string }) => void> = [];
+    const save = vi.fn<Sender>(
+      () =>
+        new Promise<{ content_hash: string }>((resolve) => {
+          replies.push(resolve);
+        }),
+    );
+    return { save, replies };
+  }
+
+  it("waits for the save the last mount left out and takes over its hash", async () => {
+    const saves = createNoteSaves();
+    const { save, replies } = held();
+    const first = mount(saves, save);
+    await act(async () => first.hook.result.current.commit("a text"));
+    first.hook.unmount();
+
+    const back = mount(saves, save);
+    await act(async () => back.hook.result.current.commitRestored("a text"));
+    expect(save).toHaveBeenCalledTimes(1);
+    expect(back.hook.result.current.status).toBe("saving");
+
+    await act(async () => replies[0]({ content_hash: "a-2" }));
+    expect(save).toHaveBeenCalledTimes(1);
+    expect(back.hook.result.current.status).toBe("saved");
+    expect(back.saved).toHaveBeenCalledWith("a text", "a-1");
+
+    await act(async () => back.hook.result.current.commit("a again"));
+    expect(save).toHaveBeenLastCalledWith("a again", "a-2");
+  });
+
+  it("writes a newer edit after that save, against the hash it produced", async () => {
+    const saves = createNoteSaves();
+    const { save, replies } = held();
+    const first = mount(saves, save);
+    await act(async () => first.hook.result.current.commit("a text"));
+    first.hook.unmount();
+
+    const back = mount(saves, save);
+    await act(async () => back.hook.result.current.commitRestored("a newer"));
+    await act(async () => replies[0]({ content_hash: "a-2" }));
+    expect(save).toHaveBeenLastCalledWith("a newer", "a-2");
+  });
+
+  it("carries on from a save that answered between the two mounts", async () => {
+    const saves = createNoteSaves();
+    const { save, replies } = held();
+    const first = mount(saves, save);
+    await act(async () => first.hook.result.current.commit("a text"));
+    first.hook.unmount();
+    await act(async () => replies[0]({ content_hash: "a-2" }));
+
+    const back = mount(saves, save);
+    await act(async () => back.hook.result.current.commitRestored("a text"));
+    expect(save).toHaveBeenCalledTimes(1);
+    expect(back.hook.result.current.status).toBe("saved");
+    await act(async () => back.hook.result.current.commit("a newer"));
+    expect(save).toHaveBeenLastCalledWith("a newer", "a-2");
+  });
+
+  it("still writes the edit the left mount had queued", async () => {
+    const saves = createNoteSaves();
+    const { save, replies } = held();
+    const first = mount(saves, save);
+    await act(async () => first.hook.result.current.commit("a text"));
+    await act(async () => first.hook.result.current.commit("a queued"));
+    first.hook.unmount();
+
+    await act(async () => replies[0]({ content_hash: "a-2" }));
+    expect(save).toHaveBeenCalledTimes(2);
+    expect(save).toHaveBeenLastCalledWith("a queued", "a-2");
+  });
+
+  it("takes over the end of that queue from the version it read before it", async () => {
+    const saves = createNoteSaves();
+    const { save, replies } = held();
+    const first = mount(saves, save);
+    await act(async () => first.hook.result.current.commit("a text"));
+    await act(async () => first.hook.result.current.commit("a queued"));
+    first.hook.unmount();
+
+    // Read at a-1, before either save landed, with the draft's newest text.
+    const back = mount(saves, save);
+    await act(async () => back.hook.result.current.commitRestored("a queued"));
+    await act(async () => replies[0]({ content_hash: "a-2" }));
+    await act(async () => replies[1]({ content_hash: "a-3" }));
+    expect(save).toHaveBeenCalledTimes(2);
+    expect(back.hook.result.current.status).toBe("saved");
+    await act(async () => back.hook.result.current.commit("a newer"));
+    expect(save).toHaveBeenLastCalledWith("a newer", "a-3");
+  });
+
+  it("carries on from the last save that landed when a later one failed", async () => {
+    const saves = createNoteSaves();
+    const replies: Array<(outcome: Error | { content_hash: string }) => void> =
+      [];
+    const save = vi.fn<Sender>(
+      () =>
+        new Promise<{ content_hash: string }>((resolve, reject) => {
+          replies.push((outcome) =>
+            outcome instanceof Error ? reject(outcome) : resolve(outcome),
+          );
+        }),
+    );
+    const first = mount(saves, save);
+    await act(async () => first.hook.result.current.commit("a text"));
+    await act(async () => first.hook.result.current.commit("a queued"));
+    first.hook.unmount();
+
+    const back = mount(saves, save);
+    await act(async () => back.hook.result.current.commitRestored("a queued"));
+    await act(async () => replies[0]({ content_hash: "a-2" }));
+    await act(async () => replies[1](new Error("network")));
+    expect(save).toHaveBeenLastCalledWith("a queued", "a-2");
+  });
+
+  it("writes text that was not restored against the version it read", async () => {
+    const saves = createNoteSaves();
+    const { save, replies } = held();
+    const first = mount(saves, save);
+    await act(async () => first.hook.result.current.commit("a text"));
+    first.hook.unmount();
+
+    const back = mount(saves, save);
+    await act(async () => back.hook.result.current.commit("a typed afresh"));
+    expect(save).toHaveBeenCalledTimes(1);
+    await act(async () => replies[0]({ content_hash: "a-2" }));
+    expect(save).toHaveBeenLastCalledWith("a typed afresh", "a-1");
+    expect(back.saved).not.toHaveBeenCalled();
+  });
+
+  it("does not take over a save of the file an address named before a fresh open", async () => {
+    const saves = createNoteSaves();
+    const { save } = held();
+    const first = mount(saves, save, "a~0");
+    await act(async () => first.hook.result.current.commit("a text"));
+    first.hook.unmount();
+
+    const back = mount(saves, save, "a~1");
+    await act(async () => back.hook.result.current.commitRestored("a text"));
+    expect(save).toHaveBeenCalledTimes(2);
+    expect(save).toHaveBeenLastCalledWith("a text", "a-1");
   });
 });

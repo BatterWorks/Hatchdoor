@@ -2650,7 +2650,12 @@ through `VaultRegistryStore::edit_prepared`: before the change is saved,
 moves it into the Vault's `retired-checkouts/` folder, so the next Git turn
 clones the new identity. A failure refuses the edit with
 `checkout_set_aside_failed` (HTTP `409`), its retryability taken from the Git
-error, and nothing is saved or moved. When the registry save itself fails
+error, and nothing is saved or moved; an old checkout that no longer
+validates is refused this way too, with a message naming the folder to move
+by hand (#802). Once any identity change is saved, the Vault's remembered
+Git turn is forgotten (`ManagedGitScheduler::forget_persisted_state`), so resuming the
+Vault clones at once and shows `pending` rather than the old remote's status;
+a refused or failed save keeps it. When the registry save itself fails
 after the checkout moved, `git::restore_retired_checkout` puts it back; a
 failure to do so is logged with the archive's place. Every set-aside is
 logged too, so the report survives a response that is lost. The response's optional
@@ -3277,8 +3282,9 @@ says the checkout was cloned from rather than the current definition, commits
 pending Vault drift in a Two-way checkout, counts the commits the remote
 branch lacks, and `set_aside_checkout` moves the checkout and its receipt
 into `vaults/<id>/retired-checkouts/<UTC timestamp>/`. A commit failure moves
-nothing. A checkout that no longer validates is moved without a commit, which
-keeps every file. Nothing deletes from `retired-checkouts/`, and
+nothing, and so does a checkout that no longer validates, which cannot be
+committed in: it is refused as `managed_git_validation_failed` (#802), and
+moving it by hand is the documented way out. Nothing deletes from `retired-checkouts/`, and
 `discard_interrupted_acquisition` never touches it. It returns
 `RetiredCheckout`, or `None` when no checkout exists yet. A move that fails is
 the non-retryable `ManagedCheckoutError::SetAsideFailed`
@@ -3465,7 +3471,8 @@ store failure is logged and dropped — the turn already happened, and
 forgetting it costs one extra turn after the next restart.
 `forget_persisted_state` prunes a Vault that has left the collection, called
 by the collection lifecycle for a disconnect (never for a disable, which
-keeps its schedule). `polling_clock(vault_id)` returns the
+keeps its schedule), and by Vault collection management once a Vault's
+identity change is saved (#802). `polling_clock(vault_id)` returns the
 `GitPollingClock { last_checked_at, next_attempt_at }` a status read
 renders, and `remembered_turn(vault_id)` returns the whole remembered record;
 both come from memory, so listing the collection never touches the file.
@@ -4005,12 +4012,14 @@ with `200`, `spa_note_handler` answers the note address
 `/v/{vault_id}/n/{slug}`, and `spa_not_found_handler` is the static directory's fallback
 (#302), so an address no route or built file matches still loads the app with a
 `404` status and the app renders its not-found state. Paths under
-`SPA_RESERVED_PREFIXES` (`/api/`, `/vault-assets/`, `/docs/`, `/llms.txt`, and
-anything starting `/health`) keep a bare `404`. That list mirrors the service
-worker's `navigateFallbackDenylist` in `frontend/vite.config.ts`, and a test in
-`spa.rs` fails if the two drift. Outside demo mode all three return the built
-`index.html` byte for byte. In demo mode they write a link preview (#512,
-ADR-47) in place of its `<title>`: `link_preview.rs` builds the tags, the
+`SPA_RESERVED_PREFIXES` (`/api/`, `/vault-assets/`, `/docs/`, `/llms.txt`,
+`/cdn-cgi/`, and anything starting `/health`) keep a bare `404`. The
+`/cdn-cgi/` exclusion lets Cloudflare handle its own sign-in return (#798).
+That list mirrors the service worker's `navigateFallbackDenylist` in
+`frontend/vite.config.ts`, and a test in `spa.rs` fails if the two drift.
+Outside demo mode all three return the built `index.html` byte for byte. In
+demo mode they write a link preview (#512, ADR-47) in place of its `<title>`:
+`link_preview.rs` builds the tags, the
 general wording, and a note's description (its `description` property, else its
 opening prose reduced to plain text, cut to 200 characters), and escapes every
 value. Only `spa_note_handler` reads a note, through
@@ -5803,7 +5812,8 @@ writes out its draft, drops autosave's unsent edits (`useNoteAutosave`'s
 `discard`), moves the old path's draft to the held-draft store
 (`lib/writeDrafts.ts`'s `holdNoteDraft`, restorable from Settings as a note at
 that path) and bumps a visit counter that is part of the note key, so every
-per-note reset runs as on navigation. A lookup that could not be made shows
+per-note reset runs as on navigation, and the autosave `noteId` with it, so
+no save of the old file is taken over. A lookup that could not be made shows
 the first notice with **Try again**. A Rename, Move or Archive made in the app
 leaves `useNoteActions`' `NoteMovedHere` router state (`{movedFrom, movedTo}`),
 which the page accepts as its own note's new path without asking, once, and
@@ -6002,7 +6012,24 @@ note's edits back nor drains them, while its reply reaches only the `onSaved`
 captured for its own note; `NotePage`'s `onSaved` and its refusal notices act
 only while the note they were sent for is open, except that a late successful
 reply moves the left note's held draft onto the new hash when that draft is
-the last copy the left visit wrote and is based on `sentAgainst` (#695). `lib/reloadGuard.ts` is the seam that keeps the
+the last copy the left visit wrote and is based on `sentAgainst` (#695). A
+return to the same note is a new key but the same optional `noteId` (#803):
+the hook keeps each note's save still out, and how a save ended after its
+visit was left, by `noteId`; the return's first write waits for or reads it.
+Only a visit whose text came back from the held draft (`commitRestored`, the
+page's crash-recovery commit) takes that save's hash over, when it read the
+version the save replaced, and does not send the same text twice; any other
+text is written against the visit's own hash, so it conflicts rather than
+erasing the save's edit;
+`NotePage` changes the `noteId` only when **Open what is here now** opens the
+address afresh. The hook tells visits apart by a token of its own, since
+`NotePage`'s key restarts on a fresh mount; `NotePage` hands every mount one
+`saves` record (`createNoteSaves()`) and its per-address fresh-open count,
+both kept at module level. After an unmount the save loop already running
+finishes its queue and starts nothing new, and a return through Settings or
+search carries on from how it ended, from any version that loop wrote over
+(#807).
+`lib/reloadGuard.ts` is the seam that keeps the
 service worker from reloading over all of this: `NotePage` holds it while an
 edit is unsaved, a block is open, the source editor is open (#332), or a save
 is in flight, and `main.tsx`
