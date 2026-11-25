@@ -213,12 +213,6 @@ impl tower::Service<Request<Body>> for HatchdoorMcpTransport {
     }
 }
 
-async fn live_mcp_config(State(state): State<AppState>) -> Result<McpConfig, Response> {
-    let snapshot = state.runtime_snapshot();
-    AppState::runtime_mcp_config(&snapshot)
-        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error).into_response())
-}
-
 /// Per-request gate run before any body is collected or dispatched. This is
 /// the preserved security ordering from the hand-written adapter:
 /// enabled check → token configured → Origin allowlist → constant-time bearer
@@ -232,9 +226,9 @@ async fn authorize_mcp_transport(
 ) -> Response {
     let limiter = &limits.limiter;
     let (mut parts, body) = request.into_parts();
-    let config = match live_mcp_config(State(state)).await {
+    let config = match AppState::runtime_mcp_config(&state.runtime_snapshot()) {
         Ok(config) => config,
-        Err(response) => return response,
+        Err(error) => return (StatusCode::INTERNAL_SERVER_ERROR, error).into_response(),
     };
     if let Err(response) = validate_mcp_request(&parts.headers, &config) {
         return *response;
