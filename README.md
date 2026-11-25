@@ -465,6 +465,10 @@ Run the backend:
 cargo run
 ```
 
+The backend builds with the newest stable Rust: `rust-toolchain.toml` names
+the `stable` channel rather than a version, so run `rustup update stable` first
+when your copy is older.
+
 By default, local source runs bind to `127.0.0.1:42824` and start with no
 Vaults. Add one in Settings, or with `POST /api/v1/vaults`. For a ready-made
 set of development Vaults, use `just dev-start` instead (see `AGENTS.md`).
