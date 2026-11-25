@@ -244,9 +244,9 @@ pub struct RetiredCheckout {
 /// branch and folder afresh. `Ok(None)` when the Vault had no checkout yet.
 ///
 /// A failure to commit refuses: the checkout stays where it is and the
-/// caller must not save the change. A checkout that no longer validates
-/// against its receipt cannot be committed in, and is moved as it is, which
-/// loses nothing: every file goes with it.
+/// caller must not save the change. So does a checkout that no longer
+/// validates against its receipt, which cannot be committed in (#802): moving
+/// it uncommitted would report nothing left behind when its notes were.
 ///
 /// The Vault must be disabled, so no turn or write is using the checkout;
 /// the lease taken here refuses with `managed_git_checkout_busy` otherwise.
@@ -260,14 +260,12 @@ pub fn retire_managed_checkout(
 ) -> Result<Option<RetiredCheckout>, VaultWorkError> {
     let lease = ManagedCheckoutLease::acquire(state_directory.to_path_buf(), vault_id)
         .map_err(classify_checkout_error)?;
-    let recorded = match reuse_recorded_checkout(&lease, state_directory, vault_id) {
-        Ok(recorded) => recorded,
-        Err(ManagedCheckoutError::ValidationFailed) => {
-            warn!(%vault_id, "setting aside a managed checkout that does not validate, without committing in it");
-            None
-        }
-        Err(error) => return Err(classify_checkout_error(error)),
-    };
+    // A checkout that does not validate cannot be committed in, so it is
+    // refused like a failed commit rather than set aside with its notes
+    // uncommitted (#802). The way out is to move it by hand, which the
+    // troubleshooting guide describes.
+    let recorded = reuse_recorded_checkout(&lease, state_directory, vault_id)
+        .map_err(classify_checkout_error)?;
     let mut committed = false;
     let mut unpushed_commits = 0;
     if let Some((checkout, repository_url)) = recorded {
@@ -1101,9 +1099,9 @@ impl ManagedGitScheduler {
     }
 
     /// Drop this Vault's durable record, for a Vault leaving the collection
-    /// (see [`VaultRuntimeStateStore::forget`]). Distinct from
-    /// [`Self::deactivate`], which also runs when a Vault is merely disabled
-    /// and must keep its schedule.
+    /// (see [`VaultRuntimeStateStore::forget`]) or one whose repository,
+    /// branch or folder changed, whose next turn is then due at once (#802). Distinct from [`Self::deactivate`], which also
+    /// runs when a Vault is merely disabled and must keep its schedule.
     ///
     /// A failure is logged rather than propagated: pruning is housekeeping,
     /// and a disconnect that already succeeded must not be reported as failed
@@ -1113,7 +1111,7 @@ impl ManagedGitScheduler {
             return;
         };
         if let Err(message) = state.forget(vault_id) {
-            warn!(%vault_id, %message, "could not forget a disconnected Vault's remembered Git turn");
+            warn!(%vault_id, %message, "could not forget a Vault's remembered Git turn");
         }
     }
 
@@ -1821,6 +1819,50 @@ mod tests {
 
         assert_eq!(refused.code(), "managed_git_dirty_working_copy");
         assert!(repository.join("Outside.md").is_file(), "nothing moved");
+    }
+
+    /// A checkout that no longer validates against its receipt cannot be
+    /// committed in, so it is refused like one whose commit fails, instead
+    /// of being set aside uncommitted with a report that reads as "nothing
+    /// was left behind" (#802).
+    #[test]
+    fn retiring_a_checkout_that_does_not_validate_refuses_and_moves_nothing() {
+        let (_root, config) = fixture(VaultGitMode::TwoWay);
+        let vault_directory = config
+            .state_directory
+            .join("vaults")
+            .join(config.vault_id.to_string());
+        let repository = vault_directory.join("repository");
+        {
+            let lease =
+                ManagedCheckoutLease::acquire(config.state_directory.clone(), config.vault_id)
+                    .expect("lease");
+            run_managed_git_turn(&config, &lease, &WriteLedger::new()).expect("first clone");
+        }
+        std::fs::write(repository.join("vault/After.md"), "after\n").expect("pending note");
+        let checkout = Repository::open(&repository).expect("checkout");
+        let head = checkout.head().expect("HEAD").target().expect("commit");
+        checkout.set_head_detached(head).expect("detach HEAD");
+
+        let refused = retire_managed_checkout(
+            &config.state_directory,
+            config.vault_id,
+            VaultGitMode::TwoWay,
+            "Hatchdoor",
+            "hatchdoor@example.test",
+        )
+        .expect_err("a checkout that does not validate is refused");
+
+        assert_eq!(refused.code(), "managed_git_validation_failed");
+        assert!(!refused.retryable());
+        assert!(repository.join("vault/After.md").is_file(), "nothing moved");
+        assert!(
+            vault_directory
+                .join(".hatchdoor-managed-checkout.json")
+                .is_file(),
+            "the receipt stays with it"
+        );
+        assert!(!vault_directory.join("retired-checkouts").exists());
     }
 
     /// A managed Vault whose first clone has not landed has no Vault subtree

@@ -2650,7 +2650,12 @@ through `VaultRegistryStore::edit_prepared`: before the change is saved,
 moves it into the Vault's `retired-checkouts/` folder, so the next Git turn
 clones the new identity. A failure refuses the edit with
 `checkout_set_aside_failed` (HTTP `409`), its retryability taken from the Git
-error, and nothing is saved or moved. When the registry save itself fails
+error, and nothing is saved or moved; an old checkout that no longer
+validates is refused this way too, with a message naming the folder to move
+by hand (#802). Once any identity change is saved, the Vault's remembered
+Git turn is forgotten (`ManagedGitScheduler::forget_persisted_state`), so resuming the
+Vault clones at once and shows `pending` rather than the old remote's status;
+a refused or failed save keeps it. When the registry save itself fails
 after the checkout moved, `git::restore_retired_checkout` puts it back; a
 failure to do so is logged with the archive's place. Every set-aside is
 logged too, so the report survives a response that is lost. The response's optional
@@ -3277,8 +3282,9 @@ says the checkout was cloned from rather than the current definition, commits
 pending Vault drift in a Two-way checkout, counts the commits the remote
 branch lacks, and `set_aside_checkout` moves the checkout and its receipt
 into `vaults/<id>/retired-checkouts/<UTC timestamp>/`. A commit failure moves
-nothing. A checkout that no longer validates is moved without a commit, which
-keeps every file. Nothing deletes from `retired-checkouts/`, and
+nothing, and so does a checkout that no longer validates, which cannot be
+committed in: it is refused as `managed_git_validation_failed` (#802), and
+moving it by hand is the documented way out. Nothing deletes from `retired-checkouts/`, and
 `discard_interrupted_acquisition` never touches it. It returns
 `RetiredCheckout`, or `None` when no checkout exists yet. A move that fails is
 the non-retryable `ManagedCheckoutError::SetAsideFailed`
@@ -3465,7 +3471,8 @@ store failure is logged and dropped — the turn already happened, and
 forgetting it costs one extra turn after the next restart.
 `forget_persisted_state` prunes a Vault that has left the collection, called
 by the collection lifecycle for a disconnect (never for a disable, which
-keeps its schedule). `polling_clock(vault_id)` returns the
+keeps its schedule), and by Vault collection management once a Vault's
+identity change is saved (#802). `polling_clock(vault_id)` returns the
 `GitPollingClock { last_checked_at, next_attempt_at }` a status read
 renders, and `remembered_turn(vault_id)` returns the whole remembered record;
 both come from memory, so listing the collection never touches the file.
